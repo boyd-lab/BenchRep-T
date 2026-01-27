@@ -1,8 +1,8 @@
 """
-Evaluation script for Emerson 2017 CMV classification model.
+Evaluation script for Ostmeyer 2019 MIL-TCR classification model.
 
 This module provides cross-validation and parameter tuning functionality
-for evaluating the CMV_Immunosequencing_Model on disease classification tasks.
+for evaluating the MIL_TCR_Classifier on disease classification tasks.
 """
 
 import os
@@ -12,12 +12,12 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
-from models.emerson_2017 import CMV_Immunosequencing_Model
+from models.ostmeyer_2019 import MIL_TCR_Classifier
 
 
-class Emerson2017Evaluator:
+class Ostmeyer2019Evaluator:
     """
-    Evaluator for the Emerson 2017 CMV Immunosequencing Model.
+    Evaluator for the Ostmeyer 2019 MIL-TCR Classifier.
     
     Provides functionality for:
     - Loading metadata with fold assignments
@@ -29,17 +29,22 @@ class Emerson2017Evaluator:
     # Constants for label values
     HEALTHY_LABEL = "Healthy/Background"
     
-    def __init__(self, train_val_ratio=0.9, p_value_threshold=1e-4, sequence_col='cdr3_aa'):
+    def __init__(self, train_val_ratio=0.9, learning_rate=0.01, max_iter=100,
+                 reg_strength=0.01, sequence_col='cdr3_aa'):
         """
         Initialize the evaluator.
         
         Args:
             train_val_ratio: Ratio of training data in train/val split (default: 0.9, i.e., 9:1)
-            p_value_threshold: Initial p-value threshold for Fisher's exact test (default: 1e-4)
+            learning_rate: Learning rate for gradient descent (default: 0.01)
+            max_iter: Maximum iterations for optimization (default: 100)
+            reg_strength: L2 regularization strength (default: 0.01)
             sequence_col: Column name containing TCR sequences in repertoire files (default: 'cdr3_aa')
         """
         self.train_val_ratio = train_val_ratio
-        self.p_value_threshold = p_value_threshold
+        self.learning_rate = learning_rate
+        self.max_iter = max_iter
+        self.reg_strength = reg_strength
         self.sequence_col = sequence_col
         self.model = None
     
@@ -173,111 +178,131 @@ class Emerson2017Evaluator:
         return filtered_metadata
 
     def tune_and_train(self, train_files, train_labels, val_files, val_labels,
-                       p_value_candidates=None):
+                       reg_candidates=None, max_iter_candidates=None):
         """
-        Tune p_value_threshold using validation set, then train with optimal threshold.
-        
-        Uses optimized caching:
-        1. Preloads all repertoire files once
-        2. Computes TCR statistics (counts + p-values) once
-        3. For each p-value threshold, just filters the precomputed p-values
+        Tune hyperparameters using validation set, then train with optimal parameters.
         
         Args:
             train_files: List of training file paths
             train_labels: List of training labels
             val_files: List of validation file paths
             val_labels: List of validation labels
-            p_value_candidates: List of p-value thresholds to try 
-                               (default: [1e-2, 1e-3, 1e-4, 1e-5, 1e-6])
+            reg_candidates: List of regularization strengths to try 
+                           (default: [0.001, 0.01, 0.1])
+            max_iter_candidates: List of max iterations to try
+                                (default: [50, 100, 200])
         
         Returns:
             Dictionary with tuning results and best parameters
         """
-        if p_value_candidates is None:
-            p_value_candidates = [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
+        if reg_candidates is None:
+            reg_candidates = [0.001, 0.01, 0.1]
+        if max_iter_candidates is None:
+            max_iter_candidates = [100]  # Keep iteration fixed for speed
         
         print("--- Parameter Tuning ---")
-        print(f"Testing p-value thresholds: {p_value_candidates}")
+        print(f"Testing regularization strengths: {reg_candidates}")
+        print(f"Testing max iterations: {max_iter_candidates}")
         
-        # Create a base model instance for preloading and caching
-        base_model = CMV_Immunosequencing_Model(p_value_threshold=p_value_candidates[0], sequence_col=self.sequence_col)
+        # Create a base model for preloading repertoires
+        base_model = MIL_TCR_Classifier(
+            learning_rate=self.learning_rate,
+            max_iter=max_iter_candidates[0],
+            reg_strength=reg_candidates[0],
+            sequence_col=self.sequence_col
+        )
         
-        # Step 1: Preload all repertoire files once (train + val)
+        # Preload all repertoire files once
         all_files = list(train_files) + list(val_files)
         base_model.preload_repertoires(all_files)
         
-        # Step 2: Compute TCR statistics once (counts + p-values for all TCRs)
-        base_model.compute_tcr_statistics(train_files, train_labels)
+        # Pre-extract features for all files (expensive but one-time)
+        print("Pre-extracting features for all samples...")
+        for file_path in tqdm(all_files, desc="Extracting features"):
+            base_model.extract_4mer_features(file_path, use_cache=True)
         
         tuning_results = []
         
-        # Step 3: For each p-value, just filter the cached statistics (very fast)
-        print("\n--- Evaluating p-value thresholds ---")
-        for p_val in p_value_candidates:
-            # Create new model sharing all caches
-            model = CMV_Immunosequencing_Model(p_value_threshold=p_val, sequence_col=self.sequence_col)
-            model._repertoire_cache = base_model._repertoire_cache
-            model._tcr_stats_cache = base_model._tcr_stats_cache
-            
-            # Select diagnostic TCRs by filtering cached p-values (instant)
-            model.select_diagnostic_tcrs_from_cache(p_val)
-            
-            # Skip if no diagnostic TCRs found
-            if len(model.diagnostic_tcrs) == 0:
-                print(f"  p={p_val:.0e}: No diagnostic TCRs found, skipping...")
+        print("\n--- Evaluating hyperparameter combinations ---")
+        for reg in reg_candidates:
+            for max_iter in max_iter_candidates:
+                # Create model with current hyperparameters, sharing caches
+                model = MIL_TCR_Classifier(
+                    learning_rate=self.learning_rate,
+                    max_iter=max_iter,
+                    reg_strength=reg,
+                    sequence_col=self.sequence_col
+                )
+                model._repertoire_cache = base_model._repertoire_cache
+                model._features_cache = base_model._features_cache
+                
+                # Train on training set
+                try:
+                    train_result = model.train(train_files, train_labels)
+                except Exception as e:
+                    print(f"  reg={reg}, max_iter={max_iter}: Training failed: {e}")
+                    tuning_results.append({
+                        'reg_strength': reg,
+                        'max_iter': max_iter,
+                        'val_auroc': 0.0,
+                        'val_aupr': 0.0,
+                        'train_loss': float('inf')
+                    })
+                    continue
+                
+                # Evaluate on validation set
+                val_probs = []
+                for file_path in val_files:
+                    result = model.predict_diagnosis(file_path)
+                    val_probs.append(result['probability_positive'])
+                
+                val_probs = np.array(val_probs)
+                val_labels_arr = np.array(val_labels)
+                
+                # Compute AUROC and AUPR
+                try:
+                    val_auroc = roc_auc_score(val_labels_arr, val_probs)
+                    val_aupr = average_precision_score(val_labels_arr, val_probs)
+                except Exception:
+                    val_auroc = 0.5
+                    val_aupr = 0.5
+                
                 tuning_results.append({
-                    'p_value_threshold': p_val,
-                    'n_diagnostic_tcrs': 0,
-                    'val_auroc': 0.0,
-                    'val_aupr': 0.0
+                    'reg_strength': reg,
+                    'max_iter': max_iter,
+                    'val_auroc': val_auroc,
+                    'val_aupr': val_aupr,
+                    'train_loss': train_result['final_loss']
                 })
-                continue
-            
-            # Train Beta-Binomial model (uses cached repertoires)
-            model.train_beta_binomial_model(train_files, train_labels)
-            
-            # Evaluate on validation set (uses cached repertoires)
-            val_probs = []
-            for file_path in val_files:
-                result = model.predict_diagnosis(file_path)
-                val_probs.append(result['probability_positive'])
-            
-            val_probs = np.array(val_probs)
-            val_labels_arr = np.array(val_labels)
-            
-            # Compute AUROC and AUPR
-            val_auroc = roc_auc_score(val_labels_arr, val_probs)
-            val_aupr = average_precision_score(val_labels_arr, val_probs)
-            
-            tuning_results.append({
-                'p_value_threshold': p_val,
-                'n_diagnostic_tcrs': len(model.diagnostic_tcrs),
-                'val_auroc': val_auroc,
-                'val_aupr': val_aupr
-            })
-            
-            print(f"  p={p_val:.0e}: {len(model.diagnostic_tcrs)} TCRs, Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}")
+                
+                print(f"  reg={reg}, max_iter={max_iter}: "
+                      f"Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}")
         
-        # Find best threshold (using AUROC as primary metric)
+        # Find best parameters (using AUROC as primary metric)
         best_result = max(tuning_results, key=lambda x: x['val_auroc'])
-        best_p_value = best_result['p_value_threshold']
+        best_reg = best_result['reg_strength']
+        best_max_iter = best_result['max_iter']
         
-        print(f"\nBest p-value threshold: {best_p_value:.0e} "
+        print(f"\nBest parameters: reg={best_reg}, max_iter={best_max_iter} "
               f"(Val AUROC={best_result['val_auroc']:.4f}, Val AUPR={best_result['val_aupr']:.4f})")
         
-        # Final model with best threshold (reuses all caches)
-        self.model = CMV_Immunosequencing_Model(p_value_threshold=best_p_value, sequence_col=self.sequence_col)
+        # Final model with best parameters (reuses caches)
+        self.model = MIL_TCR_Classifier(
+            learning_rate=self.learning_rate,
+            max_iter=best_max_iter,
+            reg_strength=best_reg,
+            sequence_col=self.sequence_col
+        )
         self.model._repertoire_cache = base_model._repertoire_cache
-        self.model._tcr_stats_cache = base_model._tcr_stats_cache
-        self.model.select_diagnostic_tcrs_from_cache(best_p_value)
-        self.model.train_beta_binomial_model(train_files, train_labels)
+        self.model._features_cache = base_model._features_cache
+        self.model.train(train_files, train_labels)
         
         return {
             'tuning_results': tuning_results,
-            'best_p_value_threshold': best_p_value,
+            'best_reg_strength': best_reg,
+            'best_max_iter': best_max_iter,
             'best_val_auroc': best_result['val_auroc'],
-            'best_val_aupr': best_result['val_aupr'],
-            'best_n_diagnostic_tcrs': len(self.model.diagnostic_tcrs)
+            'best_val_aupr': best_result['val_aupr']
         }
     
     def run_cross_validation(self, metadata_path, target_disease, data_dir,
@@ -286,7 +311,8 @@ class Emerson2017Evaluator:
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set', 
                               n_folds=3, random_state=42,
-                              tune_parameters=True, p_value_candidates=None):
+                              tune_parameters=True, reg_candidates=None,
+                              max_iter_candidates=None):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
         
@@ -302,9 +328,11 @@ class Emerson2017Evaluator:
                      (default: 'malid_cross_validation_fold_id_when_in_test_set')
             n_folds: Number of folds (default: 3)
             random_state: Random seed for train/val split reproducibility
-            tune_parameters: Whether to tune p_value_threshold using validation set (default: True)
-            p_value_candidates: List of p-value thresholds to try during tuning
-                               (default: [1e-2, 1e-3, 1e-4, 1e-5, 1e-6])
+            tune_parameters: Whether to tune hyperparameters using validation set (default: True)
+            reg_candidates: List of regularization strengths to try during tuning
+                           (default: [0.001, 0.01, 0.1])
+            max_iter_candidates: List of max iterations to try during tuning
+                                (default: [100])
         
         Returns:
             Dictionary containing results for each fold and overall metrics
@@ -350,7 +378,7 @@ class Emerson2017Evaluator:
             
             print(f"Train: {len(train_data)}, Validation: {len(val_data)}, Test: {len(test_data)}")
             
-            # Extract file paths and labels (using constructed 'file_path' and binary 'label' columns)
+            # Extract file paths and labels
             train_files = train_data['file_path'].tolist()
             train_labels = train_data['label'].tolist()
             
@@ -362,20 +390,26 @@ class Emerson2017Evaluator:
             
             # Train with or without parameter tuning
             if tune_parameters:
-                # Use validation set to tune p_value_threshold
+                # Use validation set to tune hyperparameters
                 tuning_result = self.tune_and_train(
                     train_files, train_labels,
                     val_files, val_labels,
-                    p_value_candidates=p_value_candidates
+                    reg_candidates=reg_candidates,
+                    max_iter_candidates=max_iter_candidates
                 )
-                best_p_value = tuning_result['best_p_value_threshold']
+                best_reg = tuning_result['best_reg_strength']
+                best_max_iter = tuning_result['best_max_iter']
                 val_auroc = tuning_result['best_val_auroc']
                 val_aupr = tuning_result['best_val_aupr']
             else:
-                # Train without tuning (use initial p_value_threshold)
-                self.model = CMV_Immunosequencing_Model(p_value_threshold=self.p_value_threshold, sequence_col=self.sequence_col)
-                self.model.identify_diagnostic_tcrs(train_files, train_labels)
-                self.model.train_beta_binomial_model(train_files, train_labels)
+                # Train without tuning (use initial hyperparameters)
+                self.model = MIL_TCR_Classifier(
+                    learning_rate=self.learning_rate,
+                    max_iter=self.max_iter,
+                    reg_strength=self.reg_strength,
+                    sequence_col=self.sequence_col
+                )
+                self.model.train(train_files, train_labels)
                 
                 # Evaluate on validation set
                 val_probs = []
@@ -386,7 +420,8 @@ class Emerson2017Evaluator:
                 val_labels_arr = np.array(val_labels)
                 val_auroc = roc_auc_score(val_labels_arr, val_probs)
                 val_aupr = average_precision_score(val_labels_arr, val_probs)
-                best_p_value = self.p_value_threshold
+                best_reg = self.reg_strength
+                best_max_iter = self.max_iter
                 tuning_result = None
             
             print(f"\nFinal Validation AUROC: {val_auroc:.4f}, AUPR: {val_aupr:.4f}")
@@ -411,8 +446,8 @@ class Emerson2017Evaluator:
                 'n_train': len(train_data),
                 'n_val': len(val_data),
                 'n_test': len(test_data),
-                'n_diagnostic_tcrs': len(self.model.diagnostic_tcrs),
-                'best_p_value_threshold': best_p_value,
+                'best_reg_strength': best_reg,
+                'best_max_iter': best_max_iter,
                 'val_auroc': val_auroc,
                 'val_aupr': val_aupr,
                 'test_auroc': test_auroc,
@@ -426,6 +461,9 @@ class Emerson2017Evaluator:
             # Accumulate for overall metrics
             results['all_probs'].extend(test_probs.tolist())
             results['all_labels'].extend(test_labels)
+            
+            # Clear cache between folds to save memory
+            self.model.clear_cache()
         
         # Calculate overall metrics across all folds
         all_probs = np.array(results['all_probs'])
@@ -447,9 +485,9 @@ class Emerson2017Evaluator:
         print(f"Overall AUPR (all folds combined):  {overall_aupr:.4f}")
         
         if tune_parameters:
-            print(f"\nBest p-value thresholds per fold:")
+            print(f"\nBest hyperparameters per fold:")
             for r in results['fold_results']:
-                print(f"  Fold {r['fold']}: {r['best_p_value_threshold']:.0e}")
+                print(f"  Fold {r['fold']}: reg={r['best_reg_strength']}, max_iter={r['best_max_iter']}")
         
         return results
 
@@ -459,14 +497,14 @@ class Emerson2017Evaluator:
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Emerson 2017 Disease Classification Evaluation")
+    parser = argparse.ArgumentParser(description="Ostmeyer 2019 Disease Classification Evaluation")
     parser.add_argument('--metadata_path', type=str, required=True,
                         help='Path to metadata.tsv file')
     parser.add_argument('--repertoire_data_dir', type=str, required=True,
                         help='Root directory containing repertoire data files')
     args = parser.parse_args()
     
-    print("Emerson 2017 Disease Classification Evaluation")
+    print("Ostmeyer 2019 Disease Classification Evaluation")
     print("=" * 60)
     print("\nTo run evaluation, ensure you have:")
     print("  1. Repertoire .tsv.gz files with a 'cdr3_aa' column (configurable)")
@@ -479,7 +517,13 @@ if __name__ == "__main__":
     print("\nBinary labels are created automatically based on the target disease.")
     
     # Initialize evaluator with custom train/val ratio (default is 0.9 for 9:1 split)
-    evaluator = Emerson2017Evaluator(train_val_ratio=0.9, p_value_threshold=1e-4, sequence_col='cdr3_aa')
+    evaluator = Ostmeyer2019Evaluator(
+        train_val_ratio=0.9,
+        learning_rate=0.01,
+        max_iter=100,
+        reg_strength=0.01,
+        sequence_col='cdr3_aa'
+    )
     metadata_path = args.metadata_path
     repertoire_data_dir = args.repertoire_data_dir
     RANDOM_SEED = 7
@@ -501,7 +545,8 @@ if __name__ == "__main__":
         n_folds=3,
         random_state=RANDOM_SEED,
         tune_parameters=True,
-        p_value_candidates=[1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
+        reg_candidates=[0.001, 0.01, 0.1],
+        max_iter_candidates=[100]
     )
     print(f"\nOverall AUROC: {results['overall_auroc']:.4f}")
     print(f"Overall AUPR: {results['overall_aupr']:.4f}")
