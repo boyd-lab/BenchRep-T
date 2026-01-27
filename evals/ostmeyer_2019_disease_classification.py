@@ -502,6 +502,8 @@ if __name__ == "__main__":
                         help='Path to metadata.tsv file')
     parser.add_argument('--repertoire_data_dir', type=str, required=True,
                         help='Root directory containing repertoire data files')
+    parser.add_argument('--target_disease', type=str, required=True,
+                        help='Target disease to classify (e.g., Lupus, T1D, HIV)')
     args = parser.parse_args()
     
     print("Ostmeyer 2019 Disease Classification Evaluation")
@@ -535,7 +537,7 @@ if __name__ == "__main__":
     # Run 3-fold cross-validation for a specific disease WITH parameter tuning
     results = evaluator.run_cross_validation(
         metadata_path=metadata_path,
-        target_disease='Lupus',
+        target_disease=args.target_disease,
         data_dir=repertoire_data_dir,  # Root directory with data files
         participant_col='participant_label',
         file_prefix='part_table_',
