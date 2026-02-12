@@ -30,22 +30,27 @@ class Ostmeyer2019Evaluator:
     HEALTHY_LABEL = "Healthy/Background"
     
     def __init__(self, train_val_ratio=0.9, learning_rate=0.01, max_iter=100,
-                 reg_strength=0.01, sequence_col='cdr3_aa'):
+                 reg_strength=0.01, sequence_col='cdr3_aa',
+                 subsample_fraction=1.0, subsample_seed=7):
         """
         Initialize the evaluator.
-        
+
         Args:
             train_val_ratio: Ratio of training data in train/val split (default: 0.9, i.e., 9:1)
             learning_rate: Learning rate for gradient descent (default: 0.01)
             max_iter: Maximum iterations for optimization (default: 100)
             reg_strength: L2 regularization strength (default: 0.01)
             sequence_col: Column name containing TCR sequences in repertoire files (default: 'cdr3_aa')
+            subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
+            subsample_seed: Random seed for reproducible subsampling (default: 42)
         """
         self.train_val_ratio = train_val_ratio
         self.learning_rate = learning_rate
         self.max_iter = max_iter
         self.reg_strength = reg_strength
         self.sequence_col = sequence_col
+        self.subsample_fraction = subsample_fraction
+        self.subsample_seed = subsample_seed
         self.model = None
     
     def load_metadata(self, metadata_path):
@@ -209,7 +214,9 @@ class Ostmeyer2019Evaluator:
             learning_rate=self.learning_rate,
             max_iter=max_iter_candidates[0],
             reg_strength=reg_candidates[0],
-            sequence_col=self.sequence_col
+            sequence_col=self.sequence_col,
+            subsample_fraction=self.subsample_fraction,
+            subsample_seed=self.subsample_seed
         )
         
         # Preload all repertoire files once
@@ -231,7 +238,9 @@ class Ostmeyer2019Evaluator:
                     learning_rate=self.learning_rate,
                     max_iter=max_iter,
                     reg_strength=reg,
-                    sequence_col=self.sequence_col
+                    sequence_col=self.sequence_col,
+                    subsample_fraction=self.subsample_fraction,
+                    subsample_seed=self.subsample_seed
                 )
                 model._repertoire_cache = base_model._repertoire_cache
                 model._features_cache = base_model._features_cache
@@ -291,7 +300,9 @@ class Ostmeyer2019Evaluator:
             learning_rate=self.learning_rate,
             max_iter=best_max_iter,
             reg_strength=best_reg,
-            sequence_col=self.sequence_col
+            sequence_col=self.sequence_col,
+            subsample_fraction=self.subsample_fraction,
+            subsample_seed=self.subsample_seed
         )
         self.model._repertoire_cache = base_model._repertoire_cache
         self.model._features_cache = base_model._features_cache
@@ -310,7 +321,7 @@ class Ostmeyer2019Evaluator:
                               file_prefix='part_table_', file_suffix='.tsv.gz',
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set', 
-                              n_folds=3, random_state=42,
+                              n_folds=3, random_state=7,
                               tune_parameters=True, reg_candidates=None,
                               max_iter_candidates=None):
         """
@@ -407,7 +418,9 @@ class Ostmeyer2019Evaluator:
                     learning_rate=self.learning_rate,
                     max_iter=self.max_iter,
                     reg_strength=self.reg_strength,
-                    sequence_col=self.sequence_col
+                    sequence_col=self.sequence_col,
+                    subsample_fraction=self.subsample_fraction,
+                    subsample_seed=self.subsample_seed
                 )
                 self.model.train(train_files, train_labels)
                 

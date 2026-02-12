@@ -55,23 +55,28 @@ class MIL_TCR_Classifier:
     on 4-mer motifs encoded using Atchley factors to classify disease status.
     """
     
-    def __init__(self, learning_rate=0.01, max_iter=100, reg_strength=0.01, 
-                 sequence_col='cdr3_aa', min_cdr3_length=10):
+    def __init__(self, learning_rate=0.01, max_iter=100, reg_strength=0.01,
+                 sequence_col='cdr3_aa', min_cdr3_length=10,
+                 subsample_fraction=1.0, subsample_seed=7):
         """
         Initialize the model.
-        
+
         Args:
             learning_rate: Learning rate for gradient descent (default: 0.01)
             max_iter: Maximum iterations for optimization (default: 100)
             reg_strength: L2 regularization strength (default: 0.01)
             sequence_col: Column name containing TCR sequences (default: 'cdr3_aa')
             min_cdr3_length: Minimum CDR3 length to include (default: 10)
+            subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
+            subsample_seed: Random seed for reproducible subsampling (default: 42)
         """
         self.learning_rate = learning_rate
         self.max_iter = max_iter
         self.reg_strength = reg_strength
         self.sequence_col = sequence_col
         self.min_cdr3_length = min_cdr3_length
+        self.subsample_fraction = subsample_fraction
+        self.subsample_seed = subsample_seed
         
         self.atchley = ATCHLEY_FACTORS
         
@@ -101,7 +106,10 @@ class MIL_TCR_Classifier:
             df = pd.read_csv(file_path, sep='\t')
             if self.sequence_col not in df.columns:
                 raise ValueError(f"Column '{self.sequence_col}' not found in {file_path}")
-            
+            # Subsample rows to simulate reduced sequencing depth
+            if self.subsample_fraction < 1.0:
+                df = df.sample(frac=self.subsample_fraction, random_state=self.subsample_seed)
+
             if use_cache:
                 self._repertoire_cache[file_path] = df
             

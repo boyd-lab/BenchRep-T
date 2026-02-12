@@ -27,17 +27,22 @@ class CMV_Immunosequencing_Model:
     and uses a Beta-Binomial generative model for classification.
     """
     
-    def __init__(self, p_value_threshold=1e-4, sequence_col='cdr3_aa'):
+    def __init__(self, p_value_threshold=1e-4, sequence_col='cdr3_aa',
+                 subsample_fraction=1.0, subsample_seed=7):
         """
         Initialize the model with a p-value threshold for feature selection.
         Paper uses 1e-4 as optimized via cross-validation[cite: 52].
-        
+
         Args:
             p_value_threshold: P-value cutoff for Fisher's exact test (default: 1e-4)
             sequence_col: Column name containing TCR sequences (default: 'cdr3_aa')
+            subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
+            subsample_seed: Random seed for reproducible subsampling (default: 42)
         """
         self.p_value_threshold = p_value_threshold
         self.sequence_col = sequence_col
+        self.subsample_fraction = subsample_fraction
+        self.subsample_seed = subsample_seed
         self.diagnostic_tcrs = set()
         self.model_params = {}  # Will store alphas, betas, and priors
         self._repertoire_cache = {}  # Cache for loaded repertoire data
@@ -62,6 +67,9 @@ class CMV_Immunosequencing_Model:
             df = pd.read_csv(file_path, sep='\t')
             if self.sequence_col not in df.columns:
                 raise ValueError(f"Column '{self.sequence_col}' not found in {file_path}")
+            # Subsample rows to simulate reduced sequencing depth
+            if self.subsample_fraction < 1.0:
+                df = df.sample(frac=self.subsample_fraction, random_state=self.subsample_seed)
             # Return unique sequences as a set
             sequences = set(df[self.sequence_col].dropna().unique())
             
