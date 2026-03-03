@@ -6,6 +6,9 @@ def __getattr__(name):
     if name == 'GIANA_Classifier':
         from .giana_2020 import GIANA_Classifier
         return GIANA_Classifier
+    if name == 'Gapped_4mer_VJgene':
+        from .ml_baseline import Gapped_4mer_VJgene
+        return Gapped_4mer_VJgene
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-__all__ = ['CMV_Immunosequencing_Model', 'GIANA_Classifier']
+__all__ = ['CMV_Immunosequencing_Model', 'GIANA_Classifier', 'Gapped_4mer_VJgene']

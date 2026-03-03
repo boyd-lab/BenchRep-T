@@ -9,6 +9,10 @@ def __getattr__(name):
     if name == 'DemographicFeaturesEvaluator':
         from .demographic_features_disease_classification import DemographicFeaturesEvaluator
         return DemographicFeaturesEvaluator
+    if name == 'MLBaselineEvaluator':
+        from .ml_baseline_disease_classification import MLBaselineEvaluator
+        return MLBaselineEvaluator
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-__all__ = ['Emerson2017Evaluator', 'GIANA2020Evaluator', 'DemographicFeaturesEvaluator']
+__all__ = ['Emerson2017Evaluator', 'GIANA2020Evaluator', 'DemographicFeaturesEvaluator',
+           'MLBaselineEvaluator']
