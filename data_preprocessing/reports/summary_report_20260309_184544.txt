@@ -1,0 +1,88 @@
+
+======================================================================
+TCR DATA CLEANUP — PREPROCESSING REPORT
+======================================================================
+Generated : 20260309_184544
+Input dir : /Users/lielcl/Library/CloudStorage/Dropbox/PyCharm/Mal-ID/data/internal_format/TCR
+Output dir: /Users/lielcl/Library/CloudStorage/Dropbox/PyCharm/Mal-ID/data_clean/internal_format_clean/TCR
+Reference : /Users/lielcl/Library/CloudStorage/Dropbox/PyCharm/Mal-ID/data/tcrb_v_gene_cdrs.generated.tsv  (145 V gene entries)
+
+======================================================================
+OVERALL SUMMARY
+======================================================================
+Participants processed : 542
+Files with errors      : 0
+Files empty/all-removed: 0
+Total sequences (input): 91,711,135
+Total sequences (output): 88,613,606
+Total sequences dropped : 3,097,529  (3.4%)
+
+======================================================================
+PER-STEP BREAKDOWN
+======================================================================
+
+Step 1 — Remove non-productive sequences (productive != 't')
+------------------------------------------------------------
+  Rows removed: 2,386,188
+
+Step 2 — Remove low V-score sequences (v_score <= 80)
+-----------------------------------------------------
+  Rows removed: 674,159
+
+Step 3 — Clean AA sequences (remove spaces, uppercase)
+------------------------------------------------------
+  Spaces stripped from cdr3_seq_aa_q, post_seq_aa_q, and fr3_seq_aa_q (IgBLAST inserts spaces between residues).
+  Dots/dashes are NOT removed here — they surface as non-standard characters in step 5.
+
+Step 4 — Remove sequences with empty/NaN CDR3, V gene, or J gene
+----------------------------------------------------------------
+  Missing values per field (before dropping):
+    cdr3_seq_aa_q: 348 rows with missing value
+    j_segment: 0 rows with missing value
+    v_segment: 0 rows with missing value
+  Total rows dropped: 348
+
+Step 5 — Remove sequences with non-standard AA characters in CDR3
+-----------------------------------------------------------------
+  Non-standard characters found (rows containing each char):
+    '*' (stop codon): 36,575 rows
+  Total rows removed: 36,575
+
+Step 6 — Rename indistinguishable V genes (prefix match -> *01)
+---------------------------------------------------------------
+    TRBV12-4*02->TRBV12-3*01: 18,845 rows
+
+Step 7 — Fix specific alleles (exact match)
+-------------------------------------------
+    TRBV6-2*02->TRBV6-2*01: 140,303 rows
+
+Step 8 — Remove sequences with V gene = TRBV25/OR9-2*01 (pseudogene, no reference data)
+---------------------------------------------------------------------------------------
+    TRBV25/OR9-2*01: 259 rows removed
+  Total rows removed: 259
+
+Step 9 — Add sequence_id column (run_label + '|' + trimmed_read_id)
+-------------------------------------------------------------------
+  sequence_id added in 542/542 participant files.
+
+Step 10 — Overwrite all FR/CDR AA columns from reference (fr1/cdr1/fr2/cdr2/fr3)
+--------------------------------------------------------------------------------
+  All five columns always overwritten with reference sequence per V gene.
+  Rows overwritten per column:
+    cdr1_seq_aa_q: 88,613,606 rows
+    cdr2_seq_aa_q: 88,613,606 rows
+    fr1_seq_aa_q: 88,584,630 rows
+    fr2_seq_aa_q: 88,613,606 rows
+    fr3_seq_aa_q: 88,613,606 rows
+  All V genes found in reference. No missing FR/CDR fills.
+  V genes in reference but missing value for specific column (partial reference miss):
+    fr1_seq_aa_q: 28,976 rows NOT overwritten (reference value is NaN for this column)
+
+Step 11 — Check missing CDR1/CDR2 AA sequences after reference fill
+-------------------------------------------------------------------
+  Missing values indicate V genes not found in the reference (see step 10 reference misses).
+    All CDR1/CDR2 sequences filled. No missing values.
+
+======================================================================
+END OF REPORT
+======================================================================
