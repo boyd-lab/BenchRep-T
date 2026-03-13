@@ -13,7 +13,7 @@ Reads bz2-compressed cleaned internal format files from `data_clean/internal_for
 | | Path |
 |---|---|
 | Input | `data_clean/internal_format_clean/TCR/part_table_<participant>.bz2` |
-| Output | `data_clean/airr_format_clean/TCR/part_table_<participant>.bz2` |
+| Output | `data_clean/airr_format_clean/TCR/part_table_<participant>.tsv.gz` |
 | Log | `scripts/reports/airr_conversion_log_<timestamp>.txt` |
 
 ## Prerequisites
@@ -94,7 +94,7 @@ Columns are reordered into three groups:
 After reordering, the script verifies that every column in the DataFrame is accounted for in `final_order` and vice versa. Raises `ValueError` if any column is missing or unexpected.
 
 ### 6. Write Output
-Each file is written as a bz2-compressed TSV with the same filename as the input (`part_table_<participant>.bz2`). Total columns per output file: **121** (113 original + 8 added).
+Each file is written as a gzip-compressed TSV named `part_table_<participant>.tsv.gz`. Total columns per output file: **121** (113 original + 8 added).
 
 ### 7. Post-Run Checkup
 After processing all files, verifies that every expected output file was created. Logs an error and exits with code 1 if any are missing.
@@ -103,7 +103,7 @@ After processing all files, verifies that every expected output file was created
 
 - **All 113 original internal format columns are preserved**, with 31 of them renamed to AIRR names.
 - 8 empty AIRR-only columns are added.
-- Output is bz2-compressed TSV. Decompress with `bz2.open()` or `bzip2 -d` before passing to strict AIRR schema validators.
+- Output is gzip-compressed TSV (`.tsv.gz`). Decompress with `gzip.open()` or `gunzip` before passing to strict AIRR schema validators. pandas reads `.tsv.gz` files directly via `pd.read_csv(path, sep="\t")`.
 - Boolean fields (`productive`, `stop_codon`, `vj_in_frame`) are stored as `'t'`/`'f'` (lowercase), matching the internal format convention and the original Mal-ID code. However, the official AIRR schema specifies `'T'`/`'F'` (uppercase). 
 Convert if strict schema compliance is required:
 

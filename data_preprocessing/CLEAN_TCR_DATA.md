@@ -29,7 +29,7 @@ Drop rows where `v_score <= 80`.
 Strips spaces from the following columns (IgBLAST outputs AA sequences with spaces between each residue, e.g. `" A  S  S  P ..."` → `"ASSPP..."`):
 - `cdr3_seq_aa_q`
 - `post_seq_aa_q`
-- `fr3_seq_aa_q` (also cleaned here even though step 9 will overwrite it, to keep input consistent)
+- `fr3_seq_aa_q` (also cleaned here even though step 10 will overwrite it, to keep input consistent)
 
 Dots and dashes are **not** removed here — they are left to surface as non-standard characters in step 5, where they are counted and reported before the rows are dropped.
 
@@ -140,13 +140,13 @@ After processing all files, the script writes three output files to `scripts/rep
 
 ## Converting to AIRR Format
 
-The cleaned internal format files can be converted to AIRR TSV format using the existing conversion script:
+The cleaned internal format files can be converted to AIRR TSV format using:
 
 ```
-data/Maxim-malid-release-202408/scripts/convert_part_table_to_airr_format.py
+scripts/clean_tcr_data_to_airr.py
 ```
 
-When doing so, three things need to be applied: column renaming, adding empty AIRR-only columns, and optionally fixing boolean value casing.
+See `scripts/CLEAN_TCR_DATA_TO_AIRR.md` for full documentation. When doing so, three things are applied: column renaming, adding empty AIRR-only columns, and optionally fixing boolean value casing.
 
 ### 1. Column renaming
 

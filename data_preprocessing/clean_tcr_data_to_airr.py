@@ -4,8 +4,8 @@ Convert cleaned TCR internal format files to AIRR TSV format.
 
 Reads bz2-compressed cleaned internal format files from
 data_clean/internal_format_clean/TCR/, renames columns to AIRR names,
-adds required empty AIRR-only columns, and writes bz2-compressed AIRR TSV
-files to data_clean/airr_format_clean/TCR/.
+adds required empty AIRR-only columns, and writes gzip-compressed AIRR TSV
+files (.tsv.gz) to data_clean/airr_format_clean/TCR/.
 
 All original columns are preserved. No data filtering or value transformation
 is performed. This is a purely structural conversion:
@@ -21,7 +21,7 @@ is performed. This is a purely structural conversion:
      (EXTRA_INTERNAL_COLUMNS order).
   5. Validate that the final column set matches expectations (raises ValueError
      if any column is missing or unexpected).
-  6. Write as bz2-compressed TSV. Total columns: 113 original + 8 added = 121.
+  6. Write as gzip-compressed TSV (.tsv.gz). Total columns: 113 original + 8 added = 121.
   7. Post-run checkup: verify all expected output files were created.
 
 Prerequisites:
@@ -37,6 +37,7 @@ Paths are hardcoded relative to this script's grandparent directory
 """
 
 import bz2
+import gzip
 import logging
 import sys
 from datetime import datetime
@@ -249,7 +250,7 @@ def main():
 
     for idx, input_path in enumerate(input_files, 1):
         participant_label = input_path.stem.replace("part_table_", "")
-        output_path = OUTPUT_DIR / input_path.name
+        output_path = OUTPUT_DIR / (input_path.stem + ".tsv.gz")
 
         if idx % 50 == 0 or idx == 1:
             logger.info(f"[{idx}/{len(input_files)}] {participant_label}")
@@ -260,7 +261,7 @@ def main():
 
             df_airr = convert_participant_df(df)
 
-            with bz2.open(output_path, "wt") as f:
+            with gzip.open(output_path, "wt") as f:
                 df_airr.to_csv(f, sep="\t", index=False)
 
             logger.info(f"  {len(df_airr):,} sequences -> {output_path.name}")
@@ -275,8 +276,8 @@ def main():
     # ------------------------------------------------------------------
     logger.info("\nPost-run checkup: verifying output files...")
     missing_outputs = [
-        f.name for f in input_files
-        if not (OUTPUT_DIR / f.name).exists()
+        f.stem + ".tsv.gz" for f in input_files
+        if not (OUTPUT_DIR / (f.stem + ".tsv.gz")).exists()
     ]
     if missing_outputs:
         logger.error(f"  MISSING {len(missing_outputs)}/{len(input_files)} output files:")
