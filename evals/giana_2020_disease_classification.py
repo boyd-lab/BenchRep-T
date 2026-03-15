@@ -31,7 +31,7 @@ class GIANA2020Evaluator:
 
     def __init__(self, train_val_ratio=0.9, iso_threshold=7,
                  p_value_threshold=1e-4, sequence_col='cdr3_aa',
-                 giana_dir=None, subsample_fraction=1.0, subsample_seed=7):
+                 giana_dir=None, subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
         """
         Initialize the evaluator.
 
@@ -43,6 +43,7 @@ class GIANA2020Evaluator:
             giana_dir: Path to GIANA installation directory (default: auto-detect)
             subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
             subsample_seed: Random seed for reproducible subsampling (default: 42)
+            subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
         """
         self.train_val_ratio = train_val_ratio
         self.iso_threshold = iso_threshold
@@ -51,6 +52,7 @@ class GIANA2020Evaluator:
         self.giana_dir = giana_dir or '/users/chihoim/software/GIANA'
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
+        self.subsample_n = subsample_n
         self.model = None
 
     def load_metadata(self, metadata_path):
@@ -213,7 +215,8 @@ class GIANA2020Evaluator:
             sequence_col=self.sequence_col,
             giana_dir=self.giana_dir,
             subsample_fraction=self.subsample_fraction,
-            subsample_seed=self.subsample_seed
+            subsample_seed=self.subsample_seed,
+            subsample_n=self.subsample_n
         )
         all_files = list(train_files) + list(val_files)
         base_model.preload_repertoires(all_files)
@@ -301,7 +304,8 @@ class GIANA2020Evaluator:
             sequence_col=self.sequence_col,
             giana_dir=self.giana_dir,
             subsample_fraction=self.subsample_fraction,
-            subsample_seed=self.subsample_seed
+            subsample_seed=self.subsample_seed,
+            subsample_n=self.subsample_n
         )
         self.model._repertoire_cache = base_model._repertoire_cache
         self.model.compute_cluster_statistics(train_files, train_labels)
@@ -325,7 +329,8 @@ class GIANA2020Evaluator:
                               n_folds=3, random_state=7,
                               tune_parameters=True,
                               iso_threshold_candidates=None,
-                              p_value_candidates=None):
+                              p_value_candidates=None,
+                              allowed_participants=None):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -359,12 +364,17 @@ class GIANA2020Evaluator:
         # Filter to only include files that exist
         metadata = self.filter_existing_files(metadata)
 
-        results = {
-            'target_disease': target_disease,
-            'fold_results': [],
-            'all_probs': [],
-            'all_labels': []
-        }
+        # Filter to allowed participants if specified (e.g., for min-sequence-count filtering)
+        if allowed_participants is not None:
+            before = len(metadata)
+            metadata = metadata[metadata[participant_col].isin(allowed_participants)]
+            print(f"Filtered to {len(metadata)} of {before} participants "
+                  f"based on allowed_participants set.")
+
+        all_test_rows = []
+        all_probs = []
+        all_labels = []
+        fold_results = []
 
         for test_fold in range(n_folds):
             print(f"\n{'='*60}")
@@ -456,58 +466,58 @@ class GIANA2020Evaluator:
             test_aupr = average_precision_score(test_labels_arr, test_probs)
             print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
 
-            # Store fold results
-            fold_result = {
+            # Build per-sample rows for output DataFrame
+            for (_, row), score in zip(test_data.iterrows(), test_probs):
+                all_test_rows.append({
+                    'participant_label': row[participant_col],
+                    'specimen_label': row['specimen_label'],
+                    'disease': row[disease_col],
+                    'method': 'GIANA_2020',
+                    'disease_model': target_disease,
+                    'disease_label': int(row['label']),
+                    'model_score': float(score),
+                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                })
+
+            fold_results.append({
                 'fold': test_fold,
-                'n_train': len(train_data),
-                'n_val': len(val_data),
-                'n_test': len(test_data),
-                'n_diagnostic_clusters': len(self.model.diagnostic_clusters),
                 'best_iso_threshold': best_iso,
                 'best_p_value_threshold': best_p_value,
                 'val_auroc': val_auroc,
                 'val_aupr': val_aupr,
                 'test_auroc': test_auroc,
                 'test_aupr': test_aupr,
-                'test_probs': test_probs.tolist(),
-                'test_labels': test_labels,
-                'tuning_result': tuning_result
-            }
-            results['fold_results'].append(fold_result)
+            })
 
-            # Accumulate for overall metrics
-            results['all_probs'].extend(test_probs.tolist())
-            results['all_labels'].extend(test_labels)
+            all_probs.extend(test_probs.tolist())
+            all_labels.extend(test_labels)
 
             # Clear caches between folds to manage memory
             self.model.clear_cache()
 
         # Calculate overall metrics across all folds
-        all_probs = np.array(results['all_probs'])
-        all_labels = np.array(results['all_labels'])
-        overall_auroc = roc_auc_score(all_labels, all_probs)
-        overall_aupr = average_precision_score(all_labels, all_probs)
-
-        results['overall_auroc'] = overall_auroc
-        results['overall_aupr'] = overall_aupr
+        all_probs_arr = np.array(all_probs)
+        all_labels_arr = np.array(all_labels)
+        overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
+        overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
 
         print(f"\n{'='*60}")
         print(f"OVERALL CROSS-VALIDATION RESULTS: {target_disease} vs Healthy")
         print(f"{'='*60}")
-        print(f"Mean Test AUROC: {np.mean([r['test_auroc'] for r in results['fold_results']]):.4f} "
-              f"± {np.std([r['test_auroc'] for r in results['fold_results']]):.4f}")
-        print(f"Mean Test AUPR:  {np.mean([r['test_aupr'] for r in results['fold_results']]):.4f} "
-              f"± {np.std([r['test_aupr'] for r in results['fold_results']]):.4f}")
+        print(f"Mean Test AUROC: {np.mean([r['test_auroc'] for r in fold_results]):.4f} "
+              f"± {np.std([r['test_auroc'] for r in fold_results]):.4f}")
+        print(f"Mean Test AUPR:  {np.mean([r['test_aupr'] for r in fold_results]):.4f} "
+              f"± {np.std([r['test_aupr'] for r in fold_results]):.4f}")
         print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
         print(f"Overall AUPR (all folds combined):  {overall_aupr:.4f}")
 
         if tune_parameters:
             print(f"\nBest parameters per fold:")
-            for r in results['fold_results']:
+            for r in fold_results:
                 print(f"  Fold {r['fold']}: iso_threshold={r['best_iso_threshold']}, "
                       f"p_value={r['best_p_value_threshold']:.0e}")
 
-        return results
+        return pd.DataFrame(all_test_rows)
 
 
 # --- Usage Example ---
@@ -526,6 +536,8 @@ if __name__ == "__main__":
                         help='Target disease to classify (e.g., Lupus, T1D, HIV)')
     parser.add_argument('--giana_dir', type=str, default=None,
                         help='Path to GIANA installation directory')
+    parser.add_argument('--output_csv', type=str, default=None,
+                        help='Path to save per-sample scores CSV')
     args = parser.parse_args()
 
     print("GIANA 2020 Disease Classification Evaluation")
@@ -557,7 +569,7 @@ if __name__ == "__main__":
     print(f"Available diseases: {diseases}")
 
     # Run 3-fold cross-validation with parameter tuning
-    results = evaluator.run_cross_validation(
+    scores_df = evaluator.run_cross_validation(
         metadata_path=metadata_path,
         target_disease=args.target_disease,
         data_dir=repertoire_data_dir,
@@ -572,5 +584,6 @@ if __name__ == "__main__":
         iso_threshold_candidates=[5, 6, 7, 8, 9],
         p_value_candidates=[1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
     )
-    print(f"\nOverall AUROC: {results['overall_auroc']:.4f}")
-    print(f"Overall AUPR: {results['overall_aupr']:.4f}")
+    if args.output_csv:
+        scores_df.to_csv(args.output_csv, index=False)
+        print(f"\nScores saved to: {args.output_csv}")

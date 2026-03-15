@@ -29,28 +29,32 @@ class Ostmeyer2019Evaluator:
     # Constants for label values
     HEALTHY_LABEL = "Healthy/Background"
     
-    def __init__(self, train_val_ratio=0.9, learning_rate=0.01, max_iter=100,
-                 reg_strength=0.01, sequence_col='cdr3_aa',
-                 subsample_fraction=1.0, subsample_seed=7):
+    def __init__(self, train_val_ratio=0.9, n_restarts=100, max_iter=2500,
+                 abundance_method='A', sequence_col='cdr3_aa',
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
         """
         Initialize the evaluator.
 
         Args:
             train_val_ratio: Ratio of training data in train/val split (default: 0.9, i.e., 9:1)
-            learning_rate: Learning rate for gradient descent (default: 0.01)
-            max_iter: Maximum iterations for optimization (default: 100)
-            reg_strength: L2 regularization strength (default: 0.01)
+            n_restarts: Number of random restarts for optimization (default: 100).
+                        Paper uses 100,000-375,000; fewer restarts trade quality for speed.
+            max_iter: Maximum L-BFGS-B iterations per restart (default: 2500)
+            abundance_method: 'A' for 4-mer relative abundance or 'B' for TCRb relative
+                              abundance (default: 'A')
             sequence_col: Column name containing TCR sequences in repertoire files (default: 'cdr3_aa')
             subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
-            subsample_seed: Random seed for reproducible subsampling (default: 42)
+            subsample_seed: Random seed for reproducible subsampling (default: 7)
+            subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
         """
         self.train_val_ratio = train_val_ratio
-        self.learning_rate = learning_rate
+        self.n_restarts = n_restarts
         self.max_iter = max_iter
-        self.reg_strength = reg_strength
+        self.abundance_method = abundance_method
         self.sequence_col = sequence_col
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
+        self.subsample_n = subsample_n
         self.model = None
     
     def load_metadata(self, metadata_path):
@@ -183,135 +187,115 @@ class Ostmeyer2019Evaluator:
         return filtered_metadata
 
     def tune_and_train(self, train_files, train_labels, val_files, val_labels,
-                       reg_candidates=None, max_iter_candidates=None):
+                       abundance_method_candidates=None):
         """
-        Tune hyperparameters using validation set, then train with optimal parameters.
-        
+        Optionally tune abundance_method using validation set, then train.
+
+        The paper does not tune hyperparameters in the traditional sense — it
+        selects the best model across random restarts by training loss. The only
+        meaningful choice left is abundance_method ('A' vs 'B'). If
+        abundance_method_candidates is provided, both are evaluated on the
+        validation set and the better one is used.
+
         Args:
             train_files: List of training file paths
             train_labels: List of training labels
             val_files: List of validation file paths
             val_labels: List of validation labels
-            reg_candidates: List of regularization strengths to try 
-                           (default: [0.001, 0.01, 0.1])
-            max_iter_candidates: List of max iterations to try
-                                (default: [50, 100, 200])
-        
+            abundance_method_candidates: List of abundance methods to try,
+                                         e.g. ['A', 'B']. If None, uses
+                                         self.abundance_method directly without
+                                         tuning.
+
         Returns:
             Dictionary with tuning results and best parameters
         """
-        if reg_candidates is None:
-            reg_candidates = [0.001, 0.01, 0.1]
-        if max_iter_candidates is None:
-            max_iter_candidates = [100]  # Keep iteration fixed for speed
-        
+        if abundance_method_candidates is None:
+            abundance_method_candidates = [self.abundance_method]
+
         print("--- Parameter Tuning ---")
-        print(f"Testing regularization strengths: {reg_candidates}")
-        print(f"Testing max iterations: {max_iter_candidates}")
-        
-        # Create a base model for preloading repertoires
-        base_model = MIL_TCR_Classifier(
-            learning_rate=self.learning_rate,
-            max_iter=max_iter_candidates[0],
-            reg_strength=reg_candidates[0],
-            sequence_col=self.sequence_col,
-            subsample_fraction=self.subsample_fraction,
-            subsample_seed=self.subsample_seed
-        )
-        
-        # Preload all repertoire files once
+        print(f"Testing abundance methods: {abundance_method_candidates}")
+
         all_files = list(train_files) + list(val_files)
-        base_model.preload_repertoires(all_files)
-        
-        # Pre-extract features for all files (expensive but one-time)
-        print("Pre-extracting features for all samples...")
-        for file_path in tqdm(all_files, desc="Extracting features"):
-            base_model.extract_4mer_features(file_path, use_cache=True)
-        
+
         tuning_results = []
-        
-        print("\n--- Evaluating hyperparameter combinations ---")
-        for reg in reg_candidates:
-            for max_iter in max_iter_candidates:
-                # Create model with current hyperparameters, sharing caches
-                model = MIL_TCR_Classifier(
-                    learning_rate=self.learning_rate,
-                    max_iter=max_iter,
-                    reg_strength=reg,
-                    sequence_col=self.sequence_col,
-                    subsample_fraction=self.subsample_fraction,
-                    subsample_seed=self.subsample_seed
-                )
-                model._repertoire_cache = base_model._repertoire_cache
-                model._features_cache = base_model._features_cache
-                
-                # Train on training set
-                try:
-                    train_result = model.train(train_files, train_labels)
-                except Exception as e:
-                    print(f"  reg={reg}, max_iter={max_iter}: Training failed: {e}")
-                    tuning_results.append({
-                        'reg_strength': reg,
-                        'max_iter': max_iter,
-                        'val_auroc': 0.0,
-                        'val_aupr': 0.0,
-                        'train_loss': float('inf')
-                    })
-                    continue
-                
-                # Evaluate on validation set
-                val_probs = []
-                for file_path in val_files:
-                    result = model.predict_diagnosis(file_path)
-                    val_probs.append(result['probability_positive'])
-                
-                val_probs = np.array(val_probs)
-                val_labels_arr = np.array(val_labels)
-                
-                # Compute AUROC and AUPR
-                try:
-                    val_auroc = roc_auc_score(val_labels_arr, val_probs)
-                    val_aupr = average_precision_score(val_labels_arr, val_probs)
-                except Exception:
-                    val_auroc = 0.5
-                    val_aupr = 0.5
-                
+
+        print("\n--- Evaluating abundance methods ---")
+        for method in abundance_method_candidates:
+            model = MIL_TCR_Classifier(
+                n_restarts=self.n_restarts,
+                max_iter=self.max_iter,
+                abundance_method=method,
+                sequence_col=self.sequence_col,
+                subsample_fraction=self.subsample_fraction,
+                subsample_seed=self.subsample_seed
+            )
+
+            # Preload and pre-extract features once per method
+            model.preload_repertoires(all_files)
+            for file_path in tqdm(all_files, desc=f"Extracting features (method={method})"):
+                model.extract_4mer_features(file_path, use_cache=True)
+
+            try:
+                train_result = model.train(train_files, train_labels)
+            except Exception as e:
+                print(f"  method={method}: Training failed: {e}")
                 tuning_results.append({
-                    'reg_strength': reg,
-                    'max_iter': max_iter,
-                    'val_auroc': val_auroc,
-                    'val_aupr': val_aupr,
-                    'train_loss': train_result['final_loss']
+                    'abundance_method': method,
+                    'val_auroc': 0.0,
+                    'val_aupr': 0.0,
+                    'best_loss': float('inf')
                 })
-                
-                print(f"  reg={reg}, max_iter={max_iter}: "
-                      f"Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}")
-        
-        # Find best parameters (using AUROC as primary metric)
+                continue
+
+            val_probs = []
+            for file_path in val_files:
+                result = model.predict_diagnosis(file_path)
+                val_probs.append(result['probability_positive'])
+
+            val_probs = np.array(val_probs)
+            val_labels_arr = np.array(val_labels)
+
+            try:
+                val_auroc = roc_auc_score(val_labels_arr, val_probs)
+                val_aupr = average_precision_score(val_labels_arr, val_probs)
+            except Exception:
+                val_auroc = 0.5
+                val_aupr = 0.5
+
+            tuning_results.append({
+                'abundance_method': method,
+                'val_auroc': val_auroc,
+                'val_aupr': val_aupr,
+                'best_loss': train_result['best_loss']
+            })
+
+            print(f"  method={method}: Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}")
+
         best_result = max(tuning_results, key=lambda x: x['val_auroc'])
-        best_reg = best_result['reg_strength']
-        best_max_iter = best_result['max_iter']
-        
-        print(f"\nBest parameters: reg={best_reg}, max_iter={best_max_iter} "
+        best_method = best_result['abundance_method']
+
+        print(f"\nBest abundance method: {best_method} "
               f"(Val AUROC={best_result['val_auroc']:.4f}, Val AUPR={best_result['val_aupr']:.4f})")
-        
-        # Final model with best parameters (reuses caches)
+
+        # Final model with best method
         self.model = MIL_TCR_Classifier(
-            learning_rate=self.learning_rate,
-            max_iter=best_max_iter,
-            reg_strength=best_reg,
+            n_restarts=self.n_restarts,
+            max_iter=self.max_iter,
+            abundance_method=best_method,
             sequence_col=self.sequence_col,
             subsample_fraction=self.subsample_fraction,
-            subsample_seed=self.subsample_seed
+            subsample_seed=self.subsample_seed,
+            subsample_n=self.subsample_n
         )
-        self.model._repertoire_cache = base_model._repertoire_cache
-        self.model._features_cache = base_model._features_cache
+        self.model.preload_repertoires(all_files)
+        for file_path in tqdm(all_files, desc="Extracting features (final model)"):
+            self.model.extract_4mer_features(file_path, use_cache=True)
         self.model.train(train_files, train_labels)
-        
+
         return {
             'tuning_results': tuning_results,
-            'best_reg_strength': best_reg,
-            'best_max_iter': best_max_iter,
+            'best_abundance_method': best_method,
             'best_val_auroc': best_result['val_auroc'],
             'best_val_aupr': best_result['val_aupr']
         }
@@ -320,13 +304,14 @@ class Ostmeyer2019Evaluator:
                               participant_col='participant_label',
                               file_prefix='part_table_', file_suffix='.tsv.gz',
                               disease_col='disease',
-                              fold_col='malid_cross_validation_fold_id_when_in_test_set', 
+                              fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7,
-                              tune_parameters=True, reg_candidates=None,
-                              max_iter_candidates=None):
+                              tune_parameters=True,
+                              abundance_method_candidates=None,
+                              allowed_participants=None):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
-        
+
         Args:
             metadata_path: Path to metadata.tsv file
             target_disease: Name of the disease to classify (e.g., 'Lupus', 'T1D', 'HIV')
@@ -335,16 +320,15 @@ class Ostmeyer2019Evaluator:
             file_prefix: Prefix for file names (default: 'part_table_')
             file_suffix: Suffix for file names (default: '.tsv.gz')
             disease_col: Column name containing disease labels (default: 'disease')
-            fold_col: Column name containing fold assignments 
+            fold_col: Column name containing fold assignments
                      (default: 'malid_cross_validation_fold_id_when_in_test_set')
             n_folds: Number of folds (default: 3)
             random_state: Random seed for train/val split reproducibility
-            tune_parameters: Whether to tune hyperparameters using validation set (default: True)
-            reg_candidates: List of regularization strengths to try during tuning
-                           (default: [0.001, 0.01, 0.1])
-            max_iter_candidates: List of max iterations to try during tuning
-                                (default: [100])
-        
+            tune_parameters: Whether to tune abundance_method using validation set
+                             (default: True)
+            abundance_method_candidates: List of abundance methods to try during tuning,
+                                         e.g. ['A', 'B']. If None, uses ['A', 'B'].
+
         Returns:
             Dictionary containing results for each fold and overall metrics
         """
@@ -359,26 +343,31 @@ class Ostmeyer2019Evaluator:
         
         # Filter to only include files that exist
         metadata = self.filter_existing_files(metadata)
-        
-        results = {
-            'target_disease': target_disease,
-            'fold_results': [],
-            'all_probs': [],
-            'all_labels': []
-        }
-        
+
+        # Filter to allowed participants if specified (e.g., for min-sequence-count filtering)
+        if allowed_participants is not None:
+            before = len(metadata)
+            metadata = metadata[metadata[participant_col].isin(allowed_participants)]
+            print(f"Filtered to {len(metadata)} of {before} participants "
+                  f"based on allowed_participants set.")
+
+        all_test_rows = []
+        all_probs = []
+        all_labels = []
+        fold_results = []
+
         for test_fold in range(n_folds):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
-            
+
             # Split data by fold
             test_mask = metadata[fold_col] == test_fold
             train_val_mask = ~test_mask
-            
+
             test_data = metadata[test_mask]
             train_val_data = metadata[train_val_mask]
-            
+
             # Further split train_val into train and validation
             train_data, val_data = train_test_split(
                 train_val_data,
@@ -386,44 +375,42 @@ class Ostmeyer2019Evaluator:
                 random_state=random_state,
                 stratify=train_val_data['label']  # Use binary label column
             )
-            
+
             print(f"Train: {len(train_data)}, Validation: {len(val_data)}, Test: {len(test_data)}")
-            
+
             # Extract file paths and labels
             train_files = train_data['file_path'].tolist()
             train_labels = train_data['label'].tolist()
-            
+
             val_files = val_data['file_path'].tolist()
             val_labels = val_data['label'].tolist()
-            
+
             test_files = test_data['file_path'].tolist()
             test_labels = test_data['label'].tolist()
-            
+
             # Train with or without parameter tuning
             if tune_parameters:
-                # Use validation set to tune hyperparameters
+                # Use validation set to tune abundance_method
                 tuning_result = self.tune_and_train(
                     train_files, train_labels,
                     val_files, val_labels,
-                    reg_candidates=reg_candidates,
-                    max_iter_candidates=max_iter_candidates
+                    abundance_method_candidates=abundance_method_candidates
                 )
-                best_reg = tuning_result['best_reg_strength']
-                best_max_iter = tuning_result['best_max_iter']
+                best_method = tuning_result['best_abundance_method']
                 val_auroc = tuning_result['best_val_auroc']
                 val_aupr = tuning_result['best_val_aupr']
             else:
-                # Train without tuning (use initial hyperparameters)
+                # Train without tuning (use self.abundance_method directly)
                 self.model = MIL_TCR_Classifier(
-                    learning_rate=self.learning_rate,
+                    n_restarts=self.n_restarts,
                     max_iter=self.max_iter,
-                    reg_strength=self.reg_strength,
+                    abundance_method=self.abundance_method,
                     sequence_col=self.sequence_col,
                     subsample_fraction=self.subsample_fraction,
                     subsample_seed=self.subsample_seed
                 )
                 self.model.train(train_files, train_labels)
-                
+
                 # Evaluate on validation set
                 val_probs = []
                 for file_path in tqdm(val_files, desc="Validating", leave=False):
@@ -433,76 +420,75 @@ class Ostmeyer2019Evaluator:
                 val_labels_arr = np.array(val_labels)
                 val_auroc = roc_auc_score(val_labels_arr, val_probs)
                 val_aupr = average_precision_score(val_labels_arr, val_probs)
-                best_reg = self.reg_strength
-                best_max_iter = self.max_iter
+                best_method = self.abundance_method
                 tuning_result = None
-            
+
             print(f"\nFinal Validation AUROC: {val_auroc:.4f}, AUPR: {val_aupr:.4f}")
-            
+
             # Evaluate on test set
             test_probs = []
             for file_path in tqdm(test_files, desc="Testing"):
                 result = self.model.predict_diagnosis(file_path)
                 test_probs.append(result['probability_positive'])
-            
+
             test_probs = np.array(test_probs)
             test_labels_arr = np.array(test_labels)
-            
+
             # Compute AUROC and AUPR for test set
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
             print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
-            
-            # Store fold results
-            fold_result = {
+
+            # Build per-sample rows for output DataFrame
+            for (_, row), score in zip(test_data.iterrows(), test_probs):
+                all_test_rows.append({
+                    'participant_label': row[participant_col],
+                    'specimen_label': row['specimen_label'],
+                    'disease': row[disease_col],
+                    'method': 'Ostmeyer_2019',
+                    'disease_model': target_disease,
+                    'disease_label': int(row['label']),
+                    'model_score': float(score),
+                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                })
+
+            fold_results.append({
                 'fold': test_fold,
-                'n_train': len(train_data),
-                'n_val': len(val_data),
-                'n_test': len(test_data),
-                'best_reg_strength': best_reg,
-                'best_max_iter': best_max_iter,
+                'best_abundance_method': best_method,
                 'val_auroc': val_auroc,
                 'val_aupr': val_aupr,
                 'test_auroc': test_auroc,
                 'test_aupr': test_aupr,
-                'test_probs': test_probs.tolist(),
-                'test_labels': test_labels,
-                'tuning_result': tuning_result
-            }
-            results['fold_results'].append(fold_result)
-            
-            # Accumulate for overall metrics
-            results['all_probs'].extend(test_probs.tolist())
-            results['all_labels'].extend(test_labels)
-            
+            })
+
+            all_probs.extend(test_probs.tolist())
+            all_labels.extend(test_labels)
+
             # Clear cache between folds to save memory
             self.model.clear_cache()
-        
+
         # Calculate overall metrics across all folds
-        all_probs = np.array(results['all_probs'])
-        all_labels = np.array(results['all_labels'])
-        overall_auroc = roc_auc_score(all_labels, all_probs)
-        overall_aupr = average_precision_score(all_labels, all_probs)
-        
-        results['overall_auroc'] = overall_auroc
-        results['overall_aupr'] = overall_aupr
-        
+        all_probs_arr = np.array(all_probs)
+        all_labels_arr = np.array(all_labels)
+        overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
+        overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
+
         print(f"\n{'='*60}")
         print(f"OVERALL CROSS-VALIDATION RESULTS: {target_disease} vs Healthy")
         print(f"{'='*60}")
-        print(f"Mean Test AUROC: {np.mean([r['test_auroc'] for r in results['fold_results']]):.4f} "
-              f"± {np.std([r['test_auroc'] for r in results['fold_results']]):.4f}")
-        print(f"Mean Test AUPR:  {np.mean([r['test_aupr'] for r in results['fold_results']]):.4f} "
-              f"± {np.std([r['test_aupr'] for r in results['fold_results']]):.4f}")
+        print(f"Mean Test AUROC: {np.mean([r['test_auroc'] for r in fold_results]):.4f} "
+              f"± {np.std([r['test_auroc'] for r in fold_results]):.4f}")
+        print(f"Mean Test AUPR:  {np.mean([r['test_aupr'] for r in fold_results]):.4f} "
+              f"± {np.std([r['test_aupr'] for r in fold_results]):.4f}")
         print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
         print(f"Overall AUPR (all folds combined):  {overall_aupr:.4f}")
-        
+
         if tune_parameters:
-            print(f"\nBest hyperparameters per fold:")
-            for r in results['fold_results']:
-                print(f"  Fold {r['fold']}: reg={r['best_reg_strength']}, max_iter={r['best_max_iter']}")
-        
-        return results
+            print(f"\nBest abundance method per fold:")
+            for r in fold_results:
+                print(f"  Fold {r['fold']}: abundance_method={r['best_abundance_method']}")
+
+        return pd.DataFrame(all_test_rows)
 
 
 # --- Usage Example ---
@@ -517,6 +503,8 @@ if __name__ == "__main__":
                         help='Root directory containing repertoire data files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Target disease to classify (e.g., Lupus, T1D, HIV)')
+    parser.add_argument('--output_csv', type=str, default=None,
+                        help='Path to save per-sample scores CSV')
     args = parser.parse_args()
     
     print("Ostmeyer 2019 Disease Classification Evaluation")
@@ -534,9 +522,9 @@ if __name__ == "__main__":
     # Initialize evaluator with custom train/val ratio (default is 0.9 for 9:1 split)
     evaluator = Ostmeyer2019Evaluator(
         train_val_ratio=0.9,
-        learning_rate=0.01,
-        max_iter=100,
-        reg_strength=0.01,
+        n_restarts=100,
+        max_iter=2500,
+        abundance_method='A',
         sequence_col='cdr3_aa'
     )
     metadata_path = args.metadata_path
@@ -548,7 +536,7 @@ if __name__ == "__main__":
     print(f"Available diseases: {diseases}")
     
     # Run 3-fold cross-validation for a specific disease WITH parameter tuning
-    results = evaluator.run_cross_validation(
+    scores_df = evaluator.run_cross_validation(
         metadata_path=metadata_path,
         target_disease=args.target_disease,
         data_dir=repertoire_data_dir,  # Root directory with data files
@@ -560,11 +548,11 @@ if __name__ == "__main__":
         n_folds=3,
         random_state=RANDOM_SEED,
         tune_parameters=True,
-        reg_candidates=[0.001, 0.01, 0.1],
-        max_iter_candidates=[100]
+        abundance_method_candidates=['A', 'B']
     )
-    print(f"\nOverall AUROC: {results['overall_auroc']:.4f}")
-    print(f"Overall AUPR: {results['overall_aupr']:.4f}")
+    if args.output_csv:
+        scores_df.to_csv(args.output_csv, index=False)
+        print(f"\nScores saved to: {args.output_csv}")
     
     # Run 3-fold cross-validation WITHOUT parameter tuning
     # results = evaluator.run_cross_validation(

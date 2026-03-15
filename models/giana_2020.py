@@ -70,7 +70,7 @@ class GIANA_Classifier:
     def __init__(self, iso_threshold=7, p_value_threshold=1e-4,
                  sequence_col='cdr3_aa',
                  giana_dir='/users/chihoim/software/GIANA',
-                 subsample_fraction=1.0, subsample_seed=7):
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
         """
         Initialize the GIANA classifier.
 
@@ -81,6 +81,7 @@ class GIANA_Classifier:
             giana_dir: Path to GIANA installation directory
             subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
             subsample_seed: Random seed for reproducible subsampling (default: 42)
+            subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
         """
         self.iso_threshold = iso_threshold
         self.p_value_threshold = p_value_threshold
@@ -88,6 +89,7 @@ class GIANA_Classifier:
         self.giana_dir = giana_dir
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
+        self.subsample_n = subsample_n
 
         # Load GIANA functions
         giana = _get_giana(giana_dir)
@@ -129,7 +131,9 @@ class GIANA_Classifier:
             if self.sequence_col not in df.columns:
                 raise ValueError(f"Column '{self.sequence_col}' not found in {file_path}")
             # Subsample rows to simulate reduced sequencing depth
-            if self.subsample_fraction < 1.0:
+            if self.subsample_n is not None:
+                df = df.sample(n=min(self.subsample_n, len(df)), random_state=self.subsample_seed)
+            elif self.subsample_fraction < 1.0:
                 df = df.sample(frac=self.subsample_fraction, random_state=self.subsample_seed)
             sequences = set(df[self.sequence_col].dropna().unique())
 

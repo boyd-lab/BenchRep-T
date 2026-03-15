@@ -30,22 +30,29 @@ class Emerson2017Evaluator:
     HEALTHY_LABEL = "Healthy/Background"
     
     def __init__(self, train_val_ratio=0.9, p_value_threshold=1e-4, sequence_col='cdr3_aa',
-                 subsample_fraction=1.0, subsample_seed=7):
+                 v_col='v_call', j_col='j_call',
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
         """
         Initialize the evaluator.
 
         Args:
             train_val_ratio: Ratio of training data in train/val split (default: 0.9, i.e., 9:1)
             p_value_threshold: Initial p-value threshold for Fisher's exact test (default: 1e-4)
-            sequence_col: Column name containing TCR sequences in repertoire files (default: 'cdr3_aa')
+            sequence_col: Column name containing CDR3 amino acid sequences (default: 'cdr3_aa')
+            v_col: Column name containing V gene calls (default: 'v_call')
+            j_col: Column name containing J gene calls (default: 'j_call')
             subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
             subsample_seed: Random seed for reproducible subsampling (default: 42)
+            subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
         """
         self.train_val_ratio = train_val_ratio
         self.p_value_threshold = p_value_threshold
         self.sequence_col = sequence_col
+        self.v_col = v_col
+        self.j_col = j_col
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
+        self.subsample_n = subsample_n
         self.model = None
     
     def load_metadata(self, metadata_path):
@@ -207,7 +214,9 @@ class Emerson2017Evaluator:
         # Create a base model instance for preloading and caching
         base_model = CMV_Immunosequencing_Model(
             p_value_threshold=p_value_candidates[0], sequence_col=self.sequence_col,
-            subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed
+            v_col=self.v_col, j_col=self.j_col,
+            subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
+            subsample_n=self.subsample_n
         )
         
         # Step 1: Preload all repertoire files once (train + val)
@@ -225,6 +234,7 @@ class Emerson2017Evaluator:
             # Create new model sharing all caches
             model = CMV_Immunosequencing_Model(
                 p_value_threshold=p_val, sequence_col=self.sequence_col,
+                v_col=self.v_col, j_col=self.j_col,
                 subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed
             )
             model._repertoire_cache = base_model._repertoire_cache
@@ -279,7 +289,9 @@ class Emerson2017Evaluator:
         # Final model with best threshold (reuses all caches)
         self.model = CMV_Immunosequencing_Model(
             p_value_threshold=best_p_value, sequence_col=self.sequence_col,
-            subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed
+            v_col=self.v_col, j_col=self.j_col,
+            subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
+            subsample_n=self.subsample_n
         )
         self.model._repertoire_cache = base_model._repertoire_cache
         self.model._tcr_stats_cache = base_model._tcr_stats_cache
@@ -298,9 +310,10 @@ class Emerson2017Evaluator:
                               participant_col='participant_label',
                               file_prefix='part_table_', file_suffix='.tsv.gz',
                               disease_col='disease',
-                              fold_col='malid_cross_validation_fold_id_when_in_test_set', 
+                              fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7,
-                              tune_parameters=True, p_value_candidates=None):
+                              tune_parameters=True, p_value_candidates=None,
+                              allowed_participants=None):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
         
@@ -334,26 +347,31 @@ class Emerson2017Evaluator:
         
         # Filter to only include files that exist
         metadata = self.filter_existing_files(metadata)
-        
-        results = {
-            'target_disease': target_disease,
-            'fold_results': [],
-            'all_probs': [],
-            'all_labels': []
-        }
-        
+
+        # Filter to allowed participants if specified (e.g., for min-sequence-count filtering)
+        if allowed_participants is not None:
+            before = len(metadata)
+            metadata = metadata[metadata[participant_col].isin(allowed_participants)]
+            print(f"Filtered to {len(metadata)} of {before} participants "
+                  f"based on allowed_participants set.")
+
+        all_test_rows = []
+        all_probs = []
+        all_labels = []
+        fold_results = []
+
         for test_fold in range(n_folds):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
-            
+
             # Split data by fold
             test_mask = metadata[fold_col] == test_fold
             train_val_mask = ~test_mask
-            
+
             test_data = metadata[test_mask]
             train_val_data = metadata[train_val_mask]
-            
+
             # Further split train_val into train and validation
             train_data, val_data = train_test_split(
                 train_val_data,
@@ -361,19 +379,19 @@ class Emerson2017Evaluator:
                 random_state=random_state,
                 stratify=train_val_data['label']  # Use binary label column
             )
-            
+
             print(f"Train: {len(train_data)}, Validation: {len(val_data)}, Test: {len(test_data)}")
-            
+
             # Extract file paths and labels (using constructed 'file_path' and binary 'label' columns)
             train_files = train_data['file_path'].tolist()
             train_labels = train_data['label'].tolist()
-            
+
             val_files = val_data['file_path'].tolist()
             val_labels = val_data['label'].tolist()
-            
+
             test_files = test_data['file_path'].tolist()
             test_labels = test_data['label'].tolist()
-            
+
             # Train with or without parameter tuning
             if tune_parameters:
                 # Use validation set to tune p_value_threshold
@@ -389,11 +407,12 @@ class Emerson2017Evaluator:
                 # Train without tuning (use initial p_value_threshold)
                 self.model = CMV_Immunosequencing_Model(
                     p_value_threshold=self.p_value_threshold, sequence_col=self.sequence_col,
+                    v_col=self.v_col, j_col=self.j_col,
                     subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed
                 )
                 self.model.identify_diagnostic_tcrs(train_files, train_labels)
                 self.model.train_beta_binomial_model(train_files, train_labels)
-                
+
                 # Evaluate on validation set
                 val_probs = []
                 for file_path in tqdm(val_files, desc="Validating", leave=False):
@@ -405,70 +424,70 @@ class Emerson2017Evaluator:
                 val_aupr = average_precision_score(val_labels_arr, val_probs)
                 best_p_value = self.p_value_threshold
                 tuning_result = None
-            
+
             print(f"\nFinal Validation AUROC: {val_auroc:.4f}, AUPR: {val_aupr:.4f}")
-            
+
             # Evaluate on test set
             test_probs = []
             for file_path in tqdm(test_files, desc="Testing"):
                 result = self.model.predict_diagnosis(file_path)
                 test_probs.append(result['probability_positive'])
-            
+
             test_probs = np.array(test_probs)
             test_labels_arr = np.array(test_labels)
-            
+
             # Compute AUROC and AUPR for test set
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
             print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
-            
-            # Store fold results
-            fold_result = {
+
+            # Build per-sample rows for output DataFrame
+            for (_, row), score in zip(test_data.iterrows(), test_probs):
+                all_test_rows.append({
+                    'participant_label': row[participant_col],
+                    'specimen_label': row['specimen_label'],
+                    'disease': row[disease_col],
+                    'method': 'Emerson_2017',
+                    'disease_model': target_disease,
+                    'disease_label': int(row['label']),
+                    'model_score': float(score),
+                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                })
+
+            fold_results.append({
                 'fold': test_fold,
-                'n_train': len(train_data),
-                'n_val': len(val_data),
-                'n_test': len(test_data),
-                'n_diagnostic_tcrs': len(self.model.diagnostic_tcrs),
                 'best_p_value_threshold': best_p_value,
                 'val_auroc': val_auroc,
                 'val_aupr': val_aupr,
                 'test_auroc': test_auroc,
                 'test_aupr': test_aupr,
-                'test_probs': test_probs.tolist(),
-                'test_labels': test_labels,
-                'tuning_result': tuning_result
-            }
-            results['fold_results'].append(fold_result)
-            
-            # Accumulate for overall metrics
-            results['all_probs'].extend(test_probs.tolist())
-            results['all_labels'].extend(test_labels)
-        
+            })
+
+            all_probs.extend(test_probs.tolist())
+            all_labels.extend(test_labels)
+
         # Calculate overall metrics across all folds
-        all_probs = np.array(results['all_probs'])
-        all_labels = np.array(results['all_labels'])
-        overall_auroc = roc_auc_score(all_labels, all_probs)
-        overall_aupr = average_precision_score(all_labels, all_probs)
-        
-        results['overall_auroc'] = overall_auroc
-        results['overall_aupr'] = overall_aupr
-        
+        all_probs_arr = np.array(all_probs)
+        all_labels_arr = np.array(all_labels)
+        overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
+        overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
+
         print(f"\n{'='*60}")
         print(f"OVERALL CROSS-VALIDATION RESULTS: {target_disease} vs Healthy")
         print(f"{'='*60}")
-        print(f"Mean Test AUROC: {np.mean([r['test_auroc'] for r in results['fold_results']]):.4f} "
-              f"± {np.std([r['test_auroc'] for r in results['fold_results']]):.4f}")
-        print(f"Mean Test AUPR:  {np.mean([r['test_aupr'] for r in results['fold_results']]):.4f} "
-              f"± {np.std([r['test_aupr'] for r in results['fold_results']]):.4f}")
+        print(f"Mean Test AUROC: {np.mean([r['test_auroc'] for r in fold_results]):.4f} "
+              f"± {np.std([r['test_auroc'] for r in fold_results]):.4f}")
+        print(f"Mean Test AUPR:  {np.mean([r['test_aupr'] for r in fold_results]):.4f} "
+              f"± {np.std([r['test_aupr'] for r in fold_results]):.4f}")
         print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
         print(f"Overall AUPR (all folds combined):  {overall_aupr:.4f}")
-        
+
         if tune_parameters:
             print(f"\nBest p-value thresholds per fold:")
-            for r in results['fold_results']:
+            for r in fold_results:
                 print(f"  Fold {r['fold']}: {r['best_p_value_threshold']:.0e}")
-        
-        return results
+
+        return pd.DataFrame(all_test_rows)
 
 
 # --- Usage Example ---
@@ -483,6 +502,8 @@ if __name__ == "__main__":
                         help='Root directory containing repertoire data files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Target disease to classify (e.g., Lupus, T1D, HIV)')
+    parser.add_argument('--output_csv', type=str, default=None,
+                        help='Path to save per-sample scores CSV')
     args = parser.parse_args()
     
     print("Emerson 2017 Disease Classification Evaluation")
@@ -498,7 +519,8 @@ if __name__ == "__main__":
     print("\nBinary labels are created automatically based on the target disease.")
     
     # Initialize evaluator with custom train/val ratio (default is 0.9 for 9:1 split)
-    evaluator = Emerson2017Evaluator(train_val_ratio=0.9, p_value_threshold=1e-4, sequence_col='cdr3_aa')
+    evaluator = Emerson2017Evaluator(train_val_ratio=0.9, p_value_threshold=1e-4,
+                                     sequence_col='cdr3_aa', v_col='v_call', j_col='j_call')
     metadata_path = args.metadata_path
     repertoire_data_dir = args.repertoire_data_dir
     RANDOM_SEED = 7
@@ -508,7 +530,7 @@ if __name__ == "__main__":
     print(f"Available diseases: {diseases}")
     
     # Run 3-fold cross-validation for a specific disease WITH parameter tuning
-    results = evaluator.run_cross_validation(
+    scores_df = evaluator.run_cross_validation(
         metadata_path=metadata_path,
         target_disease=args.target_disease,
         data_dir=repertoire_data_dir,  # Root directory with data files
@@ -522,8 +544,9 @@ if __name__ == "__main__":
         tune_parameters=True,
         p_value_candidates=[1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
     )
-    print(f"\nOverall AUROC: {results['overall_auroc']:.4f}")
-    print(f"Overall AUPR: {results['overall_aupr']:.4f}")
+    if args.output_csv:
+        scores_df.to_csv(args.output_csv, index=False)
+        print(f"\nScores saved to: {args.output_csv}")
     
     # Run 3-fold cross-validation WITHOUT parameter tuning
     # results = evaluator.run_cross_validation(

@@ -28,21 +28,28 @@ class CMV_Immunosequencing_Model:
     """
     
     def __init__(self, p_value_threshold=1e-4, sequence_col='cdr3_aa',
-                 subsample_fraction=1.0, subsample_seed=7):
+                 v_col='v_call', j_col='j_call',
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
         """
         Initialize the model with a p-value threshold for feature selection.
         Paper uses 1e-4 as optimized via cross-validation[cite: 52].
 
         Args:
             p_value_threshold: P-value cutoff for Fisher's exact test (default: 1e-4)
-            sequence_col: Column name containing TCR sequences (default: 'cdr3_aa')
+            sequence_col: Column name containing CDR3 amino acid sequences (default: 'cdr3_aa')
+            v_col: Column name containing V gene calls (default: 'v_call')
+            j_col: Column name containing J gene calls (default: 'j_call')
             subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
             subsample_seed: Random seed for reproducible subsampling (default: 42)
+            subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
         """
         self.p_value_threshold = p_value_threshold
         self.sequence_col = sequence_col
+        self.v_col = v_col
+        self.j_col = j_col
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
+        self.subsample_n = subsample_n
         self.diagnostic_tcrs = set()
         self.model_params = {}  # Will store alphas, betas, and priors
         self._repertoire_cache = {}  # Cache for loaded repertoire data
@@ -65,13 +72,18 @@ class CMV_Immunosequencing_Model:
         
         try:
             df = pd.read_csv(file_path, sep='\t')
-            if self.sequence_col not in df.columns:
-                raise ValueError(f"Column '{self.sequence_col}' not found in {file_path}")
+            for col in [self.sequence_col, self.v_col, self.j_col]:
+                if col not in df.columns:
+                    raise ValueError(f"Column '{col}' not found in {file_path}")
             # Subsample rows to simulate reduced sequencing depth
-            if self.subsample_fraction < 1.0:
+            if self.subsample_n is not None:
+                df = df.sample(n=min(self.subsample_n, len(df)), random_state=self.subsample_seed)
+            elif self.subsample_fraction < 1.0:
                 df = df.sample(frac=self.subsample_fraction, random_state=self.subsample_seed)
-            # Return unique sequences as a set
-            sequences = set(df[self.sequence_col].dropna().unique())
+            # Return unique (v_call, cdr3_aa, j_call) tuples — matching the paper's definition
+            # of a unique TCRβ as a combination of V gene, CDR3 amino acid sequence, and J gene.
+            df = df[[self.v_col, self.sequence_col, self.j_col]].dropna()
+            sequences = set(zip(df[self.v_col], df[self.sequence_col], df[self.j_col]))
             
             # Cache the result
             if use_cache:
