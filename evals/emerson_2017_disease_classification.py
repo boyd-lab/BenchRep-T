@@ -446,10 +446,10 @@ class Emerson2017Evaluator:
                 all_test_rows.append({
                     'participant_label': row[participant_col],
                     'specimen_label': row['specimen_label'],
-                    'disease': row[disease_col],
+                    'disease_label': int(row['label']),
+                    'disease_label_str': row[disease_col],
                     'method': 'Emerson_2017',
                     'disease_model': target_disease,
-                    'disease_label': int(row['label']),
                     'model_score': float(score),
                     'malid_cross_validation_fold_id_when_in_test_set': test_fold,
                 })
