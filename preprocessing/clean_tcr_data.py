@@ -55,7 +55,7 @@ MAL_ID_ROOT = SCRIPT_DIR.parent.parent  # data_clean/scripts/ -> data_clean/ -> 
 INPUT_DIR = MAL_ID_ROOT / "data" / "internal_format" / "TCR"
 OUTPUT_DIR = MAL_ID_ROOT / "data_clean" / "internal_format_clean" / "TCR"
 GENE_REFERENCE_PATH = MAL_ID_ROOT / "data" / "tcrb_v_gene_cdrs.generated.tsv"
-REPORTS_DIR = SCRIPT_DIR / "reports"
+REPORTS_DIR = SCRIPT_DIR / "reports" / "clean_tcr_data"
 
 # ---------------------------------------------------------------------------
 # Constants
