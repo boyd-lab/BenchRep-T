@@ -13,9 +13,9 @@ Reads bz2-compressed TCR internal format files from `data/internal_format/TCR/`,
 | Input | `data/internal_format/TCR/part_table_<participant>.bz2` |
 | Output | `data_clean/internal_format_clean/TCR/part_table_<participant>.bz2` |
 | Gene reference | `data/tcrb_v_gene_cdrs.generated.tsv` |
-| Reports | `scripts/reports/preprocessing_report_<timestamp>.csv` |
-| | `scripts/reports/summary_report_<timestamp>.txt` |
-| | `scripts/reports/cleanup_log_<timestamp>.txt` |
+| Reports | `scripts/reports/clean_tcr_data/preprocessing_report_<timestamp>.csv` |
+| | `scripts/reports/clean_tcr_data/summary_report_<timestamp>.txt` |
+| | `scripts/reports/clean_tcr_data/cleanup_log_<timestamp>.txt` |
 
 ## Cleanup Steps (applied in order)
 
@@ -101,9 +101,9 @@ After processing all files, the script writes three output files to `scripts/rep
 
 | File | Contents |
 |---|---|
-| `preprocessing_report_<timestamp>.csv` | One row per participant. Per-step counts as separate columns. Dict-valued columns (gene fixes, bad chars, reference misses) stored as JSON strings. |
-| `summary_report_<timestamp>.txt` | Human-readable aggregated totals across all participants for every step. |
-| `cleanup_log_<timestamp>.txt` | Full run log (same content as stdout). |
+| `clean_tcr_data/preprocessing_report_<timestamp>.csv` | One row per participant. Per-step counts as separate columns. Dict-valued columns (gene fixes, bad chars, reference misses) stored as JSON strings. |
+| `clean_tcr_data/summary_report_<timestamp>.txt` | Human-readable aggregated totals across all participants for every step. |
+| `clean_tcr_data/cleanup_log_<timestamp>.txt` | Full run log (same content as stdout). |
 
 ### CSV columns
 
