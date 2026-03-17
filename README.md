@@ -1,4 +1,4 @@
-# airr_bench
+# AIRRBench
 
 Benchmarking framework for adaptive immune receptor repertoire (AIRR) based disease classification.
 
