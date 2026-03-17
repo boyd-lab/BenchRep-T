@@ -17,6 +17,7 @@ from scipy.stats import fisher_exact
 from scipy.special import betaln
 from scipy.optimize import minimize
 from tqdm import tqdm
+from utils.repertoire_io import load_raw_repertoire
 
 
 class CMV_Immunosequencing_Model:
@@ -69,30 +70,25 @@ class CMV_Immunosequencing_Model:
         # Check cache first
         if use_cache and file_path in self._repertoire_cache:
             return self._repertoire_cache[file_path]
-        
-        try:
-            df = pd.read_csv(file_path, sep='\t')
-            for col in [self.sequence_col, self.v_col, self.j_col]:
-                if col not in df.columns:
-                    raise ValueError(f"Column '{col}' not found in {file_path}")
-            # Subsample rows to simulate reduced sequencing depth
-            if self.subsample_n is not None:
-                df = df.sample(n=min(self.subsample_n, len(df)), random_state=self.subsample_seed)
-            elif self.subsample_fraction < 1.0:
-                df = df.sample(frac=self.subsample_fraction, random_state=self.subsample_seed)
-            # Return unique (v_call, cdr3_aa, j_call) tuples — matching the paper's definition
-            # of a unique TCRβ as a combination of V gene, CDR3 amino acid sequence, and J gene.
-            df = df[[self.v_col, self.sequence_col, self.j_col]].dropna()
-            sequences = set(zip(df[self.v_col], df[self.sequence_col], df[self.j_col]))
-            
-            # Cache the result
-            if use_cache:
-                self._repertoire_cache[file_path] = sequences
-            
-            return sequences
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
+
+        df = load_raw_repertoire(file_path, self.subsample_n, self.subsample_fraction,
+                                 self.subsample_seed)
+        if df.empty:
             return set()
+
+        for col in [self.sequence_col, self.v_col, self.j_col]:
+            if col not in df.columns:
+                print(f"Error loading {file_path}: Column '{col}' not found")
+                return set()
+
+        # Return unique (v_call, cdr3_aa, j_call) tuples — matching the paper's definition
+        # of a unique TCRβ as a combination of V gene, CDR3 amino acid sequence, and J gene.
+        df = df[[self.v_col, self.sequence_col, self.j_col]].dropna()
+        sequences = set(zip(df[self.v_col], df[self.sequence_col], df[self.j_col]))
+
+        if use_cache:
+            self._repertoire_cache[file_path] = sequences
+        return sequences
     
     def preload_repertoires(self, file_paths):
         """

@@ -115,7 +115,7 @@ def get_allowed_participants(metadata_path, data_dir, min_sequences,
                              participant_col='participant_label',
                              file_prefix='part_table_', file_suffix='.tsv.gz'):
     """
-    Return the set of participant labels whose repertoire files contain at least
+    Return the set of specimen labels whose repertoire files contain at least
     min_sequences reads.  Files that do not exist on disk are excluded silently.
 
     Args:
@@ -127,23 +127,26 @@ def get_allowed_participants(metadata_path, data_dir, min_sequences,
         file_suffix: File name suffix
 
     Returns:
-        Set of participant label strings that pass the threshold
+        Set of specimen label strings that pass the threshold
     """
     metadata = pd.read_csv(metadata_path, sep='\t')
-    participants = metadata[participant_col].unique()
+    specimens = metadata[[participant_col, 'specimen_label']].drop_duplicates()
 
     allowed = set()
     print(f"\nFiltering to repertoires with >= {min_sequences:,} sequences "
-          f"({len(participants)} total)...")
-    for participant in tqdm(participants, desc="Counting sequences"):
-        file_path = os.path.join(data_dir, f"{file_prefix}{participant}{file_suffix}")
+          f"({len(specimens)} total)...")
+    for _, row in tqdm(specimens.iterrows(), total=len(specimens), desc="Counting sequences"):
+        file_path = os.path.join(
+            data_dir,
+            f"{file_prefix}{row[participant_col]}_{row['specimen_label']}{file_suffix}"
+        )
         if not os.path.exists(file_path):
             continue
         n = count_sequences(file_path)
         if n >= min_sequences:
-            allowed.add(participant)
+            allowed.add(row['specimen_label'])
 
-    print(f"  -> {len(allowed)} of {len(participants)} participants "
+    print(f"  -> {len(allowed)} of {len(specimens)} specimens "
           f"have >= {min_sequences:,} sequences and will be used for all depth levels.")
     return allowed
 

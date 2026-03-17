@@ -76,15 +76,18 @@ class MLBaselineEvaluator:
         metadata = self.load_metadata(metadata_path)
         return [d for d in metadata[disease_col].unique() if d != self.HEALTHY_LABEL]
 
-    def construct_file_path(self, participant_label, data_dir,
+    def construct_file_path(self, participant_label, specimen_label, data_dir,
                             file_prefix='part_table_', file_suffix='.tsv.gz'):
-        return os.path.join(data_dir, f"{file_prefix}{participant_label}{file_suffix}")
+        return os.path.join(data_dir,
+                            f"{file_prefix}{participant_label}_{specimen_label}{file_suffix}")
 
     def add_file_paths(self, metadata, data_dir, participant_col='participant_label',
                        file_prefix='part_table_', file_suffix='.tsv.gz'):
         metadata = metadata.copy()
-        metadata['file_path'] = metadata[participant_col].apply(
-            lambda x: self.construct_file_path(x, data_dir, file_prefix, file_suffix)
+        metadata['file_path'] = metadata.apply(
+            lambda row: self.construct_file_path(
+                row[participant_col], row['specimen_label'], data_dir, file_prefix, file_suffix
+            ), axis=1
         )
         return metadata
 

@@ -17,6 +17,7 @@ from sklearn.feature_extraction import DictVectorizer
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
+from utils.repertoire_io import load_raw_repertoire
 
 
 def _extract_gapped_4mers(sequence):
@@ -55,7 +56,7 @@ class Gapped_4mer_VJgene:
 
     def __init__(self, val_split=0.2, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
-                 subsample_fraction=1.0, subsample_seed=7):
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
         """
         Args:
             val_split: Fraction of training data held out internally for alpha tuning.
@@ -65,6 +66,7 @@ class Gapped_4mer_VJgene:
             j_gene_col: Column containing J gene calls (skipped if absent).
             subsample_fraction: Fraction of reads to sample per repertoire (depth sim).
             subsample_seed: Random seed for reproducibility.
+            subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set).
         """
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
@@ -73,6 +75,7 @@ class Gapped_4mer_VJgene:
         self.j_gene_col = j_gene_col
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
+        self.subsample_n = subsample_n
 
         # Caches
         self._repertoire_cache = {}
@@ -97,12 +100,8 @@ class Gapped_4mer_VJgene:
         if use_cache and file_path in self._repertoire_cache:
             return self._repertoire_cache[file_path]
 
-        df = pd.read_csv(file_path, sep='\t', compression='infer', low_memory=False)
-
-        if self.subsample_fraction < 1.0:
-            rng = np.random.default_rng(self.subsample_seed)
-            n = max(1, int(len(df) * self.subsample_fraction))
-            df = df.iloc[rng.choice(len(df), size=n, replace=False)].reset_index(drop=True)
+        df = load_raw_repertoire(file_path, self.subsample_n, self.subsample_fraction,
+                                 self.subsample_seed)
 
         if use_cache:
             self._repertoire_cache[file_path] = df

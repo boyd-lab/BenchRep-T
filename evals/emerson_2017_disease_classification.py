@@ -118,41 +118,45 @@ class Emerson2017Evaluator:
         diseases = [d for d in diseases if d != self.HEALTHY_LABEL]
         return diseases
     
-    def construct_file_path(self, participant_label, data_dir, 
+    def construct_file_path(self, participant_label, specimen_label, data_dir,
                             file_prefix='part_table_', file_suffix='.tsv.gz'):
         """
-        Construct the full file path from a participant label.
-        
+        Construct the full file path from a participant and specimen label.
+
         Args:
             participant_label: The participant ID (e.g., 'BFI-0003052')
+            specimen_label: The specimen ID (e.g., 'S001')
             data_dir: Root directory containing the data files
             file_prefix: Prefix to add before participant label (default: 'part_table_')
-            file_suffix: Suffix to add after participant label (default: '.tsv.gz')
-        
+            file_suffix: Suffix to add after specimen label (default: '.tsv.gz')
+
         Returns:
-            Full file path (e.g., '/path/to/data/part_table_BFI-0003052.tsv.gz')
+            Full file path (e.g., '/path/to/data/part_table_BFI-0003052_S001.tsv.gz')
         """
-        filename = f"{file_prefix}{participant_label}{file_suffix}"
+        filename = f"{file_prefix}{participant_label}_{specimen_label}{file_suffix}"
         return os.path.join(data_dir, filename)
-    
+
     def add_file_paths(self, metadata, data_dir, participant_col='participant_label',
                        file_prefix='part_table_', file_suffix='.tsv.gz'):
         """
-        Add a 'file_path' column to metadata by constructing paths from participant labels.
-        
+        Add a 'file_path' column to metadata by constructing paths from participant and
+        specimen labels.
+
         Args:
             metadata: DataFrame with metadata
             data_dir: Root directory containing the data files
             participant_col: Column name containing participant labels (default: 'participant_label')
             file_prefix: Prefix to add before participant label (default: 'part_table_')
-            file_suffix: Suffix to add after participant label (default: '.tsv.gz')
-        
+            file_suffix: Suffix to add after specimen label (default: '.tsv.gz')
+
         Returns:
             DataFrame with added 'file_path' column
         """
         metadata = metadata.copy()
-        metadata['file_path'] = metadata[participant_col].apply(
-            lambda x: self.construct_file_path(x, data_dir, file_prefix, file_suffix)
+        metadata['file_path'] = metadata.apply(
+            lambda row: self.construct_file_path(
+                row[participant_col], row['specimen_label'], data_dir, file_prefix, file_suffix
+            ), axis=1
         )
         return metadata
     
@@ -351,8 +355,8 @@ class Emerson2017Evaluator:
         # Filter to allowed participants if specified (e.g., for min-sequence-count filtering)
         if allowed_participants is not None:
             before = len(metadata)
-            metadata = metadata[metadata[participant_col].isin(allowed_participants)]
-            print(f"Filtered to {len(metadata)} of {before} participants "
+            metadata = metadata[metadata['specimen_label'].isin(allowed_participants)]
+            print(f"Filtered to {len(metadata)} of {before} specimens "
                   f"based on allowed_participants set.")
 
         all_test_rows = []
@@ -514,8 +518,8 @@ if __name__ == "__main__":
     print("     - 'participant_label': e.g., 'BFI-0003052'")
     print("     - 'disease': e.g., 'Healthy/Background', 'Lupus', 'T1D'")
     print("     - 'malid_cross_validation_fold_id_when_in_test_set': fold ID (0, 1, 2)")
-    print("\nFile names are constructed as: {prefix}{participant_label}{suffix}")
-    print("  e.g., 'part_table_BFI-0003052.tsv.gz'")
+    print("\nFile names are constructed as: {prefix}{participant_label}_{specimen_label}{suffix}")
+    print("  e.g., 'part_table_BFI-0003052_S001.tsv.gz'")
     print("\nBinary labels are created automatically based on the target disease.")
     
     # Initialize evaluator with custom train/val ratio (default is 0.9 for 9:1 split)

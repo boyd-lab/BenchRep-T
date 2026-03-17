@@ -17,6 +17,7 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
 from tqdm import tqdm
+from utils.repertoire_io import load_raw_repertoire
 
 
 # ATCHLEY FACTORS (Reference: Atchley et al., 2005)
@@ -132,20 +133,18 @@ class MIL_TCR_Classifier:
         if use_cache and file_path in self._repertoire_cache:
             return self._repertoire_cache[file_path]
 
-        try:
-            df = pd.read_csv(file_path, sep='\t')
-            if self.sequence_col not in df.columns:
-                raise ValueError(f"Column '{self.sequence_col}' not found in {file_path}")
-            if self.subsample_n is not None:
-                df = df.sample(n=min(self.subsample_n, len(df)), random_state=self.subsample_seed)
-            elif self.subsample_fraction < 1.0:
-                df = df.sample(frac=self.subsample_fraction, random_state=self.subsample_seed)
-            if use_cache:
-                self._repertoire_cache[file_path] = df
+        df = load_raw_repertoire(file_path, self.subsample_n, self.subsample_fraction,
+                                 self.subsample_seed)
+        if df.empty:
             return df
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
+
+        if self.sequence_col not in df.columns:
+            print(f"Error loading {file_path}: Column '{self.sequence_col}' not found")
             return pd.DataFrame()
+
+        if use_cache:
+            self._repertoire_cache[file_path] = df
+        return df
 
     def preload_repertoires(self, file_paths):
         """
