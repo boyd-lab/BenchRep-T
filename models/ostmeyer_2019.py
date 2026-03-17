@@ -417,6 +417,7 @@ class MIL_TCR_Classifier:
             result = minimize(
                 self._compute_loss_and_gradient,
                 initial_params,
+                args=(training_data, valid_labels),
                 method='L-BFGS-B',
                 jac=True,
                 options={'maxiter': self.max_iter, 'disp': False}
