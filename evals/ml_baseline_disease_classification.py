@@ -138,12 +138,10 @@ class MLBaselineEvaluator:
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
 
-        results = {
-            'target_disease': target_disease,
-            'fold_results': [],
-            'all_probs': [],
-            'all_labels': [],
-        }
+        all_test_rows = []
+        all_probs = []
+        all_labels = []
+        fold_results = []
 
         for test_fold in range(n_folds):
             print(f"\n{'='*60}")
@@ -187,40 +185,48 @@ class MLBaselineEvaluator:
             test_aupr = average_precision_score(test_labels_arr, test_probs)
             print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
 
-            fold_result = {
+            # Build per-sample rows for output DataFrame
+            for (_, row), score in zip(test_data.iterrows(), test_probs):
+                all_test_rows.append({
+                    'participant_label': row[participant_col],
+                    'specimen_label': row['specimen_label'],
+                    'disease_label': int(row['label']),
+                    'disease_label_str': row[disease_col],
+                    'method': 'ML_Baseline',
+                    'disease_model': target_disease,
+                    'model_score': float(score),
+                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                })
+
+            fold_results.append({
                 'fold': test_fold,
-                'n_train': len(train_data),
-                'n_test': len(test_data),
                 'best_c_kmer': train_result['best_c_kmer'],
                 'best_c_vj': train_result['best_c_vj'],
                 'best_alpha': train_result['best_alpha'],
                 'val_auroc': train_result['val_auroc'],
                 'test_auroc': test_auroc,
                 'test_aupr': test_aupr,
-                'test_probs': test_probs.tolist(),
-                'test_labels': test_labels,
-            }
-            results['fold_results'].append(fold_result)
-            results['all_probs'].extend(test_probs.tolist())
-            results['all_labels'].extend(test_labels)
+            })
+            all_probs.extend(test_probs.tolist())
+            all_labels.extend(test_labels)
 
         # Overall metrics (all test predictions concatenated across folds)
-        all_probs = np.array(results['all_probs'])
-        all_labels = np.array(results['all_labels'])
-        results['overall_auroc'] = roc_auc_score(all_labels, all_probs)
-        results['overall_aupr'] = average_precision_score(all_labels, all_probs)
+        all_probs_arr = np.array(all_probs)
+        all_labels_arr = np.array(all_labels)
+        overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
+        overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
 
         print(f"\n{'='*60}")
         print(f"OVERALL RESULTS: {target_disease} vs Healthy")
         print(f"{'='*60}")
-        fold_aurocs = [r['test_auroc'] for r in results['fold_results']]
-        fold_auprs = [r['test_aupr'] for r in results['fold_results']]
+        fold_aurocs = [r['test_auroc'] for r in fold_results]
+        fold_auprs = [r['test_aupr'] for r in fold_results]
         print(f"Mean Test AUROC: {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
         print(f"Mean Test AUPR:  {np.mean(fold_auprs):.4f} ± {np.std(fold_auprs):.4f}")
-        print(f"Overall AUROC (combined): {results['overall_auroc']:.4f}")
-        print(f"Overall AUPR  (combined): {results['overall_aupr']:.4f}")
+        print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
+        print(f"Overall AUPR  (all folds combined): {overall_aupr:.4f}")
 
-        return results
+        return pd.DataFrame(all_test_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +247,8 @@ if __name__ == "__main__":
                         help='Internal val fraction for alpha tuning (default: 0.2)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
                         help='CV folds for C tuning (default: 5)')
+    parser.add_argument('--output_csv', type=str, default=None,
+                        help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
 
     evaluator = MLBaselineEvaluator(
@@ -248,11 +256,12 @@ if __name__ == "__main__":
         n_cv_folds=args.n_cv_folds,
     )
 
-    results = evaluator.run_cross_validation(
+    scores_df = evaluator.run_cross_validation(
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
     )
 
-    print(f"\nOverall AUROC: {results['overall_auroc']:.4f}")
-    print(f"Overall AUPR:  {results['overall_aupr']:.4f}")
+    if args.output_csv:
+        scores_df.to_csv(args.output_csv, index=False)
+        print(f"\nScores saved to: {args.output_csv}")
