@@ -47,7 +47,7 @@ from tqdm import tqdm
 DEPTHS = [1000, 5000, 10000, 25000, 50000, 100_000]
 MIN_SEQUENCES = 100_000
 N_REPS = 5
-DEFAULT_SEED = 42
+DEFAULT_SEED = 7
 
 
 def count_sequences(path: Path) -> int:
