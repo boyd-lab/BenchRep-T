@@ -4,10 +4,8 @@ Sequencing Depth Experiment.
 Evaluates TCR disease classification model performance at varying sequencing
 depths using pre-generated subsampling indices from generate_depth_indices.py.
 
-The indices file ensures:
-  - Consistent repertoire filtering (only repertoires with enough sequences)
-  - Nested subsampling (depth K uses first K indices of each repetition)
-  - Reproducible random seeds via numpy SeedSequence
+The indices file contains all experiment parameters (depths, n_reps,
+min_sequences, seed) and pre-computed row indices for each repertoire.
 
 Usage:
     python -m evals.sequencing_depth_experiment \\
@@ -16,7 +14,6 @@ Usage:
         --metadata_path data/metadata.tsv \\
         --repertoire_data_dir /path/to/data \\
         --depth_indices data/depth_indices_seed7.json.gz \\
-        --depths 1000 5000 10000 25000 50000 100000 \\
         --output_json results/depth_experiment.json
 """
 
@@ -64,7 +61,7 @@ def load_depth_indices(path):
         path: Path to the indices file
 
     Returns:
-        Dict: {rep_id: {str(repeat): [indices...]}}
+        Dict with keys: 'depths', 'n_reps', 'min_sequences', 'seed', 'repertoires'
     """
     if path.endswith('.gz'):
         with gzip.open(path, 'rt', encoding='utf-8') as f:
@@ -74,7 +71,7 @@ def load_depth_indices(path):
             return json.load(f)
 
 
-def get_allowed_specimens(metadata_path, depth_indices,
+def get_allowed_specimens(metadata_path, repertoires,
                           participant_col='participant_label',
                           file_prefix='part_table_'):
     """
@@ -83,7 +80,7 @@ def get_allowed_specimens(metadata_path, depth_indices,
 
     Args:
         metadata_path: Path to metadata TSV
-        depth_indices: Loaded depth indices dict
+        repertoires: The 'repertoires' sub-dict from the indices file
         participant_col: Column with participant labels
         file_prefix: File name prefix used to construct rep_id
 
@@ -95,12 +92,12 @@ def get_allowed_specimens(metadata_path, depth_indices,
     allowed = set()
     for _, row in specimens.iterrows():
         rep_id = f"{file_prefix}{row[participant_col]}_{row['specimen_label']}"
-        if rep_id in depth_indices:
+        if rep_id in repertoires:
             allowed.add(row['specimen_label'])
     return allowed
 
 
-def build_indices_map(depth_indices, repeat, depth):
+def build_indices_map(repertoires, repeat, depth):
     """
     Build an indices_map for a specific (depth, repeat) combination.
 
@@ -108,7 +105,7 @@ def build_indices_map(depth_indices, repeat, depth):
     pre-shuffled index array.
 
     Args:
-        depth_indices: Full indices dict {rep_id: {str(repeat): [indices...]}}
+        repertoires: The 'repertoires' sub-dict {rep_id: {str(repeat): [indices...]}}
         repeat: Repetition index (int)
         depth: Number of sequences to keep (int)
 
@@ -117,16 +114,19 @@ def build_indices_map(depth_indices, repeat, depth):
     """
     indices_map = {}
     repeat_key = str(repeat)
-    for rep_id, rep_data in depth_indices.items():
+    for rep_id, rep_data in repertoires.items():
         indices_map[rep_id] = rep_data[repeat_key][:depth]
     return indices_map
 
 
 def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_data_dir,
-                         depth_indices_path, depths, random_seed=7,
+                         depth_indices_path, random_seed=7,
                          output_json=None, giana_dir=None):
     """
     Run the sequencing depth experiment using pre-generated indices.
+
+    All experiment parameters (depths, n_reps, min_sequences) are read from
+    the indices file.
 
     Args:
         model_name: Model identifier string
@@ -134,7 +134,6 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
         metadata_path: Path to metadata TSV
         repertoire_data_dir: Directory with repertoire files
         depth_indices_path: Path to depth indices JSON/JSON.GZ file
-        depths: List of int depth levels to evaluate
         random_seed: Random seed for train/val split (default: 7)
         output_json: Path to save results JSON (optional)
         giana_dir: Path to GIANA directory (for giana_2020 model)
@@ -142,28 +141,23 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
     Returns:
         List of result dicts (one per depth x repeat)
     """
-    # Load pre-generated indices
+    # Load pre-generated indices (includes metadata + repertoire indices)
     print(f"Loading depth indices from: {depth_indices_path}")
-    depth_indices = load_depth_indices(depth_indices_path)
+    index_data = load_depth_indices(depth_indices_path)
 
-    # Infer n_repeats from the indices file
-    first_rep = next(iter(depth_indices.values()))
-    n_repeats = len(first_rep)
-    max_depth = len(next(iter(first_rep.values())))
-    print(f"  Repertoires: {len(depth_indices)}, Repeats: {n_repeats}, "
-          f"Max depth: {max_depth:,}")
+    depths = index_data['depths']
+    n_repeats = index_data['n_reps']
+    repertoires = index_data['repertoires']
 
-    # Validate requested depths
-    for d in depths:
-        if d > max_depth:
-            raise ValueError(
-                f"Requested depth {d:,} exceeds max depth {max_depth:,} "
-                f"in indices file."
-            )
+    print(f"  Depths: {depths}")
+    print(f"  Repeats: {n_repeats}")
+    print(f"  Repertoires: {len(repertoires)}")
+    print(f"  Min sequences: {index_data['min_sequences']:,}")
+    print(f"  Index seed: {index_data['seed']}")
 
     # Determine allowed specimens from indices file
-    allowed_specimens = get_allowed_specimens(metadata_path, depth_indices)
-    print(f"  Specimens with indices: {len(allowed_specimens)}")
+    allowed_specimens = get_allowed_specimens(metadata_path, repertoires)
+    print(f"  Specimens matched in metadata: {len(allowed_specimens)}")
 
     all_results = []
 
@@ -176,7 +170,7 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
             start_time = time.time()
 
             # Build indices_map for this (depth, repeat) combination
-            indices_map = build_indices_map(depth_indices, repeat_idx, depth)
+            indices_map = build_indices_map(repertoires, repeat_idx, depth)
 
             # Create evaluator with the indices
             evaluator = create_evaluator(
@@ -279,9 +273,6 @@ if __name__ == "__main__":
     parser.add_argument('--depth_indices', type=str, required=True,
                         help='Path to pre-generated depth indices file '
                              '(.json or .json.gz from generate_depth_indices.py)')
-    parser.add_argument('--depths', type=int, nargs='+', required=True,
-                        help='Depth levels to evaluate (number of sequences), '
-                             'e.g. 1000 5000 10000 25000 50000 100000')
     parser.add_argument('--random_seed', type=int, default=7,
                         help='Random seed for train/val split (default: 7)')
     parser.add_argument('--output_json', type=str, default=None,
@@ -292,17 +283,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    for d in args.depths:
-        if d <= 0:
-            parser.error(f"Depth {d} must be a positive integer")
-
     run_depth_experiment(
         model_name=args.model,
         target_disease=args.target_disease,
         metadata_path=args.metadata_path,
         repertoire_data_dir=args.repertoire_data_dir,
         depth_indices_path=args.depth_indices,
-        depths=sorted(args.depths),
         random_seed=args.random_seed,
         output_json=args.output_json,
         giana_dir=args.giana_dir

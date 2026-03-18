@@ -12,17 +12,23 @@ Repetitions: 5
 
 Output JSON structure:
     {
-        "<rep_id>": {
-            "0": [idx0, idx1, ..., idx99999],   # repetition 0
-            "1": [...],                          # repetition 1
+        "depths": [1000, 5000, 10000, 25000, 50000, 100000],
+        "n_reps": 5,
+        "min_sequences": 100000,
+        "seed": 7,
+        "repertoires": {
+            "<rep_id>": {
+                "0": [idx0, idx1, ..., idx99999],   # repetition 0
+                "1": [...],                          # repetition 1
+                ...
+                "4": [...]                           # repetition 4
+            },
             ...
-            "4": [...]                           # repetition 4
-        },
-        ...
+        }
     }
 
 To get indices for rep_id, depth D, repetition R:
-    indices = data[rep_id][str(R)][:D]
+    indices = data["repertoires"][rep_id][str(R)][:D]
 
 Per-(repertoire, repetition) RNGs are derived from a master seed via
 numpy SeedSequence, ensuring independence across both dimensions.
@@ -131,22 +137,31 @@ def main() -> int:
             rep_data[str(r)] = indices.tolist()
         result[rep_id] = rep_data
 
+    # Wrap with metadata
+    output_data = {
+        "depths": DEPTHS,
+        "n_reps": N_REPS,
+        "min_sequences": MIN_SEQUENCES,
+        "seed": args.seed,
+        "repertoires": result,
+    }
+
     # Write output (auto-detect gzip from extension)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     print(f"\nWriting to {args.output} ...")
     if args.output.name.endswith(".json.gz"):
         with gzip.open(args.output, "wt", encoding="utf-8") as f:
-            json.dump(result, f)
+            json.dump(output_data, f)
     else:
         with open(args.output, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2)
+            json.dump(output_data, f, indent=2)
 
     print(f"\nDone.")
     print(f"  Repertoires written : {len(result)}")
     print(f"  Repetitions each    : {N_REPS}")
     print(f"  Depths available    : {DEPTHS}")
     print(f"  Master seed         : {args.seed}")
-    print(f"\nUsage: data[rep_id][str(repetition)][:depth]")
+    print(f"\nUsage: data['repertoires'][rep_id][str(repetition)][:depth]")
     return 0
 
 
