@@ -46,11 +46,6 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
 
-from evals.emerson_2017_disease_classification import Emerson2017Evaluator
-from evals.ostmeyer_2019_disease_classification import Ostmeyer2019Evaluator
-from evals.giana_2020_disease_classification import GIANA2020Evaluator
-
-
 def create_evaluator(model_name, subsample_fraction=1.0, subsample_n=None,
                      subsample_seed=7, giana_dir=None):
     """
@@ -67,18 +62,21 @@ def create_evaluator(model_name, subsample_fraction=1.0, subsample_n=None,
         Evaluator instance
     """
     if model_name == 'emerson_2017':
+        from evals.emerson_2017_disease_classification import Emerson2017Evaluator
         return Emerson2017Evaluator(
             subsample_fraction=subsample_fraction,
             subsample_seed=subsample_seed,
             subsample_n=subsample_n
         )
     elif model_name == 'ostmeyer_2019':
+        from evals.ostmeyer_2019_disease_classification import Ostmeyer2019Evaluator
         return Ostmeyer2019Evaluator(
             subsample_fraction=subsample_fraction,
             subsample_seed=subsample_seed,
             subsample_n=subsample_n
         )
     elif model_name == 'giana_2020':
+        from evals.giana_2020_disease_classification import GIANA2020Evaluator
         return GIANA2020Evaluator(
             subsample_fraction=subsample_fraction,
             subsample_seed=subsample_seed,
