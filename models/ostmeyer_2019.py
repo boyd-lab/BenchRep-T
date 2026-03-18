@@ -72,7 +72,7 @@ class MIL_TCR_Classifier:
     is kept (default: 250,000 restarts, matching the paper's best models).
     """
 
-    def __init__(self, n_restarts=2000, lbfgsb_maxiter=1000,
+    def __init__(self, n_restarts=200, lbfgsb_maxiter=1000,
                  abundance_method='A',
                  sequence_col='cdr3_aa', min_cdr3_length=10,
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
@@ -532,6 +532,6 @@ if __name__ == "__main__":
     print("For evaluation with cross-validation, use:")
     print("  from evals.ostmeyer_2019_disease_classification import Ostmeyer2019Evaluator")
     print("\nBasic usage example:")
-    print("  model = MIL_TCR_Classifier(n_restarts=2000, abundance_method='A')")
+    print("  model = MIL_TCR_Classifier(n_restarts=200, abundance_method='A')")
     print("  model.train(train_files, train_labels)")
     print("  result = model.predict_diagnosis('patient.tsv.gz')")

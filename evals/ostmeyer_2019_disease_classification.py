@@ -29,7 +29,7 @@ class Ostmeyer2019Evaluator:
     # Constants for label values
     HEALTHY_LABEL = "Healthy/Background"
     
-    def __init__(self, train_val_ratio=0.9, n_restarts=2000, lbfgsb_maxiter=1000,
+    def __init__(self, train_val_ratio=0.9, n_restarts=200, lbfgsb_maxiter=1000,
                  abundance_method='A', sequence_col='cdr3_aa',
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
         """
@@ -525,7 +525,7 @@ if __name__ == "__main__":
     # Initialize evaluator with custom train/val ratio (default is 0.9 for 9:1 split)
     evaluator = Ostmeyer2019Evaluator(
         train_val_ratio=0.9,
-        n_restarts=2000,
+        n_restarts=200,
         lbfgsb_maxiter=1000,
         abundance_method='A',
         sequence_col='cdr3_aa'
