@@ -15,6 +15,7 @@ This module contains the core model for:
 
 import pandas as pd
 import numpy as np
+from scipy.optimize import minimize
 from tqdm import tqdm
 from utils.repertoire_io import load_raw_repertoire
 
@@ -71,7 +72,7 @@ class MIL_TCR_Classifier:
     is kept (default: 250,000 restarts, matching the paper's best models).
     """
 
-    def __init__(self, n_restarts=250_000, max_iter=2500, learning_rate=0.1,
+    def __init__(self, n_restarts=2000, lbfgsb_maxiter=1000,
                  abundance_method='A',
                  sequence_col='cdr3_aa', min_cdr3_length=10,
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
@@ -79,11 +80,11 @@ class MIL_TCR_Classifier:
         Initialize the model.
 
         Args:
-            n_restarts: Number of random restarts for optimization (default: 250,000,
-                        matching the paper's best models). Reduce for faster runs.
-            max_iter: Number of gradient descent steps per restart (default: 2500,
-                      matching the paper exactly).
-            learning_rate: Step size for gradient descent (default: 0.1).
+            n_restarts: Number of random restarts for optimization (default: 2000).
+                        L-BFGS-B converges in ~50-200 gradient evaluations per
+                        restart, so 2000 restarts gives broad landscape coverage
+                        at a fraction of the paper's compute cost.
+            lbfgsb_maxiter: Maximum L-BFGS-B iterations per restart (default: 1000).
             abundance_method: 'A' for 4-mer relative abundance (Equation A in
                               paper) or 'B' for TCRb relative abundance
                               (Equation B). Default: 'A'.
@@ -100,8 +101,7 @@ class MIL_TCR_Classifier:
                          subsample_fraction if set)
         """
         self.n_restarts = n_restarts
-        self.max_iter = max_iter
-        self.learning_rate = learning_rate
+        self.lbfgsb_maxiter = lbfgsb_maxiter
         self.abundance_method = abundance_method
         self.sequence_col = sequence_col
         self.min_cdr3_length = min_cdr3_length
@@ -402,7 +402,7 @@ class MIL_TCR_Classifier:
 
         n_features = 20  # 20 Atchley factors (paper initializes W ~ N(0, 1/n_features))
 
-        print(f"Training on {len(training_data)} samples with {self.n_restarts} restarts...")
+        print(f"Training on {len(training_data)} samples with {self.n_restarts} L-BFGS-B restarts...")
 
         best_loss = np.inf
         best_params = None
@@ -414,14 +414,17 @@ class MIL_TCR_Classifier:
             params[20] = 0.0  # W21 (log-abundance weight) = 0
             params[21] = np.random.randn() * (1.0 / n_features)  # b0
 
-            # Fixed-step gradient descent matching paper (2500 steps per restart)
-            for _ in range(self.max_iter):
-                loss, grad = self._compute_loss_and_gradient(params, training_data, valid_labels)
-                params -= self.learning_rate * grad
+            result = minimize(
+                fun=lambda p: self._compute_loss_and_gradient(p, training_data, valid_labels),
+                x0=params,
+                method='L-BFGS-B',
+                jac=True,
+                options={'maxiter': self.lbfgsb_maxiter},
+            )
 
-            if loss < best_loss:
-                best_loss = loss
-                best_params = params.copy()
+            if result.fun < best_loss:
+                best_loss = result.fun
+                best_params = result.x.copy()
 
         self.weights = best_params[:21]
         self.bias = best_params[21]
@@ -529,6 +532,6 @@ if __name__ == "__main__":
     print("For evaluation with cross-validation, use:")
     print("  from evals.ostmeyer_2019_disease_classification import Ostmeyer2019Evaluator")
     print("\nBasic usage example:")
-    print("  model = MIL_TCR_Classifier(n_restarts=100, abundance_method='A')")
+    print("  model = MIL_TCR_Classifier(n_restarts=2000, abundance_method='A')")
     print("  model.train(train_files, train_labels)")
     print("  result = model.predict_diagnosis('patient.tsv.gz')")
