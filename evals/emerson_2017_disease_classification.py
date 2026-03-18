@@ -290,10 +290,24 @@ class Emerson2017Evaluator:
         # Find best threshold (using AUROC as primary metric)
         best_result = max(tuning_results, key=lambda x: x['val_auroc'])
         best_p_value = best_result['p_value_threshold']
-        
+
         print(f"\nBest p-value threshold: {best_p_value:.0e} "
               f"(Val AUROC={best_result['val_auroc']:.4f}, Val AUPR={best_result['val_aupr']:.4f})")
-        
+
+        # If no threshold found any diagnostic TCRs, signal failure
+        if best_result['n_diagnostic_tcrs'] == 0:
+            print("WARNING: No diagnostic TCRs found at any threshold. "
+                  "Model will output random-chance predictions for this fold.")
+            self.model = None
+            return {
+                'tuning_results': tuning_results,
+                'best_p_value_threshold': best_p_value,
+                'best_val_auroc': 0.0,
+                'best_val_aupr': 0.0,
+                'best_n_diagnostic_tcrs': 0,
+                'no_diagnostic_tcrs': True
+            }
+
         # Final model with best threshold (reuses all caches)
         self.model = CMV_Immunosequencing_Model(
             p_value_threshold=best_p_value, sequence_col=self.sequence_col,
@@ -305,13 +319,14 @@ class Emerson2017Evaluator:
         self.model._tcr_stats_cache = base_model._tcr_stats_cache
         self.model.select_diagnostic_tcrs_from_cache(best_p_value)
         self.model.train_beta_binomial_model(train_files, train_labels)
-        
+
         return {
             'tuning_results': tuning_results,
             'best_p_value_threshold': best_p_value,
             'best_val_auroc': best_result['val_auroc'],
             'best_val_aupr': best_result['val_aupr'],
-            'best_n_diagnostic_tcrs': len(self.model.diagnostic_tcrs)
+            'best_n_diagnostic_tcrs': len(self.model.diagnostic_tcrs),
+            'no_diagnostic_tcrs': False
         }
     
     def run_cross_validation(self, metadata_path, target_disease, data_dir,
@@ -411,6 +426,41 @@ class Emerson2017Evaluator:
                 best_p_value = tuning_result['best_p_value_threshold']
                 val_auroc = tuning_result['best_val_auroc']
                 val_aupr = tuning_result['best_val_aupr']
+
+                # Handle case where no diagnostic TCRs were found
+                if tuning_result.get('no_diagnostic_tcrs', False):
+                    print(f"No diagnostic TCRs found for fold {test_fold}. "
+                          f"Assigning chance-level predictions (0.5).")
+                    test_probs = np.full(len(test_files), 0.5)
+                    test_labels_arr = np.array(test_labels)
+                    test_auroc = roc_auc_score(test_labels_arr, test_probs)
+                    test_aupr = average_precision_score(test_labels_arr, test_probs)
+                    print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
+
+                    for (_, row), score in zip(test_data.iterrows(), test_probs):
+                        all_test_rows.append({
+                            'participant_label': row[participant_col],
+                            'specimen_label': row['specimen_label'],
+                            'disease_label': int(row['label']),
+                            'disease_label_str': row[disease_col],
+                            'method': 'Emerson_2017',
+                            'disease_model': target_disease,
+                            'model_score': float(score),
+                            'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                        })
+
+                    fold_results.append({
+                        'fold': test_fold,
+                        'best_p_value_threshold': best_p_value,
+                        'val_auroc': val_auroc,
+                        'val_aupr': val_aupr,
+                        'test_auroc': test_auroc,
+                        'test_aupr': test_aupr,
+                    })
+
+                    all_probs.extend(test_probs.tolist())
+                    all_labels.extend(test_labels)
+                    continue
             else:
                 # Train without tuning (use initial p_value_threshold)
                 self.model = CMV_Immunosequencing_Model(
