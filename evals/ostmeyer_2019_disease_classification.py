@@ -29,17 +29,19 @@ class Ostmeyer2019Evaluator:
     # Constants for label values
     HEALTHY_LABEL = "Healthy/Background"
     
-    def __init__(self, train_val_ratio=0.9, n_restarts=100, max_iter=2500,
-                 abundance_method='A', sequence_col='cdr3_aa',
+    def __init__(self, train_val_ratio=0.9, n_restarts=250_000, max_iter=2500,
+                 learning_rate=0.1, abundance_method='A', sequence_col='cdr3_aa',
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
         """
         Initialize the evaluator.
 
         Args:
             train_val_ratio: Ratio of training data in train/val split (default: 0.9, i.e., 9:1)
-            n_restarts: Number of random restarts for optimization (default: 100).
-                        Paper uses 100,000-375,000; fewer restarts trade quality for speed.
-            max_iter: Maximum L-BFGS-B iterations per restart (default: 2500)
+            n_restarts: Number of random restarts for optimization (default: 250,000,
+                        matching the paper's best models). Reduce for faster runs.
+            max_iter: Number of gradient descent steps per restart (default: 2500,
+                      matching the paper exactly).
+            learning_rate: Step size for gradient descent (default: 0.1).
             abundance_method: 'A' for 4-mer relative abundance or 'B' for TCRb relative
                               abundance (default: 'A')
             sequence_col: Column name containing TCR sequences in repertoire files (default: 'cdr3_aa')
@@ -50,6 +52,7 @@ class Ostmeyer2019Evaluator:
         self.train_val_ratio = train_val_ratio
         self.n_restarts = n_restarts
         self.max_iter = max_iter
+        self.learning_rate = learning_rate
         self.abundance_method = abundance_method
         self.sequence_col = sequence_col
         self.subsample_fraction = subsample_fraction
@@ -229,6 +232,7 @@ class Ostmeyer2019Evaluator:
             model = MIL_TCR_Classifier(
                 n_restarts=self.n_restarts,
                 max_iter=self.max_iter,
+                learning_rate=self.learning_rate,
                 abundance_method=method,
                 sequence_col=self.sequence_col,
                 subsample_fraction=self.subsample_fraction,
@@ -286,6 +290,7 @@ class Ostmeyer2019Evaluator:
         self.model = MIL_TCR_Classifier(
             n_restarts=self.n_restarts,
             max_iter=self.max_iter,
+            learning_rate=self.learning_rate,
             abundance_method=best_method,
             sequence_col=self.sequence_col,
             subsample_fraction=self.subsample_fraction,
@@ -408,6 +413,7 @@ class Ostmeyer2019Evaluator:
                 self.model = MIL_TCR_Classifier(
                     n_restarts=self.n_restarts,
                     max_iter=self.max_iter,
+                    learning_rate=self.learning_rate,
                     abundance_method=self.abundance_method,
                     sequence_col=self.sequence_col,
                     subsample_fraction=self.subsample_fraction,
@@ -526,8 +532,9 @@ if __name__ == "__main__":
     # Initialize evaluator with custom train/val ratio (default is 0.9 for 9:1 split)
     evaluator = Ostmeyer2019Evaluator(
         train_val_ratio=0.9,
-        n_restarts=100,
+        n_restarts=250_000,
         max_iter=2500,
+        learning_rate=0.1,
         abundance_method='A',
         sequence_col='cdr3_aa'
     )

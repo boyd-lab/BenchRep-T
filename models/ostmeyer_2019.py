@@ -15,7 +15,6 @@ This module contains the core model for:
 
 import pandas as pd
 import numpy as np
-from scipy.optimize import minimize
 from tqdm import tqdm
 from utils.repertoire_io import load_raw_repertoire
 
@@ -72,7 +71,7 @@ class MIL_TCR_Classifier:
     is kept (paper uses 100k-375k restarts; n_restarts controls the budget).
     """
 
-    def __init__(self, n_restarts=100, max_iter=2500,
+    def __init__(self, n_restarts=250_000, max_iter=2500, learning_rate=0.1,
                  abundance_method='A',
                  sequence_col='cdr3_aa', min_cdr3_length=10,
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
@@ -80,11 +79,11 @@ class MIL_TCR_Classifier:
         Initialize the model.
 
         Args:
-            n_restarts: Number of random restarts for optimization (default: 100).
-                        Paper uses 100,000-375,000; fewer restarts trade quality
-                        for speed.
-            max_iter: Maximum L-BFGS-B iterations per restart (default: 2500,
-                      matching the paper's gradient steps per restart).
+            n_restarts: Number of random restarts for optimization (default: 250,000,
+                        matching the paper's best models). Reduce for faster runs.
+            max_iter: Number of gradient descent steps per restart (default: 2500,
+                      matching the paper exactly).
+            learning_rate: Step size for gradient descent (default: 0.1).
             abundance_method: 'A' for 4-mer relative abundance (Equation A in
                               paper) or 'B' for TCRb relative abundance
                               (Equation B). Default: 'A'.
@@ -102,6 +101,7 @@ class MIL_TCR_Classifier:
         """
         self.n_restarts = n_restarts
         self.max_iter = max_iter
+        self.learning_rate = learning_rate
         self.abundance_method = abundance_method
         self.sequence_col = sequence_col
         self.min_cdr3_length = min_cdr3_length
@@ -409,23 +409,19 @@ class MIL_TCR_Classifier:
 
         for _ in tqdm(range(self.n_restarts), desc="Optimization restarts"):
             # Initialize per paper: W1-W20 and b0 ~ N(0, 1/n_features), W21=0
-            initial_params = np.zeros(22)
-            initial_params[:20] = np.random.randn(20) * (1.0 / n_features)
-            initial_params[20] = 0.0  # W21 (log-abundance weight) = 0
-            initial_params[21] = np.random.randn() * (1.0 / n_features)  # b0
+            params = np.zeros(22)
+            params[:20] = np.random.randn(20) * (1.0 / n_features)
+            params[20] = 0.0  # W21 (log-abundance weight) = 0
+            params[21] = np.random.randn() * (1.0 / n_features)  # b0
 
-            result = minimize(
-                self._compute_loss_and_gradient,
-                initial_params,
-                args=(training_data, valid_labels),
-                method='L-BFGS-B',
-                jac=True,
-                options={'maxiter': self.max_iter, 'disp': False}
-            )
+            # Fixed-step gradient descent matching paper (2500 steps per restart)
+            for _ in range(self.max_iter):
+                loss, grad = self._compute_loss_and_gradient(params, training_data, valid_labels)
+                params -= self.learning_rate * grad
 
-            if result.fun < best_loss:
-                best_loss = result.fun
-                best_params = result.x.copy()
+            if loss < best_loss:
+                best_loss = loss
+                best_params = params.copy()
 
         self.weights = best_params[:21]
         self.bias = best_params[21]
