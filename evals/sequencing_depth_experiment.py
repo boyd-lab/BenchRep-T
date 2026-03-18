@@ -17,9 +17,9 @@ Usage (fraction mode):
         --metadata_path data/metadata.tsv \\
         --repertoire_data_dir /path/to/data \\
         --depths 0.01 0.05 0.1 0.2 0.5 1.0 \\
-        --n_repeats 3 \\
+        --n_repeats 5 \\
         --random_seed 42 \\
-        --output_csv results/depth_experiment.csv
+        --output_json results/depth_experiment.json
 
 Usage (count mode):
     python evals/sequencing_depth_experiment.py \\
@@ -29,13 +29,14 @@ Usage (count mode):
         --repertoire_data_dir /path/to/data \\
         --n_seqs 1000 5000 10000 20000 50000 100000 \\
         --min_sequences 100000 \\
-        --n_repeats 3 \\
+        --n_repeats 5 \\
         --random_seed 42 \\
-        --output_csv results/depth_experiment_counts.csv
+        --output_json results/depth_experiment_counts.json
 """
 
 import argparse
 import gzip
+import json
 import os
 import sys
 import time
@@ -179,13 +180,13 @@ def _run_one_depth(model_name, target_disease, metadata_path, repertoire_data_di
 
 def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_data_dir,
                          depths=None, n_seqs=None, min_sequences=100000,
-                         n_repeats=3, random_seed=7,
-                         output_csv=None, giana_dir=None):
+                         n_repeats=5, random_seed=7,
+                         output_json=None, giana_dir=None):
     """
     Run the sequencing depth experiment.
 
     For each depth x repeat combination, runs full 3-fold cross-validation
-    and records AUROC/AUPR metrics.
+    and records overall AUROC/AUPR metrics.
 
     Either `depths` (fraction mode) or `n_seqs` (count mode) must be provided,
     but not both.
@@ -198,13 +199,13 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
         depths: List of float fractions (fraction mode)
         n_seqs: List of int absolute sequence counts (count mode)
         min_sequences: Minimum repertoire size to include in count mode (default: 100000)
-        n_repeats: Number of random subsampling repeats per depth (default: 3)
+        n_repeats: Number of random subsampling repeats per depth (default: 5)
         random_seed: Base random seed (default: 7)
-        output_csv: Path to save detailed CSV results (optional)
+        output_json: Path to save results JSON (optional)
         giana_dir: Path to GIANA directory (for giana_2020 model)
 
     Returns:
-        DataFrame with all experiment results
+        List of result dicts (one per depth x repeat)
     """
     if (depths is None) == (n_seqs is None):
         raise ValueError("Provide exactly one of 'depths' (fraction mode) or "
@@ -266,71 +267,52 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
 
             elapsed = time.time() - start_time
 
-            fold_col = 'malid_cross_validation_fold_id_when_in_test_set'
-            fold_groups = scores_df.groupby(fold_col)
-            n_folds_run = scores_df[fold_col].nunique()
-
-            # Extract per-fold results
-            for fold_val, fold_df in fold_groups:
-                fold_auroc = roc_auc_score(fold_df['disease_label'], fold_df['model_score'])
-                fold_aupr = average_precision_score(fold_df['disease_label'], fold_df['model_score'])
-                all_results.append({
-                    'model': model_name,
-                    'target_disease': target_disease,
-                    'sampling_mode': 'count' if use_count_mode else 'fraction',
-                    'depth': depth,
-                    'repeat': repeat_idx,
-                    'subsample_seed': subsample_seed,
-                    'fold': fold_val,
-                    'test_auroc': fold_auroc,
-                    'test_aupr': fold_aupr,
-                    'n_test': len(fold_df),
-                    'elapsed_seconds': elapsed / n_folds_run,
-                })
-
-            # Also store overall (all-folds-combined) result
             overall_auroc = roc_auc_score(scores_df['disease_label'], scores_df['model_score'])
             overall_aupr = average_precision_score(scores_df['disease_label'], scores_df['model_score'])
             all_results.append({
-                'model': model_name,
-                'target_disease': target_disease,
-                'sampling_mode': 'count' if use_count_mode else 'fraction',
                 'depth': depth,
                 'repeat': repeat_idx,
                 'subsample_seed': subsample_seed,
-                'fold': 'overall',
-                'test_auroc': overall_auroc,
-                'test_aupr': overall_aupr,
-                'n_test': len(scores_df),
-                'elapsed_seconds': elapsed,
+                'auroc': overall_auroc,
+                'aupr': overall_aupr,
+                'n_samples': len(scores_df),
+                'elapsed_seconds': round(elapsed, 2),
             })
 
-    results_df = pd.DataFrame(all_results)
-
-    # Save to CSV if requested
-    if output_csv:
-        output_dir = os.path.dirname(output_csv)
+    # Save JSON if requested
+    if output_json:
+        output_dir = os.path.dirname(output_json)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
-        results_df.to_csv(output_csv, index=False)
-        print(f"\nDetailed results saved to: {output_csv}")
+        output_data = {
+            'model': model_name,
+            'target_disease': target_disease,
+            'sampling_mode': 'count' if use_count_mode else 'fraction',
+            'n_repeats': n_repeats,
+            'random_seed': random_seed,
+            'results': all_results,
+        }
+        if use_count_mode:
+            output_data['min_sequences'] = min_sequences
+        with open(output_json, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        print(f"\nResults saved to: {output_json}")
 
     # Print summary table
-    print_summary(results_df, use_count_mode=use_count_mode)
+    print_summary(all_results, use_count_mode=use_count_mode)
 
-    return results_df
+    return all_results
 
 
-def print_summary(results_df, use_count_mode=False):
+def print_summary(results, use_count_mode=False):
     """
-    Print a summary table of mean +/- std AUROC/AUPR per depth.
+    Print a summary table of mean +/- stderr AUROC/AUPR per depth.
 
     Args:
-        results_df: DataFrame with experiment results
+        results: List of result dicts with 'depth', 'auroc', 'aupr' keys
         use_count_mode: Whether depths are absolute counts (True) or fractions (False)
     """
-    # Filter to 'overall' fold entries only for the summary
-    overall = results_df[results_df['fold'] == 'overall'].copy()
+    results_df = pd.DataFrame(results)
 
     print(f"\n{'='*70}")
     print("SEQUENCING DEPTH EXPERIMENT SUMMARY")
@@ -339,27 +321,27 @@ def print_summary(results_df, use_count_mode=False):
     else:
         print("Mode: fraction of repertoire")
     print(f"{'='*70}")
-    print(f"{'Depth':>10s} | {'N_repeats':>9s} | {'AUROC':>16s} | {'AUPR':>16s}")
-    print(f"{'-'*10}-+-{'-'*9}-+-{'-'*16}-+-{'-'*16}")
+    print(f"{'Depth':>10s} | {'N':>3s} | {'AUROC':>18s} | {'AUPR':>18s}")
+    print(f"{'-'*10}-+-{'-'*3}-+-{'-'*18}-+-{'-'*18}")
 
-    for depth in sorted(overall['depth'].unique()):
-        subset = overall[overall['depth'] == depth]
+    for depth in sorted(results_df['depth'].unique()):
+        subset = results_df[results_df['depth'] == depth]
         n = len(subset)
 
-        auroc_mean = subset['test_auroc'].mean()
-        auroc_std = subset['test_auroc'].std() if n > 1 else 0.0
+        auroc_mean = subset['auroc'].mean()
+        auroc_se = subset['auroc'].std() / np.sqrt(n) if n > 1 else 0.0
 
-        aupr_mean = subset['test_aupr'].mean()
-        aupr_std = subset['test_aupr'].std() if n > 1 else 0.0
+        aupr_mean = subset['aupr'].mean()
+        aupr_se = subset['aupr'].std() / np.sqrt(n) if n > 1 else 0.0
 
         if use_count_mode:
             depth_label = f"{int(depth):>10,}"
         else:
             depth_label = f"{depth:>9.0%}"
 
-        print(f"{depth_label} | {n:>9d} | "
-              f"{auroc_mean:.4f} +/- {auroc_std:.4f} | "
-              f"{aupr_mean:.4f} +/- {aupr_std:.4f}")
+        print(f"{depth_label} | {n:>3d} | "
+              f"{auroc_mean:.4f} +/- {auroc_se:.4f} | "
+              f"{aupr_mean:.4f} +/- {aupr_se:.4f}")
 
     print(f"{'='*70}")
 
@@ -392,13 +374,13 @@ if __name__ == "__main__":
                         help='Count-mode only: minimum repertoire size to include '
                              '(default: 100000). Repertoires below this threshold are '
                              'excluded from all depth levels.')
-    parser.add_argument('--n_repeats', type=int, default=3,
+    parser.add_argument('--n_repeats', type=int, default=5,
                         help='Number of random subsampling repeats per depth '
-                             '(default: 3). Ignored for full-depth level.')
+                             '(default: 5). Ignored for full-depth level.')
     parser.add_argument('--random_seed', type=int, default=7,
                         help='Base random seed (default: 7)')
-    parser.add_argument('--output_csv', type=str, default=None,
-                        help='Path to save detailed results CSV')
+    parser.add_argument('--output_json', type=str, default=None,
+                        help='Path to save results JSON')
     parser.add_argument('--giana_dir', type=str, default=None,
                         help='Path to GIANA installation directory '
                              '(only needed for giana_2020 model)')
@@ -432,6 +414,6 @@ if __name__ == "__main__":
         min_sequences=args.min_sequences,
         n_repeats=args.n_repeats,
         random_seed=args.random_seed,
-        output_csv=args.output_csv,
+        output_json=args.output_json,
         giana_dir=args.giana_dir
     )
