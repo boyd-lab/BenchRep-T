@@ -68,7 +68,7 @@ class MIL_TCR_Classifier:
     worsened performance.
 
     Multiple random restarts are used; the run with the lowest training loss
-    is kept (paper uses 100k-375k restarts; n_restarts controls the budget).
+    is kept (default: 250,000 restarts, matching the paper's best models).
     """
 
     def __init__(self, n_restarts=250_000, max_iter=2500, learning_rate=0.1,
@@ -400,7 +400,7 @@ class MIL_TCR_Classifier:
         if len(training_data) == 0:
             raise ValueError("No valid training samples found!")
 
-        n_features = 21  # 20 Atchley + 1 abundance
+        n_features = 20  # 20 Atchley factors (paper initializes W ~ N(0, 1/n_features))
 
         print(f"Training on {len(training_data)} samples with {self.n_restarts} restarts...")
 
