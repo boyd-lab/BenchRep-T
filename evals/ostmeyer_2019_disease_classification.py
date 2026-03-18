@@ -508,8 +508,10 @@ if __name__ == "__main__":
                         help='Target disease to classify (e.g., Lupus, T1D, HIV)')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV')
+    parser.add_argument('--n_restarts', type=int, default=200,
+                        help='Number of L-BFGS-B random restarts (default: 200)')
     args = parser.parse_args()
-    
+
     print("Ostmeyer 2019 Disease Classification Evaluation")
     print("=" * 60)
     print("\nTo run evaluation, ensure you have:")
@@ -521,11 +523,11 @@ if __name__ == "__main__":
     print("\nFile names are constructed as: {prefix}{participant_label}_{specimen_label}{suffix}")
     print("  e.g., 'part_table_BFI-0003052_S001.tsv.gz'")
     print("\nBinary labels are created automatically based on the target disease.")
-    
+
     # Initialize evaluator with custom train/val ratio (default is 0.9 for 9:1 split)
     evaluator = Ostmeyer2019Evaluator(
         train_val_ratio=0.9,
-        n_restarts=200,
+        n_restarts=args.n_restarts,
         lbfgsb_maxiter=1000,
         abundance_method='A',
         sequence_col='cdr3_aa'
