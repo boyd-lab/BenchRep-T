@@ -31,7 +31,8 @@ class Emerson2017Evaluator:
     
     def __init__(self, train_val_ratio=0.9, p_value_threshold=1e-4, sequence_col='cdr3_aa',
                  v_col='v_call', j_col='j_call',
-                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
+                 indices_map=None):
         """
         Initialize the evaluator.
 
@@ -44,6 +45,7 @@ class Emerson2017Evaluator:
             subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
             subsample_seed: Random seed for reproducible subsampling (default: 42)
             subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
+            indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
         """
         self.train_val_ratio = train_val_ratio
         self.p_value_threshold = p_value_threshold
@@ -53,6 +55,7 @@ class Emerson2017Evaluator:
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
+        self.indices_map = indices_map
         self.model = None
     
     def load_metadata(self, metadata_path):
@@ -220,7 +223,7 @@ class Emerson2017Evaluator:
             p_value_threshold=p_value_candidates[0], sequence_col=self.sequence_col,
             v_col=self.v_col, j_col=self.j_col,
             subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
-            subsample_n=self.subsample_n
+            subsample_n=self.subsample_n, indices_map=self.indices_map
         )
         
         # Step 1: Preload all repertoire files once (train + val)
@@ -239,7 +242,8 @@ class Emerson2017Evaluator:
             model = CMV_Immunosequencing_Model(
                 p_value_threshold=p_val, sequence_col=self.sequence_col,
                 v_col=self.v_col, j_col=self.j_col,
-                subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed
+                subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
+                indices_map=self.indices_map
             )
             model._repertoire_cache = base_model._repertoire_cache
             model._tcr_stats_cache = base_model._tcr_stats_cache
@@ -295,7 +299,7 @@ class Emerson2017Evaluator:
             p_value_threshold=best_p_value, sequence_col=self.sequence_col,
             v_col=self.v_col, j_col=self.j_col,
             subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
-            subsample_n=self.subsample_n
+            subsample_n=self.subsample_n, indices_map=self.indices_map
         )
         self.model._repertoire_cache = base_model._repertoire_cache
         self.model._tcr_stats_cache = base_model._tcr_stats_cache
@@ -412,7 +416,8 @@ class Emerson2017Evaluator:
                 self.model = CMV_Immunosequencing_Model(
                     p_value_threshold=self.p_value_threshold, sequence_col=self.sequence_col,
                     v_col=self.v_col, j_col=self.j_col,
-                    subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed
+                    subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
+                    indices_map=self.indices_map
                 )
                 self.model.identify_diagnostic_tcrs(train_files, train_labels)
                 self.model.train_beta_binomial_model(train_files, train_labels)

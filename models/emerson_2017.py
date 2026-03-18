@@ -11,6 +11,7 @@ This module contains the core model for:
 - Predicting CMV status for new patients
 """
 
+import os
 import pandas as pd
 import numpy as np
 from scipy.stats import fisher_exact
@@ -30,7 +31,8 @@ class CMV_Immunosequencing_Model:
     
     def __init__(self, p_value_threshold=1e-4, sequence_col='cdr3_aa',
                  v_col='v_call', j_col='j_call',
-                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
+                 indices_map=None):
         """
         Initialize the model with a p-value threshold for feature selection.
         Paper uses 1e-4 as optimized via cross-validation[cite: 52].
@@ -43,6 +45,8 @@ class CMV_Immunosequencing_Model:
             subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
             subsample_seed: Random seed for reproducible subsampling (default: 42)
             subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
+            indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
+                         When set, overrides subsample_n/fraction/seed.
         """
         self.p_value_threshold = p_value_threshold
         self.sequence_col = sequence_col
@@ -51,6 +55,7 @@ class CMV_Immunosequencing_Model:
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
+        self.indices_map = indices_map
         self.diagnostic_tcrs = set()
         self.model_params = {}  # Will store alphas, betas, and priors
         self._repertoire_cache = {}  # Cache for loaded repertoire data
@@ -71,8 +76,12 @@ class CMV_Immunosequencing_Model:
         if use_cache and file_path in self._repertoire_cache:
             return self._repertoire_cache[file_path]
 
+        indices = None
+        if self.indices_map is not None:
+            rep_id = os.path.basename(file_path).replace('.tsv.gz', '').replace('.tsv', '')
+            indices = self.indices_map.get(rep_id)
         df = load_raw_repertoire(file_path, self.subsample_n, self.subsample_fraction,
-                                 self.subsample_seed)
+                                 self.subsample_seed, subsample_indices=indices)
         if df.empty:
             return set()
 

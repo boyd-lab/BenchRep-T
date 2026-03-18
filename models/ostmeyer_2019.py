@@ -13,6 +13,7 @@ This module contains the core model for:
 - Predicting disease status for new patients
 """
 
+import os
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
@@ -75,7 +76,8 @@ class MIL_TCR_Classifier:
     def __init__(self, n_restarts=200, lbfgsb_maxiter=1000,
                  abundance_method='A',
                  sequence_col='cdr3_aa', min_cdr3_length=10,
-                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
+                 indices_map=None):
         """
         Initialize the model.
 
@@ -99,6 +101,8 @@ class MIL_TCR_Classifier:
                             (default: 7)
             subsample_n: Absolute number of reads to keep (overrides
                          subsample_fraction if set)
+            indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
+                         When set, overrides subsample_n/fraction/seed.
         """
         self.n_restarts = n_restarts
         self.lbfgsb_maxiter = lbfgsb_maxiter
@@ -108,6 +112,7 @@ class MIL_TCR_Classifier:
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
+        self.indices_map = indices_map
 
         self.atchley = ATCHLEY_FACTORS
 
@@ -133,8 +138,12 @@ class MIL_TCR_Classifier:
         if use_cache and file_path in self._repertoire_cache:
             return self._repertoire_cache[file_path]
 
+        indices = None
+        if self.indices_map is not None:
+            rep_id = os.path.basename(file_path).replace('.tsv.gz', '').replace('.tsv', '')
+            indices = self.indices_map.get(rep_id)
         df = load_raw_repertoire(file_path, self.subsample_n, self.subsample_fraction,
-                                 self.subsample_seed)
+                                 self.subsample_seed, subsample_indices=indices)
         if df.empty:
             return df
 

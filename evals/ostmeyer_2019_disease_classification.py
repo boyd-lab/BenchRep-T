@@ -31,7 +31,8 @@ class Ostmeyer2019Evaluator:
     
     def __init__(self, train_val_ratio=0.9, n_restarts=200, lbfgsb_maxiter=1000,
                  abundance_method='A', sequence_col='cdr3_aa',
-                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
+                 indices_map=None):
         """
         Initialize the evaluator.
 
@@ -45,6 +46,7 @@ class Ostmeyer2019Evaluator:
             subsample_fraction: Fraction of reads to keep for depth simulation (default: 1.0)
             subsample_seed: Random seed for reproducible subsampling (default: 7)
             subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
+            indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
         """
         self.train_val_ratio = train_val_ratio
         self.n_restarts = n_restarts
@@ -54,6 +56,7 @@ class Ostmeyer2019Evaluator:
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
+        self.indices_map = indices_map
         self.model = None
     
     def load_metadata(self, metadata_path):
@@ -231,7 +234,8 @@ class Ostmeyer2019Evaluator:
                 abundance_method=method,
                 sequence_col=self.sequence_col,
                 subsample_fraction=self.subsample_fraction,
-                subsample_seed=self.subsample_seed
+                subsample_seed=self.subsample_seed,
+                indices_map=self.indices_map
             )
 
             # Preload and pre-extract features once per method
@@ -289,7 +293,8 @@ class Ostmeyer2019Evaluator:
             sequence_col=self.sequence_col,
             subsample_fraction=self.subsample_fraction,
             subsample_seed=self.subsample_seed,
-            subsample_n=self.subsample_n
+            subsample_n=self.subsample_n,
+            indices_map=self.indices_map
         )
         self.model.preload_repertoires(all_files)
         for file_path in tqdm(all_files, desc="Extracting features (final model)"):
@@ -410,7 +415,8 @@ class Ostmeyer2019Evaluator:
                     abundance_method=self.abundance_method,
                     sequence_col=self.sequence_col,
                     subsample_fraction=self.subsample_fraction,
-                    subsample_seed=self.subsample_seed
+                    subsample_seed=self.subsample_seed,
+                    indices_map=self.indices_map
                 )
                 self.model.train(train_files, train_labels)
 
