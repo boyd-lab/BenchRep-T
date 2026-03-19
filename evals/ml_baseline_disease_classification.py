@@ -58,9 +58,17 @@ class MLBaselineEvaluator:
     def load_metadata(self, metadata_path):
         return pd.read_csv(metadata_path, sep='\t')
 
-    def prepare_disease_data(self, metadata, target_disease, disease_col='disease'):
+    def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
+                             require_demographics=False):
         """
         Filter metadata to target disease vs. Healthy/Background and add binary labels.
+
+        Args:
+            metadata: DataFrame with metadata.
+            target_disease: Disease name to classify.
+            disease_col: Column with disease labels.
+            require_demographics: If True, drop rows with missing age, sex,
+                or ancestry so the subset matches the demographic baseline.
 
         Returns:
             DataFrame with a 'label' column (1 = disease, 0 = healthy).
@@ -68,6 +76,15 @@ class MLBaselineEvaluator:
         mask = metadata[disease_col].isin([target_disease, self.HEALTHY_LABEL])
         filtered = metadata[mask].copy()
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
+
+        if require_demographics:
+            before = len(filtered)
+            filtered = filtered.dropna(subset=['age', 'sex', 'ancestry'])
+            filtered = filtered[filtered['ancestry'].str.strip() != '']
+            after = len(filtered)
+            if before != after:
+                print(f"  Dropped {before - after} rows with missing demographics "
+                      f"({before} -> {after})")
 
         n_disease = (filtered['label'] == 1).sum()
         n_healthy = (filtered['label'] == 0).sum()
@@ -116,7 +133,8 @@ class MLBaselineEvaluator:
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7,
                               tune_parameters=True,
-                              allowed_participants=None):
+                              allowed_participants=None,
+                              require_demographics=False):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -139,12 +157,16 @@ class MLBaselineEvaluator:
             allowed_participants: Optional set of specimen labels to restrict to
                                   (e.g., for depth experiments filtering to
                                   repertoires with sufficient sequences).
+            require_demographics: If True, drop repertoires with missing
+                                  demographic data (age, sex, ancestry) so the
+                                  subset matches the demographic baseline.
 
         Returns:
             Dict with fold-level results and overall AUROC / AUPR.
         """
         raw_metadata = self.load_metadata(metadata_path)
-        metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col)
+        metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col,
+                                                require_demographics=require_demographics)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
@@ -266,6 +288,9 @@ if __name__ == "__main__":
                         help='Internal val fraction for alpha tuning (default: 0.2)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
                         help='CV folds for C tuning (default: 5)')
+    parser.add_argument('--require_demographics', action='store_true',
+                        help='Drop repertoires with missing demographic data '
+                             '(age, sex, ancestry) to match demographic baseline subset')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
@@ -279,6 +304,7 @@ if __name__ == "__main__":
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
+        require_demographics=args.require_demographics,
     )
 
     if args.output_csv:
