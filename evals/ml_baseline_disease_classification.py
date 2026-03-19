@@ -28,7 +28,8 @@ class MLBaselineEvaluator:
 
     def __init__(self, val_split=0.2, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
-                 subsample_fraction=1.0, subsample_seed=7):
+                 subsample_fraction=1.0, subsample_seed=7,
+                 indices_map=None):
         """
         Args:
             val_split: Internal val fraction used by the model for alpha tuning.
@@ -38,6 +39,7 @@ class MLBaselineEvaluator:
             j_gene_col: Column containing J gene calls.
             subsample_fraction: Fraction of reads to sample per repertoire.
             subsample_seed: Random seed for reproducibility.
+            indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
         """
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
@@ -46,6 +48,7 @@ class MLBaselineEvaluator:
         self.j_gene_col = j_gene_col
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
+        self.indices_map = indices_map
         self.model = None
 
     # ------------------------------------------------------------------
@@ -111,7 +114,9 @@ class MLBaselineEvaluator:
                               file_prefix='part_table_', file_suffix='.tsv.gz',
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
-                              n_folds=3):
+                              n_folds=3, random_state=7,
+                              tune_parameters=True,
+                              allowed_participants=None):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -128,6 +133,12 @@ class MLBaselineEvaluator:
             disease_col: Column with disease labels.
             fold_col: Column with pre-defined fold IDs (0, 1, 2).
             n_folds: Number of folds (default: 3).
+            random_state: Random seed for reproducibility (default: 7).
+            tune_parameters: Accepted for API compatibility (tuning is always
+                             handled internally by the model's train() method).
+            allowed_participants: Optional set of specimen labels to restrict to
+                                  (e.g., for depth experiments filtering to
+                                  repertoires with sufficient sequences).
 
         Returns:
             Dict with fold-level results and overall AUROC / AUPR.
@@ -137,6 +148,13 @@ class MLBaselineEvaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        # Filter to allowed participants if specified (e.g., for depth experiments)
+        if allowed_participants is not None:
+            before = len(metadata)
+            metadata = metadata[metadata['specimen_label'].isin(allowed_participants)]
+            print(f"Filtered to {len(metadata)} of {before} specimens "
+                  f"based on allowed_participants set.")
 
         all_test_rows = []
         all_probs = []
@@ -168,6 +186,7 @@ class MLBaselineEvaluator:
                 j_gene_col=self.j_gene_col,
                 subsample_fraction=self.subsample_fraction,
                 subsample_seed=self.subsample_seed,
+                indices_map=self.indices_map,
             )
 
             train_result = self.model.train(train_files, train_labels)

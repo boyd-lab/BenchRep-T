@@ -32,7 +32,7 @@ def create_evaluator(model_name, indices_map=None, giana_dir=None):
     Create an evaluator instance for the specified model.
 
     Args:
-        model_name: One of 'emerson_2017', 'ostmeyer_2019', 'giana_2020'
+        model_name: One of 'emerson_2017', 'ostmeyer_2019', 'giana_2020', 'ml_baseline'
         indices_map: Dict mapping rep_id to pre-computed row indices
         giana_dir: Path to GIANA directory (only needed for giana_2020)
 
@@ -48,9 +48,12 @@ def create_evaluator(model_name, indices_map=None, giana_dir=None):
     elif model_name == 'giana_2020':
         from evals.giana_2020_disease_classification import GIANA2020Evaluator
         return GIANA2020Evaluator(indices_map=indices_map, giana_dir=giana_dir)
+    elif model_name == 'ml_baseline':
+        from evals.ml_baseline_disease_classification import MLBaselineEvaluator
+        return MLBaselineEvaluator(indices_map=indices_map)
     else:
         raise ValueError(f"Unknown model: {model_name}. "
-                         f"Choose from: emerson_2017, ostmeyer_2019, giana_2020")
+                         f"Choose from: emerson_2017, ostmeyer_2019, giana_2020, ml_baseline")
 
 
 def load_depth_indices(path):
@@ -262,7 +265,7 @@ if __name__ == "__main__":
                     "at varying sequencing depths using pre-generated indices"
     )
     parser.add_argument('--model', type=str, required=True,
-                        choices=['emerson_2017', 'ostmeyer_2019', 'giana_2020'],
+                        choices=['emerson_2017', 'ostmeyer_2019', 'giana_2020', 'ml_baseline'],
                         help='Model to evaluate')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Target disease to classify (e.g., CMV, Lupus, T1D)')

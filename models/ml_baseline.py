@@ -9,6 +9,7 @@ Implements the method from the AIRR-ML Kaggle competition:
   (alpha tuned via sweep on an internal 80/20 validation split)
 """
 
+import os
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -56,7 +57,8 @@ class Gapped_4mer_VJgene:
 
     def __init__(self, val_split=0.2, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
-                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None):
+                 subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
+                 indices_map=None):
         """
         Args:
             val_split: Fraction of training data held out internally for alpha tuning.
@@ -67,6 +69,7 @@ class Gapped_4mer_VJgene:
             subsample_fraction: Fraction of reads to sample per repertoire (depth sim).
             subsample_seed: Random seed for reproducibility.
             subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set).
+            indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
         """
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
@@ -76,6 +79,7 @@ class Gapped_4mer_VJgene:
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
+        self.indices_map = indices_map
 
         # Caches
         self._repertoire_cache = {}
@@ -100,8 +104,13 @@ class Gapped_4mer_VJgene:
         if use_cache and file_path in self._repertoire_cache:
             return self._repertoire_cache[file_path]
 
+        indices = None
+        if self.indices_map is not None:
+            rep_id = os.path.basename(file_path).replace('.tsv.gz', '').replace('.tsv', '')
+            indices = self.indices_map.get(rep_id)
+
         df = load_raw_repertoire(file_path, self.subsample_n, self.subsample_fraction,
-                                 self.subsample_seed)
+                                 self.subsample_seed, subsample_indices=indices)
 
         if use_cache:
             self._repertoire_cache[file_path] = df
