@@ -134,18 +134,17 @@ class DemographicFeaturesEvaluator:
 
     def run_cross_validation(self, metadata_path, target_disease,
                               disease_col='disease',
+                              participant_col='participant_label',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7,
                               C_candidates=None):
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col)
 
-        results = {
-            'target_disease': target_disease,
-            'fold_results': [],
-            'all_probs': [],
-            'all_labels': []
-        }
+        all_test_rows = []
+        all_probs = []
+        all_labels = []
+        fold_results = []
 
         for test_fold in range(n_folds):
             print(f"\n{'='*60}")
@@ -193,7 +192,20 @@ class DemographicFeaturesEvaluator:
             coefs = dict(zip(feature_names, model.coef_[0]))
             print(f"Model coefficients: {coefs}")
 
-            fold_result = {
+            # Build per-sample rows for output DataFrame
+            for (_, row), score in zip(test_data.iterrows(), test_probs):
+                all_test_rows.append({
+                    'participant_label': row[participant_col],
+                    'specimen_label': row['specimen_label'],
+                    'disease_label': int(row['label']),
+                    'disease_label_str': row[disease_col],
+                    'method': 'Demographic_Features',
+                    'disease_model': target_disease,
+                    'model_score': float(score),
+                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                })
+
+            fold_results.append({
                 'fold': test_fold,
                 'n_train': len(train_data),
                 'n_val': len(val_data),
@@ -203,40 +215,32 @@ class DemographicFeaturesEvaluator:
                 'val_aupr': tuning_result['best_val_aupr'],
                 'test_auroc': test_auroc,
                 'test_aupr': test_aupr,
-                'test_probs': test_probs.tolist(),
-                'test_labels': y_test.tolist(),
                 'coefficients': coefs,
-                'tuning_result': tuning_result
-            }
-            results['fold_results'].append(fold_result)
-
-            results['all_probs'].extend(test_probs.tolist())
-            results['all_labels'].extend(y_test.tolist())
+            })
+            all_probs.extend(test_probs.tolist())
+            all_labels.extend(y_test.tolist())
 
         # Overall metrics
-        all_probs = np.array(results['all_probs'])
-        all_labels = np.array(results['all_labels'])
-        overall_auroc = roc_auc_score(all_labels, all_probs)
-        overall_aupr = average_precision_score(all_labels, all_probs)
-
-        results['overall_auroc'] = overall_auroc
-        results['overall_aupr'] = overall_aupr
+        all_probs_arr = np.array(all_probs)
+        all_labels_arr = np.array(all_labels)
+        overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
+        overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
 
         print(f"\n{'='*60}")
         print(f"OVERALL CROSS-VALIDATION RESULTS: {target_disease} vs Healthy")
         print(f"{'='*60}")
-        print(f"Mean Test AUROC: {np.mean([r['test_auroc'] for r in results['fold_results']]):.4f} "
-              f"± {np.std([r['test_auroc'] for r in results['fold_results']]):.4f}")
-        print(f"Mean Test AUPR:  {np.mean([r['test_aupr'] for r in results['fold_results']]):.4f} "
-              f"± {np.std([r['test_aupr'] for r in results['fold_results']]):.4f}")
+        fold_aurocs = [r['test_auroc'] for r in fold_results]
+        fold_auprs = [r['test_aupr'] for r in fold_results]
+        print(f"Mean Test AUROC: {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
+        print(f"Mean Test AUPR:  {np.mean(fold_auprs):.4f} ± {np.std(fold_auprs):.4f}")
         print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
-        print(f"Overall AUPR (all folds combined):  {overall_aupr:.4f}")
+        print(f"Overall AUPR  (all folds combined): {overall_aupr:.4f}")
 
         print(f"\nBest C per fold:")
-        for r in results['fold_results']:
+        for r in fold_results:
             print(f"  Fold {r['fold']}: C={r['best_C']}")
 
-        return results
+        return pd.DataFrame(all_test_rows)
 
 
 if __name__ == "__main__":
@@ -247,6 +251,8 @@ if __name__ == "__main__":
                         help='Path to metadata.tsv file')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Target disease to classify (e.g., Lupus, T1D, HIV)')
+    parser.add_argument('--output_csv', type=str, default=None,
+                        help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
 
     print("Demographic Features Disease Classification Evaluation")
@@ -254,7 +260,7 @@ if __name__ == "__main__":
 
     evaluator = DemographicFeaturesEvaluator(train_val_ratio=0.9)
 
-    results = evaluator.run_cross_validation(
+    scores_df = evaluator.run_cross_validation(
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         n_folds=3,
@@ -262,5 +268,6 @@ if __name__ == "__main__":
         C_candidates=[0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
     )
 
-    print(f"\nOverall AUROC: {results['overall_auroc']:.4f}")
-    print(f"Overall AUPR: {results['overall_aupr']:.4f}")
+    if args.output_csv:
+        scores_df.to_csv(args.output_csv, index=False)
+        print(f"\nScores saved to: {args.output_csv}")
