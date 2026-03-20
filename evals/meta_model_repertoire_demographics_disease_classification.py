@@ -11,7 +11,7 @@ Architecture per CV fold:
   3. Obtain out-of-sample ML baseline predictions on meta_train and test
   4. Extract demographic features for meta_train and test
   5. Train logistic regression meta-model on combined features
-  6. Compare: ML alone, demographics alone, and meta-model on test set
+  6. Evaluate meta-model on test set
 """
 
 import os
@@ -197,17 +197,16 @@ class MetaModelEvaluator:
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7):
         """
-        Run 3-fold CV comparing ML baseline, demographics, and meta-model.
+        Run 3-fold CV for the stacking meta-model.
 
         For each fold, non-test data is split into base_train
         (``base_train_fraction``, default 80 %) used to train the ML baseline,
         and meta_train (remaining 20 %) used to train the meta logistic
-        regression on combined features.  All three models are evaluated on
-        the same held-out test fold.
+        regression on combined features.  The meta-model is evaluated on
+        the held-out test fold.
 
         Returns:
-            DataFrame with per-sample test predictions for three methods:
-            ``ML_Baseline``, ``Demographic_Features``, ``Meta_ML_Demo``.
+            DataFrame with per-sample test predictions for ``Meta_ML_Demo``.
         """
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(raw_metadata, target_disease,
@@ -298,31 +297,13 @@ class MetaModelEvaluator:
                 C=best_meta_c, max_iter=1000, solver='lbfgs')
             meta_model.fit(X_meta_combined, y_meta)
 
-            # --- Train demographics-only model on meta_train ---
-            print("\n--- Training Demographics-Only Model ---")
-            best_demo_c = self._tune_c_cv(
-                X_meta_demo, y_meta, self.META_C_CANDIDATES)
-            print(f"  Best C (demo): {best_demo_c}")
-
-            demo_model = LogisticRegression(
-                C=best_demo_c, max_iter=1000, solver='lbfgs')
-            demo_model.fit(X_meta_demo, y_meta)
-
-            # --- Evaluate all three on test ---
-            test_ml_probs = test_ml_preds[:, 0]  # ml_prob (ensemble)
-            test_demo_probs = demo_model.predict_proba(X_test_demo)[:, 1]
+            # --- Evaluate meta-model on test ---
             test_meta_probs = meta_model.predict_proba(X_test_combined)[:, 1]
 
-            ml_auroc = roc_auc_score(y_test, test_ml_probs)
-            ml_aupr = average_precision_score(y_test, test_ml_probs)
-            demo_auroc = roc_auc_score(y_test, test_demo_probs)
-            demo_aupr = average_precision_score(y_test, test_demo_probs)
             meta_auroc = roc_auc_score(y_test, test_meta_probs)
             meta_aupr = average_precision_score(y_test, test_meta_probs)
 
             print(f"\n--- Fold {test_fold} Test Results ---")
-            print(f"  ML Baseline:     AUROC={ml_auroc:.4f}  AUPR={ml_aupr:.4f}")
-            print(f"  Demographics:    AUROC={demo_auroc:.4f}  AUPR={demo_aupr:.4f}")
             print(f"  Meta (combined): AUROC={meta_auroc:.4f}  AUPR={meta_aupr:.4f}")
 
             # Log meta-model coefficients
@@ -331,16 +312,10 @@ class MetaModelEvaluator:
             for name, coef in meta_coefs.items():
                 print(f"    {name}: {coef:+.4f}")
 
-            demo_coefs = dict(zip(demo_feature_names, demo_model.coef_[0]))
-            print(f"  Demographics-only coefficients:")
-            for name, coef in demo_coefs.items():
-                print(f"    {name}: {coef:+.4f}")
-
-            # Store per-sample predictions for all three methods
-            for (_, row), ml_s, demo_s, meta_s in zip(
-                    test_data.iterrows(), test_ml_probs,
-                    test_demo_probs, test_meta_probs):
-                base_row = {
+            # Store per-sample predictions for meta-model
+            for (_, row), meta_s in zip(
+                    test_data.iterrows(), test_meta_probs):
+                all_test_rows.append({
                     'participant_label': row[participant_col],
                     'specimen_label': row['specimen_label'],
                     'disease_label': int(row['label']),
@@ -348,26 +323,15 @@ class MetaModelEvaluator:
                     'disease_model': target_disease,
                     'malid_cross_validation_fold_id_when_in_test_set':
                         test_fold,
-                }
-                all_test_rows.append({
-                    **base_row, 'method': 'ML_Baseline',
-                    'model_score': float(ml_s)})
-                all_test_rows.append({
-                    **base_row, 'method': 'Demographic_Features',
-                    'model_score': float(demo_s)})
-                all_test_rows.append({
-                    **base_row, 'method': 'Meta_ML_Demo',
-                    'model_score': float(meta_s)})
+                    'method': 'Meta_ML_Demo',
+                    'model_score': float(meta_s),
+                })
 
             fold_results.append({
                 'fold': test_fold,
-                'ml_auroc': ml_auroc, 'ml_aupr': ml_aupr,
-                'demo_auroc': demo_auroc, 'demo_aupr': demo_aupr,
                 'meta_auroc': meta_auroc, 'meta_aupr': meta_aupr,
                 'best_meta_c': best_meta_c,
-                'best_demo_c': best_demo_c,
                 'meta_coefficients': meta_coefs,
-                'demo_coefficients': demo_coefs,
                 'ml_train_result': ml_train_result,
             })
 
@@ -382,49 +346,25 @@ class MetaModelEvaluator:
         print(f"OVERALL RESULTS: {target_disease} vs Healthy")
         print(f"{'='*60}")
 
-        for method in ['ML_Baseline', 'Demographic_Features', 'Meta_ML_Demo']:
-            sub = scores_df[scores_df['method'] == method]
-            auroc = roc_auc_score(sub['disease_label'], sub['model_score'])
-            aupr = average_precision_score(sub['disease_label'],
-                                            sub['model_score'])
-            print(f"  {method:25s}  AUROC={auroc:.4f}  AUPR={aupr:.4f}")
+        overall_auroc = roc_auc_score(scores_df['disease_label'],
+                                       scores_df['model_score'])
+        overall_aupr = average_precision_score(scores_df['disease_label'],
+                                                scores_df['model_score'])
+        print(f"  Meta (ML + Demo)  AUROC={overall_auroc:.4f}  "
+              f"AUPR={overall_aupr:.4f}")
 
-        print(f"\nPer-fold comparison:")
-        print(f"  {'Fold':<6} {'ML AUROC':<12} {'Demo AUROC':<12} "
-              f"{'Meta AUROC':<12} {'ML AUPR':<12} {'Demo AUPR':<12} "
-              f"{'Meta AUPR':<12}")
+        print(f"\nPer-fold results:")
+        print(f"  {'Fold':<6} {'AUROC':<12} {'AUPR':<12}")
         for r in fold_results:
-            print(f"  {r['fold']:<6} {r['ml_auroc']:<12.4f} "
-                  f"{r['demo_auroc']:<12.4f} {r['meta_auroc']:<12.4f} "
-                  f"{r['ml_aupr']:<12.4f} {r['demo_aupr']:<12.4f} "
+            print(f"  {r['fold']:<6} {r['meta_auroc']:<12.4f} "
                   f"{r['meta_aupr']:<12.4f}")
 
-        keys = ['ml_auroc', 'demo_auroc', 'meta_auroc',
-                'ml_aupr', 'demo_aupr', 'meta_aupr']
-        means = {k: np.mean([r[k] for r in fold_results]) for k in keys}
-        stds = {k: np.std([r[k] for r in fold_results]) for k in keys}
-
+        aurocs = [r['meta_auroc'] for r in fold_results]
+        auprs = [r['meta_aupr'] for r in fold_results]
         print(f"\nMean ± Std:")
-        print(f"  ML Baseline:     "
-              f"AUROC={means['ml_auroc']:.4f}±{stds['ml_auroc']:.4f}  "
-              f"AUPR={means['ml_aupr']:.4f}±{stds['ml_aupr']:.4f}")
-        print(f"  Demographics:    "
-              f"AUROC={means['demo_auroc']:.4f}±{stds['demo_auroc']:.4f}  "
-              f"AUPR={means['demo_aupr']:.4f}±{stds['demo_aupr']:.4f}")
         print(f"  Meta (combined): "
-              f"AUROC={means['meta_auroc']:.4f}±{stds['meta_auroc']:.4f}  "
-              f"AUPR={means['meta_aupr']:.4f}±{stds['meta_aupr']:.4f}")
-
-        improvement = means['meta_auroc'] - means['ml_auroc']
-        print(f"\nMeta vs ML Baseline AUROC improvement: {improvement:+.4f}")
-        if improvement > 0.02:
-            print("=> Demographics appear to provide complementary signal "
-                  "to TCR features")
-        elif improvement > 0.005:
-            print("=> Demographics provide marginal additional signal")
-        else:
-            print("=> Demographics do not add meaningful predictive value "
-                  "beyond TCR features")
+              f"AUROC={np.mean(aurocs):.4f}±{np.std(aurocs):.4f}  "
+              f"AUPR={np.mean(auprs):.4f}±{np.std(auprs):.4f}")
 
         return scores_df
 
