@@ -27,7 +27,7 @@ sys.path.insert(0, _DEEPRC_MODELS_DIR)
 
 from architectures import DeepRC, SequenceEmbeddingCNN, AttentionNetwork, OutputNetwork
 from training import train, evaluate
-from dataset_readers import make_dataloaders_from_airr, log_sequence_count_scaling
+from dataset_readers import make_dataloaders_from_airr, log_sequence_count_scaling, no_sequence_count_scaling
 from task_definitions import TaskDefinition, BinaryTarget
 
 
@@ -47,6 +47,7 @@ class DeepRC2020Evaluator:
                  n_worker_processes=4, batch_size=4,
                  sample_n_sequences=int(1e4),
                  kernel_size=9, n_kernels=32,
+                 max_seq_len=50,
                  device=None, results_dir='results/deeprc'):
         """
         Args:
@@ -63,6 +64,8 @@ class DeepRC2020Evaluator:
                                  during training (None = use all).
             kernel_size: CNN kernel size for sequence embedding.
             n_kernels: Number of CNN kernels.
+            max_seq_len: Maximum CDR3 sequence length the model can handle.
+                         Must be >= the longest sequence in the dataset.
             device: torch.device string (default: cuda:0 if available, else cpu).
             results_dir: Base directory for DeepRC checkpoint/tensorboard files.
         """
@@ -77,6 +80,7 @@ class DeepRC2020Evaluator:
         self.sample_n_sequences = sample_n_sequences
         self.kernel_size = kernel_size
         self.n_kernels = n_kernels
+        self.max_seq_len = max_seq_len
         self.results_dir = results_dir
 
         if device is None:
@@ -153,7 +157,7 @@ class DeepRC2020Evaluator:
             n_layers=1, n_units=32,
         )
         model = DeepRC(
-            max_seq_len=30,
+            max_seq_len=self.max_seq_len,
             sequence_embedding_network=seq_emb,
             attention_network=attn_net,
             output_network=out_net,
@@ -270,7 +274,7 @@ class DeepRC2020Evaluator:
                     sample_n_sequences=self.sample_n_sequences,
                     batch_size=self.batch_size,
                     n_worker_processes=self.n_worker_processes,
-                    sequence_counts_scaling_fn=log_sequence_count_scaling,
+                    sequence_counts_scaling_fn=no_sequence_count_scaling,
                     verbose=True,
                 )
 
@@ -366,6 +370,8 @@ if __name__ == '__main__':
                         help='Repertoires per mini-batch (default: 4)')
     parser.add_argument('--sample_n_sequences', type=int, default=int(1e4),
                         help='Sequences sampled per repertoire during training (default: 10000)')
+    parser.add_argument('--max_seq_len', type=int, default=50,
+                        help='Maximum CDR3 sequence length; must be >= longest sequence in data (default: 50)')
     args = parser.parse_args()
 
     evaluator = DeepRC2020Evaluator(
@@ -375,6 +381,7 @@ if __name__ == '__main__':
         results_dir=args.results_dir,
         batch_size=args.batch_size,
         sample_n_sequences=args.sample_n_sequences,
+        max_seq_len=args.max_seq_len,
     )
 
     scores_df = evaluator.run_cross_validation(

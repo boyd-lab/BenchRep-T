@@ -514,6 +514,8 @@ class AIRRRepertoireDataset(Dataset):
                  inputformat: str = 'NCL',
                  sample_n_sequences: int = None,
                  sequence_counts_scaling_fn: Callable = no_sequence_count_scaling,
+                 keep_in_ram: bool = True,
+                 prebuilt_cache: list = None,
                  verbose: bool = False):
         """
         Parameters
@@ -537,6 +539,16 @@ class AIRRRepertoireDataset(Dataset):
             during ``__getitem__``.  None means use all sequences.
         sequence_counts_scaling_fn : callable
             Scaling function applied to raw counts.
+        keep_in_ram : bool
+            If True (default), all repertoire files are read and encoded once
+            during ``__init__`` and kept in RAM.  This matches the behaviour of
+            ``RepertoireDataset(keep_in_ram=True)`` and prevents the GPU from
+            being starved by repeated disk I/O during training.
+        prebuilt_cache : list or None
+            Optional pre-built cache (list of ``(encoded, seq_lens, counts)``
+            tuples, one per repertoire).  If supplied, ``keep_in_ram`` and disk
+            reads are skipped entirely — useful for sharing the cache between
+            the training and training-eval dataloaders.
         verbose : bool
             Print per-file warnings.
         """
@@ -558,6 +570,26 @@ class AIRRRepertoireDataset(Dataset):
         self.aas = self._AAS + '<>^'
         self.n_features = len(self.aas)
         self._aa_to_idx = {c: i for i, c in enumerate(self._AAS)}
+
+        # Byte-level lookup table for fast vectorised encoding (ord -> aa_idx)
+        self._byte_lookup = np.full(256, -1, dtype=np.int8)
+        for char, idx in self._aa_to_idx.items():
+            self._byte_lookup[ord(char)] = idx
+
+        # Pre-load all repertoires into RAM so __getitem__ never touches disk.
+        # A prebuilt_cache (list of (encoded, seq_lens, counts) tuples) can be
+        # passed in to skip the disk read entirely — used to share the cache
+        # between the training and training-eval dataloaders.
+        if prebuilt_cache is not None:
+            self._ram_cache = prebuilt_cache
+        elif keep_in_ram:
+            if verbose:
+                print(f"AIRRRepertoireDataset: pre-loading {self.n_samples} repertoires into RAM...")
+            self._ram_cache = [self._read_repertoire(fp) for fp in self.file_paths]
+            if verbose:
+                print("  Done.")
+        else:
+            self._ram_cache = None
 
     # ------------------------------------------------------------------
     # Helpers (same API as RepertoireDataset)
@@ -595,11 +627,15 @@ class AIRRRepertoireDataset(Dataset):
         else:
             counts = np.ones(len(seqs), dtype=np.float32)
 
-        # Filter: keep only sequences composed entirely of valid AAs
-        valid_mask = np.array(
-            [len(s) > 0 and all(c in self._aa_to_idx for c in s) for s in seqs],
-            dtype=bool,
-        )
+        # Filter: keep only non-empty sequences composed entirely of valid AAs.
+        # Uses the byte lookup table to avoid a Python character loop per sequence.
+        def _all_valid(s):
+            if not s:
+                return False
+            b = np.frombuffer(s.encode('ascii', errors='replace'), dtype=np.uint8)
+            return bool(np.all(self._byte_lookup[b] >= 0))
+
+        valid_mask = np.array([_all_valid(s) for s in seqs], dtype=bool)
         seqs = seqs[valid_mask]
         counts = counts[valid_mask].astype(np.float32)
 
@@ -613,15 +649,23 @@ class AIRRRepertoireDataset(Dataset):
         seq_lens = np.array([len(s) for s in seqs], dtype=np.int64)
         max_len = int(seq_lens.max())
 
-        # Encode as int8 padded array (-1 = padding)
+        # Encode as int8 padded array (-1 = padding) using vectorised byte lookup
         encoded = np.full((len(seqs), max_len), fill_value=-1, dtype=np.int8)
         for i, s in enumerate(seqs):
-            encoded[i, :len(s)] = [self._aa_to_idx[c] for c in s]
+            b = np.frombuffer(s.encode('ascii'), dtype=np.uint8)
+            encoded[i, :len(b)] = self._byte_lookup[b]
 
         return encoded, seq_lens, counts
 
     def get_sample(self, idx: int, sample_n_sequences=None):
-        encoded, seq_lens, counts = self._read_repertoire(self.file_paths[idx])
+        if self._ram_cache is not None:
+            encoded, seq_lens, counts = self._ram_cache[idx]
+            # Work on copies so subsampling doesn't mutate the cache
+            encoded = encoded.copy()
+            seq_lens = seq_lens.copy()
+            counts = counts.copy()
+        else:
+            encoded, seq_lens, counts = self._read_repertoire(self.file_paths[idx])
 
         n_seq = len(seq_lens)
         if sample_n_sequences and sample_n_sequences < n_seq:
@@ -630,6 +674,13 @@ class AIRRRepertoireDataset(Dataset):
             encoded = encoded[chosen]
             seq_lens = seq_lens[chosen]
             counts = counts[chosen]
+
+        # Trim encoded columns to actual max length of the (possibly subsampled)
+        # sequences so that encoded.shape[1] == seq_lens.max().
+        # reduce_and_stack_minibatch derives max_mb_seq_len from seq_lens.max()
+        # across the batch; if encoded.shape[1] ever exceeds that value the
+        # subsequent slice clips silently and the reshape sizes diverge.
+        encoded = encoded[:, :int(seq_lens.max())]
 
         counts = self.sequence_counts_scaling_fn(counts)
 
@@ -669,6 +720,7 @@ def make_dataloaders_from_airr(
         batch_size: int = 4,
         n_worker_processes: int = 4,
         sequence_counts_scaling_fn: Callable = no_sequence_count_scaling,
+        keep_in_ram: bool = True,
         verbose: bool = True,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, DataLoader]:
     """Create DataLoaders directly from AIRR .tsv/.tsv.gz files (no HDF5 needed).
@@ -709,7 +761,8 @@ def make_dataloaders_from_airr(
     validationset_eval_dataloader, testset_eval_dataloader : DataLoader
     """
 
-    def _build_dataset(meta: pd.DataFrame, subsample) -> AIRRRepertoireDataset:
+    def _build_dataset(meta: pd.DataFrame, subsample,
+                       prebuilt_cache=None) -> AIRRRepertoireDataset:
         # Build a tiny DataFrame with the label column so get_targets works
         label_df = meta[[sample_id_col, label_col]].copy()
         label_df = label_df.rename(columns={sample_id_col: 'ID', label_col: 'label'})
@@ -726,6 +779,8 @@ def make_dataloaders_from_airr(
             inputformat=inputformat,
             sample_n_sequences=subsample,
             sequence_counts_scaling_fn=sequence_counts_scaling_fn,
+            keep_in_ram=keep_in_ram,
+            prebuilt_cache=prebuilt_cache,
             verbose=verbose,
         )
 
@@ -733,8 +788,11 @@ def make_dataloaders_from_airr(
         print(f"Building AIRR dataloaders: "
               f"train={len(train_metadata)}, val={len(val_metadata)}, test={len(test_metadata)}")
 
+    # Build train dataset first, then reuse its cache for the eval view of the
+    # same split — avoids reading the same 155+ files twice.
     train_ds      = _build_dataset(train_metadata, sample_n_sequences)
-    train_eval_ds = _build_dataset(train_metadata, None)
+    train_eval_ds = _build_dataset(train_metadata, None,
+                                   prebuilt_cache=train_ds._ram_cache)
     val_ds        = _build_dataset(val_metadata,   None)
     test_ds       = _build_dataset(test_metadata,  None)
 
