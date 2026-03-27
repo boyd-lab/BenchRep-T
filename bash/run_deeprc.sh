@@ -10,8 +10,7 @@ RESULTS=${REPO_ROOT}/results
 LOGDIR=${REPO_ROOT}/logs/deeprc
 mkdir -p "$LOGDIR" "$RESULTS"
 
-DISEASES=("T1D" "HIV")
-
+DISEASES=("Lupus" "T1D" "HIV" "Influenza" "Covid19")
 
 # FIFO GPU token pool
 fifo=$(mktemp -u)
