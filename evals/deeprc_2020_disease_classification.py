@@ -1,9 +1,6 @@
 """
 Evaluation script for DeepRC (2020) disease classification model.
 
-Equivalent to ostmeyer_2019_disease_classification.py but uses DeepRC.
-Reads AIRR-format .tsv.gz repertoire files directly (no HDF5 conversion).
-
 Reference: Widrich et al. 2020, "Modern Hopfield Networks and Attention for
 Immune Repertoire Classification"
 """
