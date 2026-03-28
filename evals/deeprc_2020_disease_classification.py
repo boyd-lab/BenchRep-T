@@ -48,7 +48,8 @@ class DeepRC2020Evaluator:
                  sample_n_sequences=int(1e4),
                  kernel_size=9, n_kernels=32,
                  max_seq_len=50,
-                 device=None, results_dir='results/deeprc'):
+                 device=None, results_dir='results/deeprc',
+                 indices_map=None):
         """
         Args:
             n_updates: Number of gradient updates for training.
@@ -68,6 +69,8 @@ class DeepRC2020Evaluator:
                          Must be >= the longest sequence in the dataset.
             device: torch.device string (default: cuda:0 if available, else cpu).
             results_dir: Base directory for DeepRC checkpoint/tensorboard files.
+            indices_map: Dict mapping rep_id (filename without extension) to a
+                         list of row indices for sequencing-depth experiments.
         """
         self.n_updates = n_updates
         self.evaluate_at = evaluate_at
@@ -82,6 +85,7 @@ class DeepRC2020Evaluator:
         self.n_kernels = n_kernels
         self.max_seq_len = max_seq_len
         self.results_dir = results_dir
+        self.indices_map = indices_map
 
         if device is None:
             self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -200,6 +204,9 @@ class DeepRC2020Evaluator:
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3,
+                              random_state=None,
+                              tune_parameters=True,
+                              p_value_candidates=None,
                               allowed_participants=None):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
@@ -217,6 +224,10 @@ class DeepRC2020Evaluator:
             disease_col: Column with disease labels.
             fold_col: Column with pre-defined test-fold IDs (0, 1, 2).
             n_folds: Number of cross-validation folds.
+            random_state: Random seed for train/val split (overrides self.random_state if given).
+            tune_parameters: Accepted for API compatibility with other evaluators; ignored
+                             (DeepRC has no p-value threshold to tune).
+            p_value_candidates: Accepted for API compatibility; ignored.
             allowed_participants: Optional set of specimen_labels to restrict to.
 
         Returns:
@@ -255,7 +266,7 @@ class DeepRC2020Evaluator:
             train_data, val_data = train_test_split(
                 train_val_data,
                 train_size=self.train_val_ratio,
-                random_state=self.random_state,
+                random_state=random_state if random_state is not None else self.random_state,
                 stratify=train_val_data['label'],
             )
             print(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
@@ -275,6 +286,7 @@ class DeepRC2020Evaluator:
                     batch_size=self.batch_size,
                     n_worker_processes=self.n_worker_processes,
                     sequence_counts_scaling_fn=no_sequence_count_scaling,
+                    indices_map=self.indices_map,
                     verbose=True,
                 )
 

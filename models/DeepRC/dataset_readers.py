@@ -516,6 +516,7 @@ class AIRRRepertoireDataset(Dataset):
                  sequence_counts_scaling_fn: Callable = no_sequence_count_scaling,
                  keep_in_ram: bool = True,
                  prebuilt_cache: list = None,
+                 indices_map: dict = None,
                  verbose: bool = False):
         """
         Parameters
@@ -549,6 +550,11 @@ class AIRRRepertoireDataset(Dataset):
             tuples, one per repertoire).  If supplied, ``keep_in_ram`` and disk
             reads are skipped entirely — useful for sharing the cache between
             the training and training-eval dataloaders.
+        indices_map : dict or None
+            Optional mapping from repertoire ID (filename without extension,
+            e.g. ``'part_table_P1_S1'``) to a list of integer row indices.
+            When provided, only those rows are used from each repertoire file.
+            This is used for sequencing-depth sub-sampling experiments.
         verbose : bool
             Print per-file warnings.
         """
@@ -564,6 +570,7 @@ class AIRRRepertoireDataset(Dataset):
         self.inputformat = inputformat
         self.sample_n_sequences = sample_n_sequences
         self.sequence_counts_scaling_fn = sequence_counts_scaling_fn
+        self.indices_map = indices_map
         self.verbose = verbose
 
         # AA alphabet + 3 positional tokens (identical to RepertoireDataset)
@@ -612,6 +619,12 @@ class AIRRRepertoireDataset(Dataset):
     def _read_repertoire(self, file_path: str):
         """Read one AIRR file and return encoded sequences, lengths, and counts."""
         df = pd.read_csv(file_path, sep='\t', low_memory=False, keep_default_na=False)
+
+        if self.indices_map is not None:
+            rep_id = os.path.basename(file_path).replace('.tsv.gz', '').replace('.tsv', '')
+            indices = self.indices_map.get(rep_id)
+            if indices is not None:
+                df = df.iloc[indices].reset_index(drop=True)
 
         if self.sequence_col not in df.columns:
             raise ValueError(
@@ -721,6 +734,7 @@ def make_dataloaders_from_airr(
         n_worker_processes: int = 4,
         sequence_counts_scaling_fn: Callable = no_sequence_count_scaling,
         keep_in_ram: bool = True,
+        indices_map: dict = None,
         verbose: bool = True,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, DataLoader]:
     """Create DataLoaders directly from AIRR .tsv/.tsv.gz files (no HDF5 needed).
@@ -753,6 +767,9 @@ def make_dataloaders_from_airr(
         Worker processes for the training DataLoader.
     sequence_counts_scaling_fn : callable
         Count scaling function (e.g. ``log_sequence_count_scaling``).
+    indices_map : dict or None
+        Optional mapping from repertoire ID (filename without extension) to a
+        list of integer row indices for depth sub-sampling experiments.
     verbose : bool
 
     Returns
@@ -781,6 +798,7 @@ def make_dataloaders_from_airr(
             sequence_counts_scaling_fn=sequence_counts_scaling_fn,
             keep_in_ram=keep_in_ram,
             prebuilt_cache=prebuilt_cache,
+            indices_map=indices_map,
             verbose=verbose,
         )
 

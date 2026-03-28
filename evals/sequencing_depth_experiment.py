@@ -27,14 +27,13 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 
 
-def create_evaluator(model_name, indices_map=None, giana_dir=None):
+def create_evaluator(model_name, indices_map=None):
     """
     Create an evaluator instance for the specified model.
 
     Args:
         model_name: One of 'emerson_2017', 'ostmeyer_2019', 'giana_2020', 'ml_baseline'
         indices_map: Dict mapping rep_id to pre-computed row indices
-        giana_dir: Path to GIANA directory (only needed for giana_2020)
 
     Returns:
         Evaluator instance
@@ -47,7 +46,10 @@ def create_evaluator(model_name, indices_map=None, giana_dir=None):
         return Ostmeyer2019Evaluator(indices_map=indices_map)
     elif model_name == 'giana_2020':
         from evals.giana_2020_disease_classification import GIANA2020Evaluator
-        return GIANA2020Evaluator(indices_map=indices_map, giana_dir=giana_dir)
+        return GIANA2020Evaluator(indices_map=indices_map)
+    elif model_name == 'deeprc_2020':
+        from evals.deeprc_2020_disease_classification import DeepRC2020Evaluator
+        return DeepRC2020Evaluator(indices_map=indices_map)
     elif model_name == 'ml_baseline':
         from evals.ml_baseline_disease_classification import MLBaselineEvaluator
         return MLBaselineEvaluator(indices_map=indices_map)
@@ -123,8 +125,7 @@ def build_indices_map(repertoires, repeat, depth):
 
 
 def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_data_dir,
-                         depth_indices_path, random_seed=7,
-                         output_json=None, giana_dir=None):
+                         depth_indices_path, random_seed=7, output_json=None):
     """
     Run the sequencing depth experiment using pre-generated indices.
 
@@ -139,7 +140,6 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
         depth_indices_path: Path to depth indices JSON/JSON.GZ file
         random_seed: Random seed for train/val split (default: 7)
         output_json: Path to save results JSON (optional)
-        giana_dir: Path to GIANA directory (for giana_2020 model)
 
     Returns:
         List of result dicts (one per depth x repeat)
@@ -176,9 +176,7 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
             indices_map = build_indices_map(repertoires, repeat_idx, depth)
 
             # Create evaluator with the indices
-            evaluator = create_evaluator(
-                model_name, indices_map=indices_map, giana_dir=giana_dir
-            )
+            evaluator = create_evaluator(model_name, indices_map=indices_map)
 
             # Run cross-validation
             scores_df = evaluator.run_cross_validation(
@@ -265,7 +263,7 @@ if __name__ == "__main__":
                     "at varying sequencing depths using pre-generated indices"
     )
     parser.add_argument('--model', type=str, required=True,
-                        choices=['emerson_2017', 'ostmeyer_2019', 'giana_2020', 'ml_baseline'],
+                        choices=['emerson_2017', 'ostmeyer_2019', 'giana_2020', 'ml_baseline', 'deeprc_2020'],
                         help='Model to evaluate')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Target disease to classify (e.g., CMV, Lupus, T1D)')
@@ -280,9 +278,6 @@ if __name__ == "__main__":
                         help='Random seed for train/val split (default: 7)')
     parser.add_argument('--output_json', type=str, default=None,
                         help='Path to save results JSON')
-    parser.add_argument('--giana_dir', type=str, default=None,
-                        help='Path to GIANA installation directory '
-                             '(only needed for giana_2020 model)')
 
     args = parser.parse_args()
 
@@ -294,5 +289,4 @@ if __name__ == "__main__":
         depth_indices_path=args.depth_indices,
         random_seed=args.random_seed,
         output_json=args.output_json,
-        giana_dir=args.giana_dir
     )
