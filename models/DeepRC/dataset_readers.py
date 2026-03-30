@@ -517,6 +517,7 @@ class AIRRRepertoireDataset(Dataset):
                  keep_in_ram: bool = True,
                  prebuilt_cache: list = None,
                  indices_map: dict = None,
+                 raw_file_cache: dict = None,
                  verbose: bool = False):
         """
         Parameters
@@ -555,6 +556,11 @@ class AIRRRepertoireDataset(Dataset):
             e.g. ``'part_table_P1_S1'``) to a list of integer row indices.
             When provided, only those rows are used from each repertoire file.
             This is used for sequencing-depth sub-sampling experiments.
+        raw_file_cache : dict or None
+            Optional shared dict mapping file_path -> (raw_seqs, raw_counts)
+            numpy arrays (full file, before indices_map subsampling).  When
+            provided, disk reads are skipped on subsequent calls for the same
+            file — shared across all folds and repeats to avoid redundant I/O.
         verbose : bool
             Print per-file warnings.
         """
@@ -571,6 +577,7 @@ class AIRRRepertoireDataset(Dataset):
         self.sample_n_sequences = sample_n_sequences
         self.sequence_counts_scaling_fn = sequence_counts_scaling_fn
         self.indices_map = indices_map
+        self.raw_file_cache = raw_file_cache
         self.verbose = verbose
 
         # AA alphabet + 3 positional tokens (identical to RepertoireDataset)
@@ -618,30 +625,40 @@ class AIRRRepertoireDataset(Dataset):
 
     def _read_repertoire(self, file_path: str):
         """Read one AIRR file and return encoded sequences, lengths, and counts."""
-        df = pd.read_csv(file_path, sep='\t', low_memory=False, keep_default_na=False)
+        # ---- raw data phase (cacheable across folds and repeats) ----
+        if self.raw_file_cache is not None and file_path in self.raw_file_cache:
+            raw_seqs, raw_counts = self.raw_file_cache[file_path]
+        else:
+            df = pd.read_csv(file_path, sep='\t', low_memory=False, keep_default_na=False)
 
+            if self.sequence_col not in df.columns:
+                raise ValueError(
+                    f"Column '{self.sequence_col}' not found in {file_path}. "
+                    f"Available: {list(df.columns)}"
+                )
+
+            raw_seqs = df[self.sequence_col].astype(str).values
+
+            if self.count_col in df.columns:
+                raw_counts = pd.to_numeric(df[self.count_col], errors='coerce').fillna(1).values.astype(np.float32)
+            else:
+                raw_counts = np.ones(len(raw_seqs), dtype=np.float32)
+
+            if self.raw_file_cache is not None:
+                self.raw_file_cache[file_path] = (raw_seqs, raw_counts)
+
+        seqs = raw_seqs
+        counts = raw_counts
+
+        # ---- apply depth subsampling (repeat-specific, not cached) ----
         if self.indices_map is not None:
             rep_id = os.path.basename(file_path).replace('.tsv.gz', '').replace('.tsv', '')
             indices = self.indices_map.get(rep_id)
             if indices is not None:
-                df = df.iloc[indices].reset_index(drop=True)
+                seqs = seqs[indices]
+                counts = counts[indices]
 
-        if self.sequence_col not in df.columns:
-            raise ValueError(
-                f"Column '{self.sequence_col}' not found in {file_path}. "
-                f"Available: {list(df.columns)}"
-            )
-
-        seqs = df[self.sequence_col].astype(str).values
-
-        # Raw counts
-        if self.count_col in df.columns:
-            counts = pd.to_numeric(df[self.count_col], errors='coerce').fillna(1).values
-        else:
-            counts = np.ones(len(seqs), dtype=np.float32)
-
-        # Filter: keep only non-empty sequences composed entirely of valid AAs.
-        # Uses the byte lookup table to avoid a Python character loop per sequence.
+        # ---- filter: keep only non-empty sequences composed entirely of valid AAs ----
         def _all_valid(s):
             if not s:
                 return False
@@ -735,6 +752,7 @@ def make_dataloaders_from_airr(
         sequence_counts_scaling_fn: Callable = no_sequence_count_scaling,
         keep_in_ram: bool = True,
         indices_map: dict = None,
+        raw_file_cache: dict = None,
         verbose: bool = True,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, DataLoader]:
     """Create DataLoaders directly from AIRR .tsv/.tsv.gz files (no HDF5 needed).
@@ -770,6 +788,9 @@ def make_dataloaders_from_airr(
     indices_map : dict or None
         Optional mapping from repertoire ID (filename without extension) to a
         list of integer row indices for depth sub-sampling experiments.
+    raw_file_cache : dict or None
+        Shared dict for caching raw file contents across folds and repeats.
+        Pass the same dict instance to all calls to avoid redundant disk reads.
     verbose : bool
 
     Returns
@@ -799,6 +820,7 @@ def make_dataloaders_from_airr(
             keep_in_ram=keep_in_ram,
             prebuilt_cache=prebuilt_cache,
             indices_map=indices_map,
+            raw_file_cache=raw_file_cache,
             verbose=verbose,
         )
 

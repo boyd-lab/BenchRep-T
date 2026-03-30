@@ -49,7 +49,8 @@ def create_evaluator(model_name, indices_map=None):
         return GIANA2020Evaluator(indices_map=indices_map)
     elif model_name == 'deeprc_2020':
         from evals.deeprc_2020_disease_classification import DeepRC2020Evaluator
-        return DeepRC2020Evaluator(indices_map=indices_map)
+        return DeepRC2020Evaluator(indices_map=indices_map,
+                                   sample_n_sequences=None)
     elif model_name == 'ml_baseline':
         from evals.ml_baseline_disease_classification import MLBaselineEvaluator
         return MLBaselineEvaluator(indices_map=indices_map)
@@ -163,6 +164,7 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
     print(f"  Specimens matched in metadata: {len(allowed_specimens)}")
 
     all_results = []
+    raw_file_cache = {}
 
     for depth in depths:
         for repeat_idx in range(n_repeats):
@@ -175,7 +177,9 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
             # Build indices_map for this (depth, repeat) combination
             indices_map = build_indices_map(repertoires, repeat_idx, depth)
 
-            # Create evaluator with the indices
+            # Create evaluator with the indices.
+            # For DeepRC, pass sample_n_sequences=None so training uses all
+            # sequences provided by the indices_map (i.e. exactly `depth` sequences).
             evaluator = create_evaluator(model_name, indices_map=indices_map)
 
             # Run cross-validation
@@ -185,7 +189,8 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
                 data_dir=repertoire_data_dir,
                 random_state=random_seed,
                 tune_parameters=True,
-                allowed_participants=allowed_specimens
+                allowed_participants=allowed_specimens,
+                raw_file_cache=raw_file_cache,
             )
 
             elapsed = time.time() - start_time

@@ -41,7 +41,7 @@ class DeepRC2020Evaluator:
     def __init__(self, n_updates=int(1e4), evaluate_at=int(1e3),
                  sequence_col='cdr3_aa', count_col='duplicate_count',
                  train_val_ratio=0.9, random_state=7,
-                 n_worker_processes=4, batch_size=4,
+                 n_worker_processes=4, batch_size=32,
                  sample_n_sequences=int(1e4),
                  kernel_size=9, n_kernels=32,
                  max_seq_len=50,
@@ -204,7 +204,8 @@ class DeepRC2020Evaluator:
                               random_state=None,
                               tune_parameters=True,
                               p_value_candidates=None,
-                              allowed_participants=None):
+                              allowed_participants=None,
+                              raw_file_cache=None):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -226,6 +227,9 @@ class DeepRC2020Evaluator:
                              (DeepRC has no p-value threshold to tune).
             p_value_candidates: Accepted for API compatibility; ignored.
             allowed_participants: Optional set of specimen_labels to restrict to.
+            raw_file_cache: Optional shared dict for caching raw file contents
+                across folds; pass the same dict to all run_cross_validation calls
+                to avoid redundant disk reads across repeats.
 
         Returns:
             pd.DataFrame with per-sample scores across all folds.
@@ -284,6 +288,7 @@ class DeepRC2020Evaluator:
                     n_worker_processes=self.n_worker_processes,
                     sequence_counts_scaling_fn=no_sequence_count_scaling,
                     indices_map=self.indices_map,
+                    raw_file_cache=raw_file_cache,
                     verbose=True,
                 )
 
@@ -397,6 +402,7 @@ if __name__ == '__main__':
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
+        raw_file_cache={},
     )
 
     if args.output_csv:

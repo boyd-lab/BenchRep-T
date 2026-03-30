@@ -8,7 +8,6 @@ revealing sequence concepts within T-cell repertoires"
 import os
 import sys
 import argparse
-import tempfile
 
 import numpy as np
 import pandas as pd
@@ -24,6 +23,7 @@ sys.path.insert(0, _DEEPTCR_DIR)
 
 from DeepTCR import DeepTCR_WF
 from utils_s import Get_Train_Valid_Test_KFold
+from data_processing import Process_Seq
 
 
 class DeepTCREvaluator:
@@ -31,16 +31,17 @@ class DeepTCREvaluator:
     Evaluator for DeepTCR_WF on binary disease classification.
 
     Reads AIRR .tsv.gz files, extracts CDR3 beta + duplicate_count columns,
-    writes temporary flat TSV files organised by class label, then runs
-    DeepTCR's whole-repertoire classifier with pre-defined cross-validation
-    folds that match the benchmark's fold assignments.
+    aggregates sequences in memory per sample, then calls DeepTCR's Load_Data
+    to feed the data directly rather than writing intermediate files.
     """
 
     HEALTHY_LABEL = "Healthy/Background"
+    _DEEPTCR_CLASS_HEALTHY = "Healthy"
 
     def __init__(self,
                  sequence_col='cdr3_aa',
                  count_col='duplicate_count',
+                 max_length=40,
                  train_val_ratio=0.9,
                  random_state=7,
                  # DeepTCR network / training hyperparameters
@@ -55,11 +56,14 @@ class DeepTCREvaluator:
                  n_jobs=4,
                  device=0,
                  results_dir='results/deeptcr',
-                 indices_map=None):
+                 indices_map=None,
+                 debug=False,
+                 debug_repertoires=10):
         """
         Args:
             sequence_col: AIRR column with CDR3 amino acid sequences.
             count_col: AIRR column with duplicate counts; uses 1 if absent.
+            max_length: Maximum CDR3 length passed to DeepTCR (default 40).
             train_val_ratio: Fraction of non-test data used for training
                              (remainder is validation for early stopping).
             random_state: Seed for train/val split.
@@ -78,9 +82,14 @@ class DeepTCREvaluator:
             results_dir: Base directory for DeepTCR checkpoint files.
             indices_map: Dict mapping specimen_label to row indices for
                          sequencing-depth experiments.
+            debug: If True, load only the first `debug_repertoires` specimens
+                   per class to speed up iteration during development.
+            debug_repertoires: Number of repertoires per class to keep when
+                               debug=True (default: 10).
         """
         self.sequence_col = sequence_col
         self.count_col = count_col
+        self.max_length = max_length
         self.train_val_ratio = train_val_ratio
         self.random_state = random_state
         self.kernel = kernel
@@ -95,6 +104,8 @@ class DeepTCREvaluator:
         self.device = device
         self.results_dir = results_dir
         self.indices_map = indices_map
+        self.debug = debug
+        self.debug_repertoires = debug_repertoires
 
     # ------------------------------------------------------------------
     # Metadata helpers (same pattern as other evaluators)
@@ -147,62 +158,95 @@ class DeepTCREvaluator:
         return filtered
 
     # ------------------------------------------------------------------
-    # Temp-directory helpers
+    # In-memory data collection (replaces temp-directory helpers)
     # ------------------------------------------------------------------
 
-    def _write_deeptcr_tsv(self, file_path, specimen_label, out_dir):
+    def _collect_all_data(self, metadata, target_disease):
         """
-        Read one AIRR .tsv.gz file and write a two-column TSV that DeepTCR
-        can parse with aa_column_beta=0, count_column=1.
+        Read all repertoire files into memory and return flat arrays
+        suitable for DeepTCR's Load_Data method.
 
-        Returns the output path, or None if the file has no usable sequences.
+        Applies the same per-file processing as DeepTCR's Get_DF_Data:
+        sequence cleaning, aggregation by amino acid, and max-length
+        filtering.
+
+        Returns:
+            beta_sequences : np.ndarray of shape (N,) – CDR3 beta strings
+            sample_labels  : np.ndarray of shape (N,) – specimen labels
+            class_labels   : np.ndarray of shape (N,) – per-sequence class
+            counts         : np.ndarray of shape (N,) int – duplicate counts
+            written        : set of specimen_labels that were loaded
         """
-        try:
-            df = pd.read_csv(file_path, sep='\t', usecols=lambda c: c in
-                             [self.sequence_col, self.count_col])
-        except Exception as e:
-            print(f"  Warning: could not read {file_path}: {e}")
-            return None
-
-        if self.sequence_col not in df.columns:
-            print(f"  Warning: '{self.sequence_col}' not in {file_path}, skipping.")
-            return None
-
-        # Apply indices_map subsampling if provided
-        if self.indices_map is not None and specimen_label in self.indices_map:
-            idx = self.indices_map[specimen_label]
-            df = df.iloc[idx]
-
-        if self.count_col not in df.columns:
-            df[self.count_col] = 1
-
-        out = df[[self.sequence_col, self.count_col]].dropna(subset=[self.sequence_col])
-        out = out[out[self.sequence_col].str.len() > 0]
-        if len(out) == 0:
-            return None
-
-        out_path = os.path.join(out_dir, f"{specimen_label}.tsv")
-        out.to_csv(out_path, sep='\t', index=False, header=True)
-        return out_path
-
-    def _populate_temp_dir(self, metadata, tmpdir, target_disease):
-        """
-        Write per-sample TSV files into class subdirectories inside tmpdir.
-        Returns the set of specimen_labels successfully written.
-        """
-        disease_dir = os.path.join(tmpdir, target_disease)
-        healthy_dir = os.path.join(tmpdir, 'Healthy')
-        os.makedirs(disease_dir, exist_ok=True)
-        os.makedirs(healthy_dir, exist_ok=True)
-
+        all_seqs = []
+        all_samples = []
+        all_cls = []
+        all_counts = []
         written = set()
-        for _, row in metadata.iterrows():
-            dest_dir = disease_dir if row['label'] == 1 else healthy_dir
-            path = self._write_deeptcr_tsv(row['file_path'], row['specimen_label'], dest_dir)
-            if path is not None:
-                written.add(row['specimen_label'])
 
-        return written
+        for _, row in metadata.iterrows():
+            specimen = row['specimen_label']
+            class_str = target_disease if row['label'] == 1 else self._DEEPTCR_CLASS_HEALTHY
+
+            try:
+                df = pd.read_csv(
+                    row['file_path'], sep='\t',
+                    usecols=lambda c: c in [self.sequence_col, self.count_col],
+                )
+            except Exception as e:
+                print(f"  Warning: could not read {row['file_path']}: {e}")
+                continue
+
+            if self.sequence_col not in df.columns:
+                print(f"  Warning: '{self.sequence_col}' not in {row['file_path']}, skipping.")
+                continue
+
+            # Apply indices_map subsampling before any aggregation
+            if self.indices_map is not None and specimen in self.indices_map:
+                df = df.iloc[self.indices_map[specimen]]
+
+            if self.count_col not in df.columns:
+                df[self.count_col] = 1
+
+            df = df[[self.sequence_col, self.count_col]].copy()
+            df[self.count_col] = pd.to_numeric(df[self.count_col], errors='coerce')
+            df = df.dropna(subset=[self.count_col])
+            df = df[df[self.count_col] >= 1]
+
+            # Clean sequences: mimic DeepTCR's Process_Seq
+            df = Process_Seq(df, self.sequence_col)
+            if len(df) == 0:
+                continue
+
+            # Aggregate duplicate amino acid sequences (sum counts)
+            df = (
+                df.groupby(self.sequence_col, as_index=False)[self.count_col]
+                .sum()
+                .sort_values(self.count_col, ascending=False)
+                .reset_index(drop=True)
+            )
+
+            # Remove sequences exceeding max_length
+            df = df[df[self.sequence_col].str.len() <= self.max_length]
+            if len(df) == 0:
+                continue
+
+            n = len(df)
+            all_seqs.extend(df[self.sequence_col].tolist())
+            all_samples.extend([specimen] * n)
+            all_cls.extend([class_str] * n)
+            all_counts.extend(df[self.count_col].astype(int).tolist())
+            written.add(specimen)
+
+        if not all_seqs:
+            return None, None, None, None, written
+
+        return (
+            np.array(all_seqs),
+            np.array(all_samples),
+            np.array(all_cls),
+            np.array(all_counts, dtype=int),
+            written,
+        )
 
     # ------------------------------------------------------------------
     # Cross-validation
@@ -251,11 +295,34 @@ class DeepTCREvaluator:
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
 
+        if self.debug:
+            disease_rows = metadata[metadata['label'] == 1].head(self.debug_repertoires)
+            healthy_rows = metadata[metadata['label'] == 0].head(self.debug_repertoires)
+            metadata = pd.concat([disease_rows, healthy_rows], ignore_index=True)
+            print(f"[DEBUG] Restricted to {len(metadata)} repertoires "
+                  f"({len(disease_rows)} disease, {len(healthy_rows)} healthy).")
+
         if allowed_participants is not None:
             before = len(metadata)
             metadata = metadata[metadata['specimen_label'].isin(allowed_participants)]
             print(f"Filtered to {len(metadata)} of {before} specimens "
                   f"based on allowed_participants.")
+
+        # ------------------------------------------------------------------
+        # Load ALL repertoire data into memory once, shared across folds.
+        # DeepTCR's LabelEncoder sees the same classes in every fold because
+        # the full metadata (train + val + test) is loaded each time.
+        # ------------------------------------------------------------------
+        print("\nLoading all repertoire files into memory...")
+        beta_sequences, sample_labels, class_labels, counts, written = \
+            self._collect_all_data(metadata, target_disease)
+
+        if beta_sequences is None:
+            print("Error: no sequences could be loaded.")
+            return pd.DataFrame()
+
+        print(f"Loaded {len(beta_sequences):,} sequences from "
+              f"{len(written)} specimens.")
 
         all_test_rows = []
         all_probs = []
@@ -279,160 +346,150 @@ class DeepTCREvaluator:
             )
             print(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
-            # Write ALL samples (train+val+test) into a single temp directory.
-            # DeepTCR needs to see all classes at Get_Data time so that its
-            # LabelEncoder encodes consistently.
-            with tempfile.TemporaryDirectory() as tmpdir:
-                written = self._populate_temp_dir(metadata, tmpdir, target_disease)
+            # Unique name per fold so checkpoints don't collide
+            fold_name = os.path.join(
+                self.results_dir,
+                f"{target_disease}_fold{test_fold}"
+            )
+            os.makedirs(fold_name, exist_ok=True)
 
-                # Unique name per fold so checkpoints don't collide
-                fold_name = os.path.join(
-                    self.results_dir,
-                    f"{target_disease}_fold{test_fold}"
-                )
-                os.makedirs(fold_name, exist_ok=True)
+            dtcr = DeepTCR_WF(fold_name, max_length=self.max_length,
+                               device=self.device)
+            dtcr.Load_Data(
+                beta_sequences=beta_sequences,
+                sample_labels=sample_labels,
+                class_labels=class_labels,
+                counts=counts,
+            )
 
-                dtcr = DeepTCR_WF(fold_name, device=self.device)
-                dtcr.Get_Data(
-                    directory=tmpdir,
-                    Load_Prev_Data=False,
-                    aggregate_by_aa=True,
-                    aa_column_beta=0,   # cdr3_aa is column 0 in our temp TSV
-                    count_column=1,      # duplicate_count is column 1
-                    n_jobs=self.n_jobs,
-                )
+            # ----------------------------------------------------------
+            # Map specimen_label → index in dtcr.sample_list.
+            # Load_Data stores sample names without any file extension.
+            # ----------------------------------------------------------
+            sample_name_to_idx = {s: i for i, s in enumerate(dtcr.sample_list)}
 
-                # ----------------------------------------------------------
-                # Map specimen_label → index in dtcr.sample_list.
-                # DeepTCR uses filenames (e.g. "SPECIMEN.tsv") as sample IDs.
-                # ----------------------------------------------------------
-                sample_name_to_idx = {
-                    s.replace('.tsv', ''): i
-                    for i, s in enumerate(dtcr.sample_list)
-                }
+            # Build per-sample label array (shape [n_samples, n_classes])
+            Y = np.vstack([
+                dtcr.Y[np.where(dtcr.sample_id == s)[0][0]]
+                for s in dtcr.sample_list
+            ])
+            Vars = [np.asarray(dtcr.sample_list)]
 
-                # Build per-sample label array (shape [n_samples, n_classes])
-                Y = np.vstack([
-                    dtcr.Y[np.where(dtcr.sample_id == s)[0][0]]
-                    for s in dtcr.sample_list
-                ])
-                Vars = [np.asarray(dtcr.sample_list)]
+            # Determine which column in y_pred corresponds to disease
+            disease_class_idx = int(
+                np.where(dtcr.lb.classes_ == target_disease)[0][0]
+            )
 
-                # Determine which column in y_pred corresponds to disease
-                disease_class_idx = int(
-                    np.where(dtcr.lb.classes_ == target_disease)[0][0]
-                )
+            # Resolve specimen labels that were successfully loaded
+            def _get_indices(specimens):
+                idx = [sample_name_to_idx[s]
+                       for s in specimens['specimen_label']
+                       if s in sample_name_to_idx]
+                return np.array(idx, dtype=int)
 
-                # Resolve specimen labels that were successfully loaded
-                def _get_indices(specimens):
-                    idx = [sample_name_to_idx[s]
-                           for s in specimens['specimen_label']
-                           if s in sample_name_to_idx]
-                    return np.array(idx, dtype=int)
+            test_idx = _get_indices(test_data)
+            train_val_idx = _get_indices(
+                pd.concat([train_data, val_data], ignore_index=True)
+            )
 
-                test_idx = _get_indices(test_data)
-                train_val_idx = _get_indices(
-                    pd.concat([train_data, val_data], ignore_index=True)
-                )
+            if len(test_idx) == 0:
+                print(f"Warning: no test samples found for fold {test_fold}, skipping.")
+                continue
 
-                if len(test_idx) == 0:
-                    print(f"Warning: no test samples found for fold {test_fold}, skipping.")
+            # Split train_val into train / val for early stopping
+            train_idx, val_idx = train_test_split(
+                train_val_idx,
+                train_size=self.train_val_ratio,
+                random_state=rng,
+                stratify=Y[train_val_idx].argmax(axis=1),
+            )
+
+            dtcr.train, dtcr.valid, dtcr.test = Get_Train_Valid_Test_KFold(
+                Vars=Vars,
+                train_idx=train_idx,
+                valid_idx=val_idx,
+                test_idx=test_idx,
+                Y=Y,
+            )
+            dtcr.LOO = None
+
+            if self.combine_train_valid:
+                for i in range(len(dtcr.train)):
+                    dtcr.train[i] = np.concatenate(
+                        (dtcr.train[i], dtcr.valid[i]), axis=0
+                    )
+                    dtcr.valid[i] = dtcr.test[i]
+
+            # Build and train
+            dtcr._reset_models()
+            dtcr._build(
+                kernel=self.kernel,
+                num_concepts=self.num_concepts,
+                size_of_net=self.size_of_net,
+                epochs_min=self.epochs_min,
+                hinge_loss_t=self.hinge_loss_t,
+                train_loss_min=self.train_loss_min if self.combine_train_valid else None,
+                convergence='training' if self.combine_train_valid else 'validation',
+                batch_size=self.batch_size,
+                suppress_output=False,
+            )
+            dtcr._train(write=False, batch_seed=None, iteration=test_fold)
+
+            # ----------------------------------------------------------
+            # Collect per-sample predictions
+            # ----------------------------------------------------------
+            # dtcr.y_pred: shape [n_test, n_classes], same order as test[0]
+            # dtcr.test[0]: array of specimen labels (no file extension)
+            test_sample_names = dtcr.test[0]
+            test_preds = dtcr.y_pred            # [n_test, n_classes]
+            test_labels_arr = dtcr.y_test       # [n_test, n_classes] one-hot
+
+            id_to_row = {
+                row['specimen_label']: row
+                for _, row in test_data.iterrows()
+            }
+
+            fold_probs = []
+            fold_labels = []
+
+            for fname, pred_vec, label_vec in zip(
+                    test_sample_names, test_preds, test_labels_arr):
+                specimen = fname  # Load_Data stores names without .tsv extension
+                if specimen not in id_to_row:
                     continue
-
-                # Split train_val into train / val for early stopping
-                train_idx, val_idx = train_test_split(
-                    train_val_idx,
-                    train_size=self.train_val_ratio,
-                    random_state=rng,
-                    stratify=Y[train_val_idx].argmax(axis=1),
-                )
-
-                dtcr.train, dtcr.valid, dtcr.test = Get_Train_Valid_Test_KFold(
-                    Vars=Vars,
-                    train_idx=train_idx,
-                    valid_idx=val_idx,
-                    test_idx=test_idx,
-                    Y=Y,
-                )
-                dtcr.LOO = None
-
-                if self.combine_train_valid:
-                    for i in range(len(dtcr.train)):
-                        dtcr.train[i] = np.concatenate(
-                            (dtcr.train[i], dtcr.valid[i]), axis=0
-                        )
-                        dtcr.valid[i] = dtcr.test[i]
-
-                # Build and train
-                dtcr._reset_models()
-                dtcr._build(
-                    kernel=self.kernel,
-                    num_concepts=self.num_concepts,
-                    size_of_net=self.size_of_net,
-                    epochs_min=self.epochs_min,
-                    hinge_loss_t=self.hinge_loss_t,
-                    train_loss_min=self.train_loss_min if self.combine_train_valid else None,
-                    convergence='training' if self.combine_train_valid else 'validation',
-                    batch_size=self.batch_size,
-                    suppress_output=False,
-                )
-                dtcr._train(write=False, batch_seed=None, iteration=test_fold)
-
-                # ----------------------------------------------------------
-                # Collect per-sample predictions
-                # ----------------------------------------------------------
-                # dtcr.y_pred: shape [n_test, n_classes], same order as test[0]
-                # dtcr.test[0]: array of sample filenames
-                test_sample_names = dtcr.test[0]   # filenames like 'SPECIMEN.tsv'
-                test_preds = dtcr.y_pred            # [n_test, n_classes]
-                test_labels_arr = dtcr.y_test       # [n_test, n_classes] one-hot
-
-                id_to_row = {
-                    row['specimen_label']: row
-                    for _, row in test_data.iterrows()
-                }
-
-                fold_probs = []
-                fold_labels = []
-
-                for fname, pred_vec, label_vec in zip(
-                        test_sample_names, test_preds, test_labels_arr):
-                    specimen = fname.replace('.tsv', '')
-                    if specimen not in id_to_row:
-                        continue
-                    row = id_to_row[specimen]
-                    score = float(pred_vec[disease_class_idx])
-                    true_label = int(row['label'])
-                    fold_probs.append(score)
-                    fold_labels.append(true_label)
-                    all_test_rows.append({
-                        'participant_label': row[participant_col],
-                        'specimen_label': specimen,
-                        'disease_label': true_label,
-                        'disease_label_str': row[disease_col],
-                        'method': 'DeepTCR',
-                        'disease_model': target_disease,
-                        'model_score': score,
-                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    })
-
-                if len(fold_labels) < 2 or len(set(fold_labels)) < 2:
-                    print(f"Warning: fold {test_fold} has <2 classes in test, skipping metrics.")
-                    all_probs.extend(fold_probs)
-                    all_labels.extend(fold_labels)
-                    continue
-
-                fold_auroc = roc_auc_score(fold_labels, fold_probs)
-                fold_aupr = average_precision_score(fold_labels, fold_probs)
-                print(f"Test AUROC: {fold_auroc:.4f}, Test AUPR: {fold_aupr:.4f}")
-
-                fold_results.append({
-                    'fold': test_fold,
-                    'test_auroc': fold_auroc,
-                    'test_aupr': fold_aupr,
+                row = id_to_row[specimen]
+                score = float(pred_vec[disease_class_idx])
+                true_label = int(row['label'])
+                fold_probs.append(score)
+                fold_labels.append(true_label)
+                all_test_rows.append({
+                    'participant_label': row[participant_col],
+                    'specimen_label': specimen,
+                    'disease_label': true_label,
+                    'disease_label_str': row[disease_col],
+                    'method': 'DeepTCR',
+                    'disease_model': target_disease,
+                    'model_score': score,
+                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
                 })
+
+            if len(fold_labels) < 2 or len(set(fold_labels)) < 2:
+                print(f"Warning: fold {test_fold} has <2 classes in test, skipping metrics.")
                 all_probs.extend(fold_probs)
                 all_labels.extend(fold_labels)
+                continue
+
+            fold_auroc = roc_auc_score(fold_labels, fold_probs)
+            fold_aupr = average_precision_score(fold_labels, fold_probs)
+            print(f"Test AUROC: {fold_auroc:.4f}, Test AUPR: {fold_aupr:.4f}")
+
+            fold_results.append({
+                'fold': test_fold,
+                'test_auroc': fold_auroc,
+                'test_aupr': fold_aupr,
+            })
+            all_probs.extend(fold_probs)
+            all_labels.extend(fold_labels)
 
         if len(all_labels) >= 2 and len(set(all_labels)) >= 2:
             all_probs_arr = np.array(all_probs)
@@ -491,6 +548,10 @@ if __name__ == '__main__':
                         help='Repertoires per mini-batch (default: 25)')
     parser.add_argument('--n_jobs', type=int, default=4,
                         help='Parallel data-loading processes (default: 4)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Debug mode: load only a small number of repertoires per class')
+    parser.add_argument('--debug_repertoires', type=int, default=10,
+                        help='Repertoires per class to load in debug mode (default: 10)')
     args = parser.parse_args()
 
     evaluator = DeepTCREvaluator(
@@ -504,6 +565,8 @@ if __name__ == '__main__':
         n_jobs=args.n_jobs,
         device=args.device,
         results_dir=args.results_dir,
+        debug=args.debug,
+        debug_repertoires=args.debug_repertoires,
     )
 
     scores_df = evaluator.run_cross_validation(
