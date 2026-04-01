@@ -12,7 +12,7 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-GPUS=(0 1 2 3)
+GPUS=(2)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
@@ -55,7 +55,7 @@ for disease in "${DISEASES[@]}"; do
         --target_disease "$disease" \
         --output_csv "${RESULTS}/deeptcr_2021_${disease}_classification.csv" \
         --results_dir "${RESULTS}/deeptcr" \
-        --device "$gpu" \
+        --device 0 \
         "${debug_flags[@]}"
 
       status=$?
