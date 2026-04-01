@@ -1,20 +1,52 @@
 """
 External dataset evaluation: train on internal data, evaluate on an external dataset.
 
-Trains a model on ALL internal data (disease vs. Healthy/Background) with the
-model's built-in 80/20 split for hyperparameter tuning, then evaluates on an
+Trains a model on ALL internal data (disease vs. Healthy/Background) with an
+internal train/val split for hyperparameter tuning, then evaluates on an
 external dataset that may have a different metadata schema and repertoire column
 names.
+
+Supported models:
+  - ml_baseline: Gapped 4-mer + V/J gene logistic regression ensemble
+  - emerson_2017: Fisher's exact test + Beta-Binomial generative model
 """
 
 import os
 import argparse
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
 from models.ml_baseline import Gapped_4mer_VJgene
+from models.emerson_2017 import CMV_Immunosequencing_Model
+from utils.gene_harmonization import adaptive_to_airr
+
+
+SUPPORTED_MODELS = ['ml_baseline', 'emerson_2017']
+
+# Model name → display name for output
+MODEL_DISPLAY_NAMES = {
+    'ml_baseline': 'ML_Baseline',
+    'emerson_2017': 'Emerson_2017',
+}
+
+# Repertoire format presets: column names and file template for known data sources
+FORMAT_PRESETS = {
+    'adaptive': {
+        'sequence_col': 'aminoAcid',
+        'v_gene_col': 'vGeneName',
+        'j_gene_col': 'jGeneName',
+        'file_template': '{sample_name}_TCRB.tsv',
+    },
+    'airr': {
+        'sequence_col': 'cdr3_aa',
+        'v_gene_col': 'v_call',
+        'j_gene_col': 'j_call',
+        'file_template': 'part_table_{sample_name}.tsv.gz',
+    },
+}
 
 
 class ExternalEvaluator:
@@ -27,15 +59,28 @@ class ExternalEvaluator:
 
     INTERNAL_HEALTHY_LABEL = "Healthy/Background"
 
-    def __init__(self, val_split=0.2, n_cv_folds=5,
+    def __init__(self, model_name='ml_baseline',
+                 # ML Baseline hyperparameters
+                 val_split=0.2, n_cv_folds=5,
+                 # Emerson 2017 hyperparameters
+                 train_val_ratio=0.9,
+                 p_value_candidates=None,
+                 # Internal repertoire column names
                  train_sequence_col='cdr3_aa',
                  train_v_gene_col='v_call',
                  train_j_gene_col='j_call',
+                 # External repertoire column names
                  ext_sequence_col='aminoAcid',
                  ext_v_gene_col='vGeneName',
                  ext_j_gene_col='jGeneName'):
+        if model_name not in SUPPORTED_MODELS:
+            raise ValueError(f"Unknown model '{model_name}'. "
+                             f"Supported: {SUPPORTED_MODELS}")
+        self.model_name = model_name
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
+        self.train_val_ratio = train_val_ratio
+        self.p_value_candidates = p_value_candidates or [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
         self.train_sequence_col = train_sequence_col
         self.train_v_gene_col = train_v_gene_col
         self.train_j_gene_col = train_j_gene_col
@@ -118,6 +163,166 @@ class ExternalEvaluator:
         return data
 
     # ------------------------------------------------------------------
+    # Model-specific training
+    # ------------------------------------------------------------------
+
+    def _train_ml_baseline(self, train_files, train_labels):
+        """Train the ML Baseline model (handles internal 80/20 split)."""
+        self.model = Gapped_4mer_VJgene(
+            val_split=self.val_split,
+            n_cv_folds=self.n_cv_folds,
+            sequence_col=self.train_sequence_col,
+            v_gene_col=self.train_v_gene_col,
+            j_gene_col=self.train_j_gene_col,
+            ignore_allele=True,
+        )
+        train_result = self.model.train(train_files, train_labels)
+        return train_result
+
+    def _train_emerson_2017(self, train_files, train_labels, random_state=7):
+        """
+        Train the Emerson 2017 model with p-value threshold tuning.
+
+        Splits training data into train/val, tunes p_value_threshold on val,
+        then retrains with the best threshold on all training data.
+        """
+        # Split into train and validation for p-value tuning
+        indices = np.arange(len(train_files))
+        train_idx, val_idx = train_test_split(
+            indices,
+            train_size=self.train_val_ratio,
+            random_state=random_state,
+            stratify=train_labels,
+        )
+
+        base_files = [train_files[i] for i in train_idx]
+        base_labels = [train_labels[i] for i in train_idx]
+        val_files = [train_files[i] for i in val_idx]
+        val_labels = [train_labels[i] for i in val_idx]
+
+        print(f"  Train/Val split: {len(base_files)} train, {len(val_files)} val")
+
+        # Create base model for preloading and caching.
+        # ignore_allele=True so diagnostic TCRs are stored allele-free,
+        # enabling gene-level matching with external data.
+        base_model = CMV_Immunosequencing_Model(
+            sequence_col=self.train_sequence_col,
+            v_col=self.train_v_gene_col,
+            j_col=self.train_j_gene_col,
+            ignore_allele=True,
+        )
+
+        # Preload all repertoires once
+        base_model.preload_repertoires(train_files)
+
+        # Compute TCR statistics on the train split (one-time)
+        base_model.compute_tcr_statistics(base_files, base_labels)
+
+        # Tune p-value threshold on validation set
+        print(f"\n--- Tuning p-value threshold ---")
+        print(f"Candidates: {self.p_value_candidates}")
+        tuning_results = []
+
+        for p_val in self.p_value_candidates:
+            model = CMV_Immunosequencing_Model(
+                p_value_threshold=p_val,
+                sequence_col=self.train_sequence_col,
+                v_col=self.train_v_gene_col,
+                j_col=self.train_j_gene_col,
+                ignore_allele=True,
+            )
+            model._repertoire_cache = base_model._repertoire_cache
+            model._tcr_stats_cache = base_model._tcr_stats_cache
+
+            model.select_diagnostic_tcrs_from_cache(p_val)
+
+            if len(model.diagnostic_tcrs) == 0:
+                print(f"  p={p_val:.0e}: No diagnostic TCRs found, skipping...")
+                tuning_results.append({
+                    'p_value': p_val, 'n_tcrs': 0,
+                    'val_auroc': 0.0, 'val_aupr': 0.0,
+                })
+                continue
+
+            model.train_beta_binomial_model(base_files, base_labels)
+
+            val_probs = []
+            for fp in val_files:
+                result = model.predict_diagnosis(fp)
+                val_probs.append(result['probability_positive'])
+
+            val_probs_arr = np.array(val_probs)
+            val_labels_arr = np.array(val_labels)
+            val_auroc = roc_auc_score(val_labels_arr, val_probs_arr)
+            val_aupr = average_precision_score(val_labels_arr, val_probs_arr)
+
+            tuning_results.append({
+                'p_value': p_val,
+                'n_tcrs': len(model.diagnostic_tcrs),
+                'val_auroc': val_auroc,
+                'val_aupr': val_aupr,
+            })
+            print(f"  p={p_val:.0e}: {len(model.diagnostic_tcrs)} TCRs, "
+                  f"Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}")
+
+        best = max(tuning_results, key=lambda x: x['val_auroc'])
+        best_p_value = best['p_value']
+        print(f"\nBest p-value: {best_p_value:.0e} "
+              f"(Val AUROC={best['val_auroc']:.4f})")
+
+        if best['n_tcrs'] == 0:
+            print("WARNING: No diagnostic TCRs found at any threshold.")
+            self.model = None
+            return {
+                'best_p_value': best_p_value,
+                'val_auroc': 0.0,
+                'val_aupr': 0.0,
+                'n_diagnostic_tcrs': 0,
+                'no_diagnostic_tcrs': True,
+                'tuning_results': tuning_results,
+            }
+
+        # Retrain on ALL training data with the best threshold
+        print(f"\nRetraining on all {len(train_files)} samples with p={best_p_value:.0e}...")
+        self.model = CMV_Immunosequencing_Model(
+            p_value_threshold=best_p_value,
+            sequence_col=self.train_sequence_col,
+            v_col=self.train_v_gene_col,
+            j_col=self.train_j_gene_col,
+            ignore_allele=True,
+        )
+        self.model._repertoire_cache = base_model._repertoire_cache
+        self.model.identify_diagnostic_tcrs(train_files, train_labels)
+        self.model.train_beta_binomial_model(train_files, train_labels)
+
+        return {
+            'best_p_value': best_p_value,
+            'val_auroc': best['val_auroc'],
+            'val_aupr': best['val_aupr'],
+            'n_diagnostic_tcrs': len(self.model.diagnostic_tcrs),
+            'no_diagnostic_tcrs': False,
+            'tuning_results': tuning_results,
+        }
+
+    def _switch_to_external_cols(self):
+        """Switch the model's column name attributes to external format."""
+        if self.model_name == 'ml_baseline':
+            self.model.sequence_col = self.ext_sequence_col
+            self.model.v_gene_col = self.ext_v_gene_col
+            self.model.j_gene_col = self.ext_j_gene_col
+            # Harmonize Adaptive gene names to AIRR format for feature matching
+            self.model.v_gene_harmonizer = adaptive_to_airr
+            self.model.j_gene_harmonizer = adaptive_to_airr
+        elif self.model_name == 'emerson_2017':
+            self.model.sequence_col = self.ext_sequence_col
+            self.model.v_col = self.ext_v_gene_col
+            self.model.j_col = self.ext_j_gene_col
+            # Harmonize Adaptive gene names to AIRR format for matching
+            self.model.v_gene_harmonizer = adaptive_to_airr
+            self.model.j_gene_harmonizer = adaptive_to_airr
+        self.model.clear_cache()
+
+    # ------------------------------------------------------------------
     # Main evaluation
     # ------------------------------------------------------------------
 
@@ -132,6 +337,7 @@ class ExternalEvaluator:
                                 ext_healthy_label='Healthy',
                                 ext_disease_label='T1D',
                                 ext_file_template='{sample_name}_TCRB.tsv',
+                                random_state=7,
                                 output_csv=None):
         """
         Train on all internal data and evaluate on external dataset.
@@ -147,31 +353,36 @@ class ExternalEvaluator:
             ext_healthy_label: Healthy label string in external metadata.
             ext_disease_label: Disease label string in external metadata.
             ext_file_template: Template for external repertoire filenames.
+            random_state: Random seed for reproducibility.
             output_csv: Optional path to save per-sample scores.
 
         Returns:
-            pd.DataFrame with per-sample predictions and overall metrics dict.
+            Tuple of (pd.DataFrame with per-sample predictions, metrics dict).
         """
+        method_name = MODEL_DISPLAY_NAMES[self.model_name]
+
         # --- Prepare training data ---
         train_data = self._prepare_train_data(
             train_metadata_path, train_data_dir, target_disease
         )
         train_files = train_data['file_path'].tolist()
-        train_labels = train_data['label'].values
+        train_labels = train_data['label'].tolist()
 
         # --- Train model on all internal data ---
         print(f"\n{'='*60}")
-        print(f"TRAINING on internal dataset ({len(train_files)} samples)")
+        print(f"TRAINING {method_name} on internal dataset "
+              f"({len(train_files)} samples)")
         print(f"{'='*60}")
 
-        self.model = Gapped_4mer_VJgene(
-            val_split=self.val_split,
-            n_cv_folds=self.n_cv_folds,
-            sequence_col=self.train_sequence_col,
-            v_gene_col=self.train_v_gene_col,
-            j_gene_col=self.train_j_gene_col,
-        )
-        train_result = self.model.train(train_files, train_labels)
+        if self.model_name == 'ml_baseline':
+            train_result = self._train_ml_baseline(train_files, train_labels)
+        elif self.model_name == 'emerson_2017':
+            train_result = self._train_emerson_2017(
+                train_files, train_labels, random_state=random_state
+            )
+            if train_result.get('no_diagnostic_tcrs', False):
+                print("Cannot evaluate: no diagnostic TCRs found.")
+                return pd.DataFrame(), train_result
 
         # --- Prepare external data ---
         ext_data = self._prepare_external_data(
@@ -186,10 +397,7 @@ class ExternalEvaluator:
         ext_labels = ext_data['label'].values
 
         # --- Switch column names to external format for prediction ---
-        self.model.sequence_col = self.ext_sequence_col
-        self.model.v_gene_col = self.ext_v_gene_col
-        self.model.j_gene_col = self.ext_j_gene_col
-        self.model.clear_cache()
+        self._switch_to_external_cols()
 
         # --- Predict on external data ---
         print(f"\n{'='*60}")
@@ -208,13 +416,20 @@ class ExternalEvaluator:
         aupr = average_precision_score(ext_labels, ext_probs)
 
         print(f"\n{'='*60}")
-        print(f"EXTERNAL EVALUATION RESULTS: {target_disease}")
+        print(f"EXTERNAL EVALUATION RESULTS: {method_name} on {target_disease}")
         print(f"{'='*60}")
         print(f"Training: {len(train_files)} samples (internal)")
-        print(f"  Best C (k-mer): {train_result['best_c_kmer']}")
-        print(f"  Best C (V/J):   {train_result['best_c_vj']}")
-        print(f"  Best alpha:     {train_result['best_alpha']:.1f}")
-        print(f"  Val AUROC:      {train_result['val_auroc']:.4f}")
+
+        if self.model_name == 'ml_baseline':
+            print(f"  Best C (k-mer): {train_result['best_c_kmer']}")
+            print(f"  Best C (V/J):   {train_result['best_c_vj']}")
+            print(f"  Best alpha:     {train_result['best_alpha']:.1f}")
+            print(f"  Val AUROC:      {train_result['val_auroc']:.4f}")
+        elif self.model_name == 'emerson_2017':
+            print(f"  Best p-value:       {train_result['best_p_value']:.0e}")
+            print(f"  Diagnostic TCRs:    {train_result['n_diagnostic_tcrs']}")
+            print(f"  Val AUROC:          {train_result['val_auroc']:.4f}")
+
         print(f"Evaluation: {len(ext_files)} samples (external)")
         print(f"  AUROC: {auroc:.4f}")
         print(f"  AUPR:  {aupr:.4f}")
@@ -226,7 +441,7 @@ class ExternalEvaluator:
                 'sample_name': row[ext_sample_col],
                 'disease_label': int(row['label']),
                 'disease_label_str': row[ext_disease_col],
-                'method': 'ML_Baseline',
+                'method': method_name,
                 'disease_model': target_disease,
                 'model_score': float(score),
             })
@@ -254,6 +469,11 @@ if __name__ == "__main__":
         description="External dataset evaluation: train on internal, evaluate on external"
     )
 
+    # Model selection
+    parser.add_argument('--model', type=str, default='ml_baseline',
+                        choices=SUPPORTED_MODELS,
+                        help='Model to use (default: ml_baseline)')
+
     # Internal (training) dataset
     parser.add_argument('--train_metadata_path', type=str, required=True,
                         help='Path to internal metadata.tsv')
@@ -267,6 +487,10 @@ if __name__ == "__main__":
                         help='Path to external metadata file')
     parser.add_argument('--ext_data_dir', type=str, required=True,
                         help='Directory containing external repertoire files')
+    parser.add_argument('--ext_format', type=str, default='adaptive',
+                        choices=list(FORMAT_PRESETS.keys()),
+                        help='External data format preset (default: adaptive). '
+                             'Sets column names and file template automatically.')
     parser.add_argument('--ext_sample_col', type=str, default='sample_name',
                         help='Column with sample identifiers in external metadata')
     parser.add_argument('--ext_disease_col', type=str, default='disease_label',
@@ -275,23 +499,26 @@ if __name__ == "__main__":
                         help='Healthy label string in external metadata')
     parser.add_argument('--ext_disease_label', type=str, default='T1D',
                         help='Disease label string in external metadata')
-    parser.add_argument('--ext_file_template', type=str,
-                        default='{sample_name}_TCRB.tsv',
-                        help='Template for external repertoire filenames')
 
-    # External repertoire column names
-    parser.add_argument('--ext_sequence_col', type=str, default='aminoAcid',
-                        help='CDR3 sequence column in external repertoire files')
-    parser.add_argument('--ext_v_gene_col', type=str, default='vGeneName',
-                        help='V gene column in external repertoire files')
-    parser.add_argument('--ext_j_gene_col', type=str, default='jGeneName',
-                        help='J gene column in external repertoire files')
+    # Overrides for format preset (rarely needed)
+    parser.add_argument('--ext_sequence_col', type=str, default=None,
+                        help='Override CDR3 sequence column in external files')
+    parser.add_argument('--ext_v_gene_col', type=str, default=None,
+                        help='Override V gene column in external files')
+    parser.add_argument('--ext_j_gene_col', type=str, default=None,
+                        help='Override J gene column in external files')
+    parser.add_argument('--ext_file_template', type=str, default=None,
+                        help='Override file template for external repertoires')
 
     # Model hyperparameters
     parser.add_argument('--val_split', type=float, default=0.2,
-                        help='Internal val fraction for alpha tuning (default: 0.2)')
+                        help='Internal val fraction for ML Baseline alpha tuning (default: 0.2)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
-                        help='CV folds for C tuning (default: 5)')
+                        help='CV folds for ML Baseline C tuning (default: 5)')
+    parser.add_argument('--train_val_ratio', type=float, default=0.9,
+                        help='Train/val ratio for Emerson 2017 tuning (default: 0.9)')
+    parser.add_argument('--random_state', type=int, default=7,
+                        help='Random seed (default: 7)')
 
     # Output
     parser.add_argument('--output_csv', type=str, default=None,
@@ -299,12 +526,21 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Resolve format preset, then apply any explicit overrides
+    preset = FORMAT_PRESETS[args.ext_format]
+    ext_sequence_col = args.ext_sequence_col or preset['sequence_col']
+    ext_v_gene_col = args.ext_v_gene_col or preset['v_gene_col']
+    ext_j_gene_col = args.ext_j_gene_col or preset['j_gene_col']
+    ext_file_template = args.ext_file_template or preset['file_template']
+
     evaluator = ExternalEvaluator(
+        model_name=args.model,
         val_split=args.val_split,
         n_cv_folds=args.n_cv_folds,
-        ext_sequence_col=args.ext_sequence_col,
-        ext_v_gene_col=args.ext_v_gene_col,
-        ext_j_gene_col=args.ext_j_gene_col,
+        train_val_ratio=args.train_val_ratio,
+        ext_sequence_col=ext_sequence_col,
+        ext_v_gene_col=ext_v_gene_col,
+        ext_j_gene_col=ext_j_gene_col,
     )
 
     scores_df, metrics = evaluator.run_external_evaluation(
@@ -317,6 +553,7 @@ if __name__ == "__main__":
         ext_disease_col=args.ext_disease_col,
         ext_healthy_label=args.ext_healthy_label,
         ext_disease_label=args.ext_disease_label,
-        ext_file_template=args.ext_file_template,
+        ext_file_template=ext_file_template,
+        random_state=args.random_state,
         output_csv=args.output_csv,
     )
