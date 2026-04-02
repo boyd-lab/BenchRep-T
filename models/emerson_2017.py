@@ -33,7 +33,6 @@ class CMV_Immunosequencing_Model:
                  v_col='v_call', j_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
                  indices_map=None,
-                 v_gene_harmonizer=None, j_gene_harmonizer=None,
                  ignore_allele=False):
         """
         Initialize the model with a p-value threshold for feature selection.
@@ -49,9 +48,6 @@ class CMV_Immunosequencing_Model:
             subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
                          When set, overrides subsample_n/fraction/seed.
-            v_gene_harmonizer: Optional callable applied to V gene values after loading
-                               (e.g. adaptive_to_airr for cross-dataset evaluation).
-            j_gene_harmonizer: Optional callable applied to J gene values after loading.
             ignore_allele: If True, strip allele designations (*XX) from V/J gene
                            names when building TCR tuples, enabling gene-level matching
                            across datasets with different allele conventions.
@@ -64,8 +60,6 @@ class CMV_Immunosequencing_Model:
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
         self.indices_map = indices_map
-        self.v_gene_harmonizer = v_gene_harmonizer
-        self.j_gene_harmonizer = j_gene_harmonizer
         self.ignore_allele = ignore_allele
         self.diagnostic_tcrs = set()
         self.model_params = {}  # Will store alphas, betas, and priors
@@ -104,12 +98,6 @@ class CMV_Immunosequencing_Model:
         # Return unique (v_call, cdr3_aa, j_call) tuples — matching the paper's definition
         # of a unique TCRβ as a combination of V gene, CDR3 amino acid sequence, and J gene.
         df = df[[self.v_col, self.sequence_col, self.j_col]].dropna()
-
-        # Apply gene name harmonization if configured (e.g. Adaptive → AIRR)
-        if self.v_gene_harmonizer:
-            df[self.v_col] = df[self.v_col].map(self.v_gene_harmonizer)
-        if self.j_gene_harmonizer:
-            df[self.j_col] = df[self.j_col].map(self.j_gene_harmonizer)
 
         # Strip allele designations for gene-level matching across datasets
         if self.ignore_allele:

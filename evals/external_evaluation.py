@@ -3,8 +3,10 @@ External dataset evaluation: train on internal data, evaluate on an external dat
 
 Trains a model on ALL internal data (disease vs. Healthy/Background) with an
 internal train/val split for hyperparameter tuning, then evaluates on an
-external dataset that may have a different metadata schema and repertoire column
-names.
+external dataset.
+
+External data must be preprocessed to AIRR column conventions (cdr3_aa, v_call,
+j_call) before use.  See external_data_process/preprocess_repertoires.py.
 
 Supported models:
   - ensemble_regression: Gapped 4-mer + V/J gene logistic regression ensemble
@@ -21,7 +23,6 @@ from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
 from models.emerson_2017 import CMV_Immunosequencing_Model
-from utils.gene_harmonization import adaptive_to_airr
 
 
 SUPPORTED_MODELS = ['ensemble_regression', 'ensemble_regression_kmer',
@@ -42,22 +43,6 @@ _ENSEMBLE_SUBMODEL_MAP = {
     'ensemble_regression_vj': 'vj_only',
 }
 
-# Repertoire format presets: column names and file template for known data sources
-FORMAT_PRESETS = {
-    'adaptive': {
-        'sequence_col': 'aminoAcid',
-        'v_gene_col': 'vGeneName',
-        'j_gene_col': 'jGeneName',
-        'file_template': '{sample_name}_TCRB.tsv',
-    },
-    'airr': {
-        'sequence_col': 'cdr3_aa',
-        'v_gene_col': 'v_call',
-        'j_gene_col': 'j_call',
-        'file_template': 'part_table_{sample_name}.tsv.gz',
-    },
-}
-
 
 class ExternalEvaluator:
     """
@@ -75,14 +60,10 @@ class ExternalEvaluator:
                  # Emerson 2017 hyperparameters
                  train_val_ratio=0.9,
                  p_value_candidates=None,
-                 # Internal repertoire column names
-                 train_sequence_col='cdr3_aa',
-                 train_v_gene_col='v_call',
-                 train_j_gene_col='j_call',
-                 # External repertoire column names
-                 ext_sequence_col='aminoAcid',
-                 ext_v_gene_col='vGeneName',
-                 ext_j_gene_col='jGeneName'):
+                 # Repertoire column names (shared by internal and preprocessed external data)
+                 sequence_col='cdr3_aa',
+                 v_gene_col='v_call',
+                 j_gene_col='j_call'):
         if model_name not in SUPPORTED_MODELS:
             raise ValueError(f"Unknown model '{model_name}'. "
                              f"Supported: {SUPPORTED_MODELS}")
@@ -91,12 +72,9 @@ class ExternalEvaluator:
         self.n_cv_folds = n_cv_folds
         self.train_val_ratio = train_val_ratio
         self.p_value_candidates = p_value_candidates or [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
-        self.train_sequence_col = train_sequence_col
-        self.train_v_gene_col = train_v_gene_col
-        self.train_j_gene_col = train_j_gene_col
-        self.ext_sequence_col = ext_sequence_col
-        self.ext_v_gene_col = ext_v_gene_col
-        self.ext_j_gene_col = ext_j_gene_col
+        self.sequence_col = sequence_col
+        self.v_gene_col = v_gene_col
+        self.j_gene_col = j_gene_col
         self.model = None
 
     # ------------------------------------------------------------------
@@ -182,9 +160,9 @@ class ExternalEvaluator:
         self.model = Gapped_4mer_VJgene(
             val_split=self.val_split,
             n_cv_folds=self.n_cv_folds,
-            sequence_col=self.train_sequence_col,
-            v_gene_col=self.train_v_gene_col,
-            j_gene_col=self.train_j_gene_col,
+            sequence_col=self.sequence_col,
+            v_gene_col=self.v_gene_col,
+            j_gene_col=self.j_gene_col,
             ignore_allele=True,
             submodel=submodel,
         )
@@ -218,9 +196,9 @@ class ExternalEvaluator:
         # ignore_allele=True so diagnostic TCRs are stored allele-free,
         # enabling gene-level matching with external data.
         base_model = CMV_Immunosequencing_Model(
-            sequence_col=self.train_sequence_col,
-            v_col=self.train_v_gene_col,
-            j_col=self.train_j_gene_col,
+            sequence_col=self.sequence_col,
+            v_col=self.v_gene_col,
+            j_col=self.j_gene_col,
             ignore_allele=True,
         )
 
@@ -238,9 +216,9 @@ class ExternalEvaluator:
         for p_val in self.p_value_candidates:
             model = CMV_Immunosequencing_Model(
                 p_value_threshold=p_val,
-                sequence_col=self.train_sequence_col,
-                v_col=self.train_v_gene_col,
-                j_col=self.train_j_gene_col,
+                sequence_col=self.sequence_col,
+                v_col=self.v_gene_col,
+                j_col=self.j_gene_col,
                 ignore_allele=True,
             )
             model._repertoire_cache = base_model._repertoire_cache
@@ -298,9 +276,9 @@ class ExternalEvaluator:
         print(f"\nRetraining on all {len(train_files)} samples with p={best_p_value:.0e}...")
         self.model = CMV_Immunosequencing_Model(
             p_value_threshold=best_p_value,
-            sequence_col=self.train_sequence_col,
-            v_col=self.train_v_gene_col,
-            j_col=self.train_j_gene_col,
+            sequence_col=self.sequence_col,
+            v_col=self.v_gene_col,
+            j_col=self.j_gene_col,
             ignore_allele=True,
         )
         self.model._repertoire_cache = base_model._repertoire_cache
@@ -315,24 +293,6 @@ class ExternalEvaluator:
             'no_diagnostic_tcrs': False,
             'tuning_results': tuning_results,
         }
-
-    def _switch_to_external_cols(self):
-        """Switch the model's column name attributes to external format."""
-        if self.model_name in _ENSEMBLE_SUBMODEL_MAP:
-            self.model.sequence_col = self.ext_sequence_col
-            self.model.v_gene_col = self.ext_v_gene_col
-            self.model.j_gene_col = self.ext_j_gene_col
-            # Harmonize Adaptive gene names to AIRR format for feature matching
-            self.model.v_gene_harmonizer = adaptive_to_airr
-            self.model.j_gene_harmonizer = adaptive_to_airr
-        elif self.model_name == 'emerson_2017':
-            self.model.sequence_col = self.ext_sequence_col
-            self.model.v_col = self.ext_v_gene_col
-            self.model.j_col = self.ext_j_gene_col
-            # Harmonize Adaptive gene names to AIRR format for matching
-            self.model.v_gene_harmonizer = adaptive_to_airr
-            self.model.j_gene_harmonizer = adaptive_to_airr
-        self.model.clear_cache()
 
     # ------------------------------------------------------------------
     # Main evaluation
@@ -408,8 +368,8 @@ class ExternalEvaluator:
         ext_files = ext_data['file_path'].tolist()
         ext_labels = ext_data['label'].values
 
-        # --- Switch column names to external format for prediction ---
-        self._switch_to_external_cols()
+        # Clear cached training repertoires before predicting on external data
+        self.model.clear_cache()
 
         # --- Predict on external data ---
         print(f"\n{'='*60}")
@@ -494,15 +454,11 @@ if __name__ == "__main__":
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Disease to classify (must exist in internal metadata)')
 
-    # External (test) dataset
+    # External (test) dataset — assumes preprocessed files with AIRR column names
     parser.add_argument('--ext_metadata_path', type=str, required=True,
                         help='Path to external metadata file')
     parser.add_argument('--ext_data_dir', type=str, required=True,
-                        help='Directory containing external repertoire files')
-    parser.add_argument('--ext_format', type=str, default='adaptive',
-                        choices=list(FORMAT_PRESETS.keys()),
-                        help='External data format preset (default: adaptive). '
-                             'Sets column names and file template automatically.')
+                        help='Directory containing preprocessed external repertoire files')
     parser.add_argument('--ext_sample_col', type=str, default='sample_name',
                         help='Column with sample identifiers in external metadata')
     parser.add_argument('--ext_disease_col', type=str, default='disease_label',
@@ -511,16 +467,8 @@ if __name__ == "__main__":
                         help='Healthy label string in external metadata')
     parser.add_argument('--ext_disease_label', type=str, default='T1D',
                         help='Disease label string in external metadata')
-
-    # Overrides for format preset (rarely needed)
-    parser.add_argument('--ext_sequence_col', type=str, default=None,
-                        help='Override CDR3 sequence column in external files')
-    parser.add_argument('--ext_v_gene_col', type=str, default=None,
-                        help='Override V gene column in external files')
-    parser.add_argument('--ext_j_gene_col', type=str, default=None,
-                        help='Override J gene column in external files')
-    parser.add_argument('--ext_file_template', type=str, default=None,
-                        help='Override file template for external repertoires')
+    parser.add_argument('--ext_file_template', type=str, default='{sample_name}_TCRB.tsv',
+                        help='File template for external repertoires')
 
     # Model hyperparameters
     parser.add_argument('--val_split', type=float, default=0.2,
@@ -538,21 +486,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # Resolve format preset, then apply any explicit overrides
-    preset = FORMAT_PRESETS[args.ext_format]
-    ext_sequence_col = args.ext_sequence_col or preset['sequence_col']
-    ext_v_gene_col = args.ext_v_gene_col or preset['v_gene_col']
-    ext_j_gene_col = args.ext_j_gene_col or preset['j_gene_col']
-    ext_file_template = args.ext_file_template or preset['file_template']
-
     evaluator = ExternalEvaluator(
         model_name=args.model,
         val_split=args.val_split,
         n_cv_folds=args.n_cv_folds,
         train_val_ratio=args.train_val_ratio,
-        ext_sequence_col=ext_sequence_col,
-        ext_v_gene_col=ext_v_gene_col,
-        ext_j_gene_col=ext_j_gene_col,
     )
 
     scores_df, metrics = evaluator.run_external_evaluation(
@@ -565,7 +503,7 @@ if __name__ == "__main__":
         ext_disease_col=args.ext_disease_col,
         ext_healthy_label=args.ext_healthy_label,
         ext_disease_label=args.ext_disease_label,
-        ext_file_template=ext_file_template,
+        ext_file_template=args.ext_file_template,
         random_state=args.random_state,
         output_csv=args.output_csv,
     )

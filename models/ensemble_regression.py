@@ -61,7 +61,6 @@ class Gapped_4mer_VJgene:
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
                  indices_map=None,
-                 v_gene_harmonizer=None, j_gene_harmonizer=None,
                  ignore_allele=False,
                  submodel='ensemble'):
         """
@@ -75,10 +74,6 @@ class Gapped_4mer_VJgene:
             subsample_seed: Random seed for reproducibility.
             subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set).
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
-            v_gene_harmonizer: Optional callable applied to V gene values before
-                               feature extraction (e.g. adaptive_to_airr).
-            j_gene_harmonizer: Optional callable applied to J gene values before
-                               feature extraction.
             ignore_allele: If True, strip allele designations (*XX) from V/J gene
                            names, enabling gene-level feature matching across datasets.
             submodel: Which sub-model(s) to use: 'ensemble' (default, both
@@ -98,8 +93,6 @@ class Gapped_4mer_VJgene:
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
         self.indices_map = indices_map
-        self.v_gene_harmonizer = v_gene_harmonizer
-        self.j_gene_harmonizer = j_gene_harmonizer
         self.ignore_allele = ignore_allele
 
         # Caches
@@ -169,10 +162,8 @@ class Gapped_4mer_VJgene:
         self._kmer_features_cache[file_path] = counts
         return counts
 
-    def _normalize_gene(self, gene, harmonizer):
-        """Apply harmonization and optional allele stripping to a gene name."""
-        if harmonizer:
-            gene = harmonizer(gene)
+    def _normalize_gene(self, gene):
+        """Apply optional allele stripping to a gene name."""
         if self.ignore_allele and isinstance(gene, str):
             gene = gene.split('*')[0]
         return gene
@@ -190,13 +181,13 @@ class Gapped_4mer_VJgene:
 
         if self.v_gene_col in df.columns:
             for gene in df[self.v_gene_col].dropna():
-                gene = self._normalize_gene(gene, self.v_gene_harmonizer)
+                gene = self._normalize_gene(gene)
                 key = f'V:{gene}'
                 counts[key] = counts.get(key, 0) + 1
 
         if self.j_gene_col in df.columns:
             for gene in df[self.j_gene_col].dropna():
-                gene = self._normalize_gene(gene, self.j_gene_harmonizer)
+                gene = self._normalize_gene(gene)
                 key = f'J:{gene}'
                 counts[key] = counts.get(key, 0) + 1
 
