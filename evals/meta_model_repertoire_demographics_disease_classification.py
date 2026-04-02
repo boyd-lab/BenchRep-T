@@ -1,5 +1,5 @@
 """
-Meta-model evaluator combining ML baseline predictions with demographic features.
+Meta-model evaluator combining ensemble regression predictions with demographic features.
 
 Tests whether TCR repertoire features (gapped 4-mer + V/J gene model predictions)
 and demographic features (age, sex, ancestry) are orthogonal for disease
@@ -7,8 +7,8 @@ classification by training a stacking meta-model.
 
 Architecture per CV fold:
   1. Split non-test data into base_train (80%) and meta_train (20%)
-  2. Train ML baseline on base_train
-  3. Obtain out-of-sample ML baseline predictions on meta_train and test
+  2. Train ensemble regression on base_train
+  3. Obtain out-of-sample ensemble regression predictions on meta_train and test
   4. Extract demographic features for meta_train and test
   5. Train logistic regression meta-model on combined features
   6. Evaluate meta-model on test set
@@ -23,7 +23,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from tqdm import tqdm
 
-from models.ml_baseline import Gapped_4mer_VJgene
+from models.ensemble_regression import Gapped_4mer_VJgene
 
 
 class MetaModelEvaluator:
@@ -43,7 +43,8 @@ class MetaModelEvaluator:
     def __init__(self, base_train_fraction=0.8, ml_val_split=0.2,
                  ml_n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
-                 subsample_fraction=1.0, subsample_seed=7, indices_map=None):
+                 subsample_fraction=1.0, subsample_seed=7, indices_map=None,
+                 submodel='ensemble'):
         """
         Args:
             base_train_fraction: Fraction of non-test data used to train the
@@ -52,6 +53,7 @@ class MetaModelEvaluator:
             ml_n_cv_folds: CV folds used by ML baseline for C tuning.
             sequence_col/v_gene_col/j_gene_col: Column names for repertoire data.
             subsample_fraction/subsample_seed/indices_map: For depth experiments.
+            submodel: 'ensemble' (default), 'kmer_only', or 'vj_only'.
         """
         self.base_train_fraction = base_train_fraction
         self.ml_val_split = ml_val_split
@@ -62,6 +64,7 @@ class MetaModelEvaluator:
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.indices_map = indices_map
+        self.submodel = submodel
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -145,15 +148,24 @@ class MetaModelEvaluator:
         return features, ancestry_categories, feature_names
 
     def _get_ml_predictions(self, ml_model, file_paths):
-        """Get ML baseline [ml_prob, kmer_prob, vj_prob] for each file."""
+        """Get ML baseline predictions for each file.
+
+        Returns an (N, k) array where k depends on the submodel:
+          - ensemble: [ml_prob, kmer_prob, vj_prob]
+          - kmer_only: [kmer_prob]
+          - vj_only: [vj_prob]
+        """
         preds = []
         for fp in tqdm(file_paths, desc="ML predictions", leave=False):
             result = ml_model.predict_diagnosis(fp)
-            preds.append([
-                result['probability_positive'],
-                result['kmer_probability'],
-                result['vj_probability'],
-            ])
+            if self.submodel == 'ensemble':
+                preds.append([
+                    result['probability_positive'],
+                    result['kmer_probability'],
+                    result['vj_probability'],
+                ])
+            else:
+                preds.append([result['probability_positive']])
         return np.array(preds)
 
     def _tune_c_cv(self, X, y, c_candidates, n_folds=5):
@@ -250,6 +262,7 @@ class MetaModelEvaluator:
                 subsample_fraction=self.subsample_fraction,
                 subsample_seed=self.subsample_seed,
                 indices_map=self.indices_map,
+                submodel=self.submodel,
             )
             ml_train_result = ml_model.train(
                 base_train['file_path'].tolist(),
@@ -278,7 +291,12 @@ class MetaModelEvaluator:
             y_test = test_data['label'].values
 
             # --- Build meta-features ---
-            ml_feature_names = ['ml_prob', 'kmer_prob', 'vj_prob']
+            if self.submodel == 'ensemble':
+                ml_feature_names = ['ml_prob', 'kmer_prob', 'vj_prob']
+            elif self.submodel == 'kmer_only':
+                ml_feature_names = ['kmer_prob']
+            else:
+                ml_feature_names = ['vj_prob']
             all_feature_names = ml_feature_names + demo_feature_names
 
             X_meta_combined = np.hstack([meta_ml_preds, X_meta_demo])
@@ -386,12 +404,17 @@ if __name__ == "__main__":
     parser.add_argument('--base_train_fraction', type=float, default=0.8,
                         help='Fraction of non-test data for ML baseline '
                              '(default: 0.8, remaining 0.2 for meta-model)')
+    parser.add_argument('--submodel', type=str, default='ensemble',
+                        choices=['ensemble', 'kmer_only', 'vj_only'],
+                        help='Ensemble regression sub-model to use as base: '
+                             'ensemble (default), kmer_only, or vj_only')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
 
     evaluator = MetaModelEvaluator(
         base_train_fraction=args.base_train_fraction,
+        submodel=args.submodel,
     )
 
     scores_df = evaluator.run_cross_validation(

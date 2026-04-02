@@ -1,5 +1,5 @@
 """
-Evaluation script for the ML Baseline (Gapped 4-mer + V/J gene) disease classification model.
+Evaluation script for the Ensemble Regression (Gapped 4-mer + V/J gene) disease classification model.
 
 Provides cross-validation functionality for evaluating Gapped_4mer_VJgene
 on binary disease vs. Healthy/Background classification tasks.
@@ -12,16 +12,26 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
-from models.ml_baseline import Gapped_4mer_VJgene
+from models.ensemble_regression import Gapped_4mer_VJgene
 
 
-class MLBaselineEvaluator:
+SUBMODEL_METHOD_NAMES = {
+    'ensemble': 'Ensemble_Regression',
+    'kmer_only': 'Ensemble_Regression_Kmer',
+    'vj_only': 'Ensemble_Regression_VJ',
+}
+
+
+class EnsembleRegressionEvaluator:
     """
     Evaluator for the Gapped 4-mer + V/J gene ensemble model.
 
     All hyperparameter tuning (C values via k-fold CV, ensemble alpha via
     validation sweep) is handled internally by the model's train() method,
     so the evaluator passes all non-test data directly to train().
+
+    Set ``submodel`` to 'kmer_only' or 'vj_only' to evaluate individual
+    sub-models instead of the full ensemble.
     """
 
     HEALTHY_LABEL = "Healthy/Background"
@@ -29,7 +39,7 @@ class MLBaselineEvaluator:
     def __init__(self, val_split=0.2, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7,
-                 indices_map=None):
+                 indices_map=None, submodel='ensemble'):
         """
         Args:
             val_split: Internal val fraction used by the model for alpha tuning.
@@ -40,6 +50,7 @@ class MLBaselineEvaluator:
             subsample_fraction: Fraction of reads to sample per repertoire.
             subsample_seed: Random seed for reproducibility.
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
+            submodel: 'ensemble' (default), 'kmer_only', or 'vj_only'.
         """
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
@@ -49,6 +60,7 @@ class MLBaselineEvaluator:
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.indices_map = indices_map
+        self.submodel = submodel
         self.model = None
 
     # ------------------------------------------------------------------
@@ -209,6 +221,7 @@ class MLBaselineEvaluator:
                 subsample_fraction=self.subsample_fraction,
                 subsample_seed=self.subsample_seed,
                 indices_map=self.indices_map,
+                submodel=self.submodel,
             )
 
             train_result = self.model.train(train_files, train_labels)
@@ -233,7 +246,7 @@ class MLBaselineEvaluator:
                     'specimen_label': row['specimen_label'],
                     'disease_label': int(row['label']),
                     'disease_label_str': row[disease_col],
-                    'method': 'ML_Baseline',
+                    'method': SUBMODEL_METHOD_NAMES[self.submodel],
                     'disease_model': target_disease,
                     'model_score': float(score),
                     'malid_cross_validation_fold_id_when_in_test_set': test_fold,
@@ -276,7 +289,7 @@ class MLBaselineEvaluator:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="ML Baseline (Gapped 4-mer + V/J gene) Disease Classification"
+        description="Ensemble Regression (Gapped 4-mer + V/J gene) Disease Classification"
     )
     parser.add_argument('--metadata_path', type=str, required=True,
                         help='Path to metadata.tsv')
@@ -288,6 +301,10 @@ if __name__ == "__main__":
                         help='Internal val fraction for alpha tuning (default: 0.2)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
                         help='CV folds for C tuning (default: 5)')
+    parser.add_argument('--submodel', type=str, default='ensemble',
+                        choices=['ensemble', 'kmer_only', 'vj_only'],
+                        help='Sub-model to evaluate: ensemble (default), '
+                             'kmer_only (gapped 4-mer only), or vj_only (V/J gene only)')
     parser.add_argument('--require_demographics', action='store_true',
                         help='Drop repertoires with missing demographic data '
                              '(age, sex, ancestry) to match demographic baseline subset')
@@ -295,9 +312,10 @@ if __name__ == "__main__":
                         help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
 
-    evaluator = MLBaselineEvaluator(
+    evaluator = EnsembleRegressionEvaluator(
         val_split=args.val_split,
         n_cv_folds=args.n_cv_folds,
+        submodel=args.submodel,
     )
 
     scores_df = evaluator.run_cross_validation(

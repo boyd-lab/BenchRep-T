@@ -1,5 +1,5 @@
 """
-ML Baseline model: Gapped 4-mer + V/J gene logistic regression ensemble.
+Ensemble Regression model: Gapped 4-mer + V/J gene logistic regression ensemble.
 
 Implements the method from the AIRR-ML Kaggle competition:
 - 4-mer features with all single-position gapped variants from CDR3 sequences
@@ -55,10 +55,14 @@ class Gapped_4mer_VJgene:
     C_KMER_CANDIDATES = [1e-3, 3e-3, 1e-2, 3e-2, 1e-1]
     C_VJ_CANDIDATES = [1.0, 0.2, 0.1, 0.05, 0.03]
 
+    VALID_SUBMODELS = ('ensemble', 'kmer_only', 'vj_only')
+
     def __init__(self, val_split=0.2, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
-                 indices_map=None):
+                 indices_map=None,
+                 ignore_allele=False,
+                 submodel='ensemble'):
         """
         Args:
             val_split: Fraction of training data held out internally for alpha tuning.
@@ -70,7 +74,16 @@ class Gapped_4mer_VJgene:
             subsample_seed: Random seed for reproducibility.
             subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set).
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
+            ignore_allele: If True, strip allele designations (*XX) from V/J gene
+                           names, enabling gene-level feature matching across datasets.
+            submodel: Which sub-model(s) to use: 'ensemble' (default, both
+                      combined), 'kmer_only' (gapped 4-mer only), or 'vj_only'
+                      (V/J gene count only).
         """
+        if submodel not in self.VALID_SUBMODELS:
+            raise ValueError(f"Invalid submodel '{submodel}'. "
+                             f"Choose from: {self.VALID_SUBMODELS}")
+        self.submodel = submodel
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
         self.sequence_col = sequence_col
@@ -80,6 +93,7 @@ class Gapped_4mer_VJgene:
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
         self.indices_map = indices_map
+        self.ignore_allele = ignore_allele
 
         # Caches
         self._repertoire_cache = {}
@@ -148,6 +162,12 @@ class Gapped_4mer_VJgene:
         self._kmer_features_cache[file_path] = counts
         return counts
 
+    def _normalize_gene(self, gene):
+        """Apply optional allele stripping to a gene name."""
+        if self.ignore_allele and isinstance(gene, str):
+            gene = gene.split('*')[0]
+        return gene
+
     def _get_vj_feature_dict(self, file_path):
         """
         Extract V gene and J gene frequency counts from a repertoire file.
@@ -161,11 +181,13 @@ class Gapped_4mer_VJgene:
 
         if self.v_gene_col in df.columns:
             for gene in df[self.v_gene_col].dropna():
+                gene = self._normalize_gene(gene)
                 key = f'V:{gene}'
                 counts[key] = counts.get(key, 0) + 1
 
         if self.j_gene_col in df.columns:
             for gene in df[self.j_gene_col].dropna():
+                gene = self._normalize_gene(gene)
                 key = f'J:{gene}'
                 counts[key] = counts.get(key, 0) + 1
 
@@ -214,37 +236,45 @@ class Gapped_4mer_VJgene:
 
     def train(self, train_files, train_labels):
         """
-        Train the ensemble model.
+        Train the model according to self.submodel.
 
-        Internally splits training data into base (80%) and val (20%):
-          - Base set: C tuned via k-fold CV, base models trained.
-          - Val set: alpha tuned via sweep (0.0 to 1.0, step 0.1).
+        For 'ensemble': trains both sub-models and tunes alpha on a val split.
+        For 'kmer_only': trains only the gapped 4-mer sub-model.
+        For 'vj_only': trains only the V/J gene count sub-model.
 
         Args:
             train_files: List of repertoire file paths.
             train_labels: List/array of binary labels (0 = healthy, 1 = disease).
 
         Returns:
-            Dict with training summary (best_c_kmer, best_c_vj, best_alpha, val_auroc).
+            Dict with training summary.
         """
         train_files = list(train_files)
         train_labels = np.array(train_labels)
+        use_kmer = self.submodel in ('ensemble', 'kmer_only')
+        use_vj = self.submodel in ('ensemble', 'vj_only')
 
         self.preload_repertoires(train_files)
 
         # --- Feature extraction ---
-        print("Extracting k-mer features...")
-        kmer_dicts = [self._get_kmer_feature_dict(f) for f in tqdm(train_files, leave=False)]
+        best_c_kmer = None
+        best_c_vj = None
+        n_kmer_features = 0
+        n_vj_features = 0
 
-        print("Extracting V/J gene features...")
-        vj_dicts = [self._get_vj_feature_dict(f) for f in tqdm(train_files, leave=False)]
+        if use_kmer:
+            print("Extracting k-mer features...")
+            kmer_dicts = [self._get_kmer_feature_dict(f) for f in tqdm(train_files, leave=False)]
+            self.kmer_vectorizer = DictVectorizer(sparse=True)
+            X_kmer_all = self.kmer_vectorizer.fit_transform(kmer_dicts)
+            n_kmer_features = X_kmer_all.shape[1]
 
-        # Fit vectorizers on the full training set so vocabulary covers all splits
-        self.kmer_vectorizer = DictVectorizer(sparse=True)
-        X_kmer_all = self.kmer_vectorizer.fit_transform(kmer_dicts)
-
-        self.vj_vectorizer = DictVectorizer(sparse=True)
-        X_vj_all = self.vj_vectorizer.fit_transform(vj_dicts)
+        if use_vj:
+            print("Extracting V/J gene features...")
+            vj_dicts = [self._get_vj_feature_dict(f) for f in tqdm(train_files, leave=False)]
+            self.vj_vectorizer = DictVectorizer(sparse=True)
+            X_vj_all = self.vj_vectorizer.fit_transform(vj_dicts)
+            n_vj_features = X_vj_all.shape[1]
 
         # --- Internal train/val split ---
         indices = np.arange(len(train_files))
@@ -253,66 +283,87 @@ class Gapped_4mer_VJgene:
             random_state=self.subsample_seed,
             stratify=train_labels
         )
-
-        X_kmer_base = X_kmer_all[base_idx]
-        X_kmer_val = X_kmer_all[val_idx]
-        X_vj_base = X_vj_all[base_idx]
-        X_vj_val = X_vj_all[val_idx]
         y_base = train_labels[base_idx]
         y_val = train_labels[val_idx]
 
         # --- Tune and train k-mer model ---
-        print("Tuning k-mer model C...")
-        best_c_kmer = self._tune_c(X_kmer_base, y_base, self.C_KMER_CANDIDATES)
-        print(f"  Best C (k-mer): {best_c_kmer}")
+        if use_kmer:
+            X_kmer_base = X_kmer_all[base_idx]
+            X_kmer_val = X_kmer_all[val_idx]
 
-        self.kmer_scaler = StandardScaler(with_mean=False)
-        X_kmer_base_sc = self.kmer_scaler.fit_transform(X_kmer_base)
-        self.kmer_model = LogisticRegression(C=best_c_kmer, penalty='l1',
-                                              solver='liblinear', max_iter=1000)
-        self.kmer_model.fit(X_kmer_base_sc, y_base)
+            print("Tuning k-mer model C...")
+            best_c_kmer = self._tune_c(X_kmer_base, y_base, self.C_KMER_CANDIDATES)
+            print(f"  Best C (k-mer): {best_c_kmer}")
+
+            self.kmer_scaler = StandardScaler(with_mean=False)
+            X_kmer_base_sc = self.kmer_scaler.fit_transform(X_kmer_base)
+            self.kmer_model = LogisticRegression(C=best_c_kmer, penalty='l1',
+                                                  solver='liblinear', max_iter=1000)
+            self.kmer_model.fit(X_kmer_base_sc, y_base)
 
         # --- Tune and train V/J model ---
-        print("Tuning V/J model C...")
-        best_c_vj = self._tune_c(X_vj_base, y_base, self.C_VJ_CANDIDATES)
-        print(f"  Best C (V/J):   {best_c_vj}")
+        if use_vj:
+            X_vj_base = X_vj_all[base_idx]
+            X_vj_val = X_vj_all[val_idx]
 
-        self.vj_scaler = StandardScaler(with_mean=False)
-        X_vj_base_sc = self.vj_scaler.fit_transform(X_vj_base)
-        self.vj_model = LogisticRegression(C=best_c_vj, penalty='l1',
-                                            solver='liblinear', max_iter=1000)
-        self.vj_model.fit(X_vj_base_sc, y_base)
+            print("Tuning V/J model C...")
+            best_c_vj = self._tune_c(X_vj_base, y_base, self.C_VJ_CANDIDATES)
+            print(f"  Best C (V/J):   {best_c_vj}")
 
-        # --- Alpha sweep on validation set ---
-        print("Tuning ensemble alpha...")
-        X_kmer_val_sc = self.kmer_scaler.transform(X_kmer_val)
-        X_vj_val_sc = self.vj_scaler.transform(X_vj_val)
+            self.vj_scaler = StandardScaler(with_mean=False)
+            X_vj_base_sc = self.vj_scaler.fit_transform(X_vj_base)
+            self.vj_model = LogisticRegression(C=best_c_vj, penalty='l1',
+                                                solver='liblinear', max_iter=1000)
+            self.vj_model.fit(X_vj_base_sc, y_base)
 
-        kmer_val_probs = self.kmer_model.predict_proba(X_kmer_val_sc)[:, 1]
-        vj_val_probs = self.vj_model.predict_proba(X_vj_val_sc)[:, 1]
+        # --- Alpha sweep (ensemble only) ---
+        best_alpha = 0.5
+        best_val_auroc = -1.0
 
-        best_alpha, best_val_auroc = 0.5, -1.0
-        if len(np.unique(y_val)) >= 2:
-            for alpha in np.arange(0.0, 1.01, 0.1):
-                ensemble_probs = alpha * kmer_val_probs + (1 - alpha) * vj_val_probs
-                auroc = roc_auc_score(y_val, ensemble_probs)
-                if auroc > best_val_auroc:
-                    best_val_auroc = auroc
-                    best_alpha = alpha
-        else:
-            print("  Warning: val set has only one class; using default alpha=0.5")
+        if self.submodel == 'ensemble':
+            print("Tuning ensemble alpha...")
+            X_kmer_val_sc = self.kmer_scaler.transform(X_kmer_val)
+            X_vj_val_sc = self.vj_scaler.transform(X_vj_val)
+
+            kmer_val_probs = self.kmer_model.predict_proba(X_kmer_val_sc)[:, 1]
+            vj_val_probs = self.vj_model.predict_proba(X_vj_val_sc)[:, 1]
+
+            if len(np.unique(y_val)) >= 2:
+                for alpha in np.arange(0.0, 1.01, 0.1):
+                    ensemble_probs = alpha * kmer_val_probs + (1 - alpha) * vj_val_probs
+                    auroc = roc_auc_score(y_val, ensemble_probs)
+                    if auroc > best_val_auroc:
+                        best_val_auroc = auroc
+                        best_alpha = alpha
+            else:
+                print("  Warning: val set has only one class; using default alpha=0.5")
+
+            print(f"  Best alpha (k-mer weight): {best_alpha:.1f}, "
+                  f"Val AUROC: {best_val_auroc:.4f}")
+        elif self.submodel == 'kmer_only':
+            best_alpha = 1.0
+            X_kmer_val_sc = self.kmer_scaler.transform(X_kmer_val)
+            kmer_val_probs = self.kmer_model.predict_proba(X_kmer_val_sc)[:, 1]
+            if len(np.unique(y_val)) >= 2:
+                best_val_auroc = roc_auc_score(y_val, kmer_val_probs)
+            print(f"  K-mer only Val AUROC: {best_val_auroc:.4f}")
+        elif self.submodel == 'vj_only':
+            best_alpha = 0.0
+            X_vj_val_sc = self.vj_scaler.transform(X_vj_val)
+            vj_val_probs = self.vj_model.predict_proba(X_vj_val_sc)[:, 1]
+            if len(np.unique(y_val)) >= 2:
+                best_val_auroc = roc_auc_score(y_val, vj_val_probs)
+            print(f"  V/J only Val AUROC: {best_val_auroc:.4f}")
 
         self.best_alpha = best_alpha
-        print(f"  Best alpha (k-mer weight): {best_alpha:.1f}, "
-              f"Val AUROC: {best_val_auroc:.4f}")
 
         return {
             'best_c_kmer': best_c_kmer,
             'best_c_vj': best_c_vj,
             'best_alpha': best_alpha,
             'val_auroc': best_val_auroc,
-            'n_kmer_features': X_kmer_all.shape[1],
-            'n_vj_features': X_vj_all.shape[1],
+            'n_kmer_features': n_kmer_features,
+            'n_vj_features': n_vj_features,
         }
 
     def predict_diagnosis(self, file_path):
@@ -324,22 +375,31 @@ class Gapped_4mer_VJgene:
 
         Returns:
             Dict with:
-              probability_positive (float): ensemble P(disease) in [0, 1]
-              kmer_probability (float): k-mer model P(disease)
-              vj_probability (float): V/J model P(disease)
+              probability_positive (float): P(disease) in [0, 1]
+              kmer_probability (float): k-mer model P(disease) (None if vj_only)
+              vj_probability (float): V/J model P(disease) (None if kmer_only)
               best_alpha (float): ensemble weight used for k-mer model
               diagnosis (str): 'Diseased' or 'Healthy'
         """
-        kmer_dict = self._get_kmer_feature_dict(file_path)
-        vj_dict = self._get_vj_feature_dict(file_path)
+        kmer_prob = None
+        vj_prob = None
 
-        X_kmer = self.kmer_scaler.transform(self.kmer_vectorizer.transform([kmer_dict]))
-        X_vj = self.vj_scaler.transform(self.vj_vectorizer.transform([vj_dict]))
+        if self.submodel in ('ensemble', 'kmer_only'):
+            kmer_dict = self._get_kmer_feature_dict(file_path)
+            X_kmer = self.kmer_scaler.transform(self.kmer_vectorizer.transform([kmer_dict]))
+            kmer_prob = float(self.kmer_model.predict_proba(X_kmer)[0, 1])
 
-        kmer_prob = float(self.kmer_model.predict_proba(X_kmer)[0, 1])
-        vj_prob = float(self.vj_model.predict_proba(X_vj)[0, 1])
+        if self.submodel in ('ensemble', 'vj_only'):
+            vj_dict = self._get_vj_feature_dict(file_path)
+            X_vj = self.vj_scaler.transform(self.vj_vectorizer.transform([vj_dict]))
+            vj_prob = float(self.vj_model.predict_proba(X_vj)[0, 1])
 
-        prob = self.best_alpha * kmer_prob + (1 - self.best_alpha) * vj_prob
+        if self.submodel == 'ensemble':
+            prob = self.best_alpha * kmer_prob + (1 - self.best_alpha) * vj_prob
+        elif self.submodel == 'kmer_only':
+            prob = kmer_prob
+        else:  # vj_only
+            prob = vj_prob
 
         return {
             'probability_positive': prob,

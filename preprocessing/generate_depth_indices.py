@@ -2,23 +2,23 @@
 """
 Generate subsampling indices for sequencing depth scaling law experiments.
 
-For each repertoire with >= 100,000 sequences, generates N_REPS independent
-random samples of 100,000 row indices (without replacement). Depth K uses
+For each repertoire with >= 75,000 sequences, generates N_REPS independent
+random samples of 75,000 row indices (without replacement). Depth K uses
 the first K indices of each sample, so smaller depths are always nested
 subsets of larger ones — removing one source of cross-depth variance.
 
-Depths: 1000, 5000, 10000, 25000, 50000, 100000
+Depths: 1000, 5000, 10000, 25000, 50000, 75000
 Repetitions: 5
 
 Output JSON structure:
     {
-        "depths": [1000, 5000, 10000, 25000, 50000, 100000],
+        "depths": [1000, 5000, 10000, 25000, 50000, 75000],
         "n_reps": 5,
-        "min_sequences": 100000,
+        "min_sequences": 75000,
         "seed": 7,
         "repertoires": {
             "<rep_id>": {
-                "0": [idx0, idx1, ..., idx99999],   # repetition 0
+                "0": [idx0, idx1, ..., idx74999],   # repetition 0
                 "1": [...],                          # repetition 1
                 ...
                 "4": [...]                           # repetition 4
@@ -50,8 +50,8 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-DEPTHS = [1000, 5000, 10000, 25000, 50000, 100_000]
-MIN_SEQUENCES = 100_000
+DEPTHS = [1000, 5000, 10000, 25000, 50000, 75_000]
+MIN_SEQUENCES = 75_000
 N_REPS = 5
 DEFAULT_SEED = 7
 

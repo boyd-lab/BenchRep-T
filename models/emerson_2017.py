@@ -32,7 +32,8 @@ class CMV_Immunosequencing_Model:
     def __init__(self, p_value_threshold=1e-4, sequence_col='cdr3_aa',
                  v_col='v_call', j_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
-                 indices_map=None):
+                 indices_map=None,
+                 ignore_allele=False):
         """
         Initialize the model with a p-value threshold for feature selection.
         Paper uses 1e-4 as optimized via cross-validation[cite: 52].
@@ -47,6 +48,9 @@ class CMV_Immunosequencing_Model:
             subsample_n: Absolute number of reads to keep (overrides subsample_fraction if set)
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
                          When set, overrides subsample_n/fraction/seed.
+            ignore_allele: If True, strip allele designations (*XX) from V/J gene
+                           names when building TCR tuples, enabling gene-level matching
+                           across datasets with different allele conventions.
         """
         self.p_value_threshold = p_value_threshold
         self.sequence_col = sequence_col
@@ -56,6 +60,7 @@ class CMV_Immunosequencing_Model:
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
         self.indices_map = indices_map
+        self.ignore_allele = ignore_allele
         self.diagnostic_tcrs = set()
         self.model_params = {}  # Will store alphas, betas, and priors
         self._repertoire_cache = {}  # Cache for loaded repertoire data
@@ -93,6 +98,13 @@ class CMV_Immunosequencing_Model:
         # Return unique (v_call, cdr3_aa, j_call) tuples — matching the paper's definition
         # of a unique TCRβ as a combination of V gene, CDR3 amino acid sequence, and J gene.
         df = df[[self.v_col, self.sequence_col, self.j_col]].dropna()
+
+        # Strip allele designations for gene-level matching across datasets
+        if self.ignore_allele:
+            from utils.gene_harmonization import strip_allele
+            df[self.v_col] = df[self.v_col].map(strip_allele)
+            df[self.j_col] = df[self.j_col].map(strip_allele)
+
         sequences = set(zip(df[self.v_col], df[self.sequence_col], df[self.j_col]))
 
         if use_cache:
