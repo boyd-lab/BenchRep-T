@@ -192,15 +192,18 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
             evaluator = create_evaluator(model_name, indices_map=indices_map)
 
             # Run cross-validation
-            scores_df = evaluator.run_cross_validation(
+            cv_kwargs = dict(
                 metadata_path=metadata_path,
                 target_disease=target_disease,
                 data_dir=repertoire_data_dir,
                 random_state=random_seed,
                 tune_parameters=True,
                 allowed_participants=allowed_specimens,
-                raw_file_cache=raw_file_cache,
             )
+            # Only DeepRC supports raw_file_cache
+            if model_name == 'deeprc_2020':
+                cv_kwargs['raw_file_cache'] = raw_file_cache
+            scores_df = evaluator.run_cross_validation(**cv_kwargs)
 
             elapsed = time.time() - start_time
 
