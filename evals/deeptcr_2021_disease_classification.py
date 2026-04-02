@@ -24,6 +24,7 @@ sys.path.insert(0, _DEEPTCR_DIR)
 from DeepTCR import DeepTCR_WF
 from utils_s import Get_Train_Valid_Test_KFold
 from data_processing import Process_Seq
+from Layers import make_test_pred_object
 
 
 class DeepTCREvaluator:
@@ -41,6 +42,8 @@ class DeepTCREvaluator:
     def __init__(self,
                  sequence_col='cdr3_aa',
                  count_col='duplicate_count',
+                 v_beta_col='v_call',
+                 j_beta_col='j_call',
                  max_length=40,
                  train_val_ratio=0.9,
                  random_state=7,
@@ -49,6 +52,7 @@ class DeepTCREvaluator:
                  num_concepts=64,
                  size_of_net='small',
                  epochs_min=10,
+                 epochs_max=None,
                  hinge_loss_t=0.1,
                  train_loss_min=0.1,
                  combine_train_valid=True,
@@ -63,6 +67,10 @@ class DeepTCREvaluator:
         Args:
             sequence_col: AIRR column with CDR3 amino acid sequences.
             count_col: AIRR column with duplicate counts; uses 1 if absent.
+            v_beta_col: AIRR column with V-beta gene calls (default 'v_call');
+                        pass None to omit V-gene features.
+            j_beta_col: AIRR column with J-beta gene calls (default 'j_call');
+                        pass None to omit J-gene features.
             max_length: Maximum CDR3 length passed to DeepTCR (default 40).
             train_val_ratio: Fraction of non-test data used for training
                              (remainder is validation for early stopping).
@@ -89,6 +97,8 @@ class DeepTCREvaluator:
         """
         self.sequence_col = sequence_col
         self.count_col = count_col
+        self.v_beta_col = v_beta_col
+        self.j_beta_col = j_beta_col
         self.max_length = max_length
         self.train_val_ratio = train_val_ratio
         self.random_state = random_state
@@ -96,6 +106,7 @@ class DeepTCREvaluator:
         self.num_concepts = num_concepts
         self.size_of_net = size_of_net
         self.epochs_min = epochs_min
+        self.epochs_max = epochs_max
         self.hinge_loss_t = hinge_loss_t
         self.train_loss_min = train_loss_min
         self.combine_train_valid = combine_train_valid
@@ -175,22 +186,32 @@ class DeepTCREvaluator:
             sample_labels  : np.ndarray of shape (N,) – specimen labels
             class_labels   : np.ndarray of shape (N,) – per-sequence class
             counts         : np.ndarray of shape (N,) int – duplicate counts
+            v_beta         : np.ndarray of shape (N,) or None – V-gene calls
+            j_beta         : np.ndarray of shape (N,) or None – J-gene calls
             written        : set of specimen_labels that were loaded
         """
         all_seqs = []
         all_samples = []
         all_cls = []
         all_counts = []
+        all_v_beta = [] if self.v_beta_col else None
+        all_j_beta = [] if self.j_beta_col else None
         written = set()
 
         for _, row in metadata.iterrows():
             specimen = row['specimen_label']
             class_str = target_disease if row['label'] == 1 else self._DEEPTCR_CLASS_HEALTHY
 
+            wanted_cols = {self.sequence_col, self.count_col}
+            if self.v_beta_col:
+                wanted_cols.add(self.v_beta_col)
+            if self.j_beta_col:
+                wanted_cols.add(self.j_beta_col)
+
             try:
                 df = pd.read_csv(
                     row['file_path'], sep='\t',
-                    usecols=lambda c: c in [self.sequence_col, self.count_col],
+                    usecols=lambda c: c in wanted_cols,
                 )
             except Exception as e:
                 print(f"  Warning: could not read {row['file_path']}: {e}")
@@ -207,7 +228,11 @@ class DeepTCREvaluator:
             if self.count_col not in df.columns:
                 df[self.count_col] = 1
 
-            df = df[[self.sequence_col, self.count_col]].copy()
+            keep_cols = [self.sequence_col, self.count_col] + [
+                c for c in [self.v_beta_col, self.j_beta_col]
+                if c and c in df.columns
+            ]
+            df = df[keep_cols].copy()
             df[self.count_col] = pd.to_numeric(df[self.count_col], errors='coerce')
             df = df.dropna(subset=[self.count_col])
             df = df[df[self.count_col] >= 1]
@@ -217,10 +242,16 @@ class DeepTCREvaluator:
             if len(df) == 0:
                 continue
 
-            # Aggregate duplicate amino acid sequences (sum counts)
+            # Aggregate by CDR3 sequence only (matching DeepTCR's Get_DF_Data):
+            # sum counts, take 'first' for gene call columns.
+            gene_cols = [c for c in [self.v_beta_col, self.j_beta_col]
+                         if c and c in df.columns]
+            agg_dict = {self.count_col: 'sum'}
+            for gc in gene_cols:
+                agg_dict[gc] = 'first'
             df = (
-                df.groupby(self.sequence_col, as_index=False)[self.count_col]
-                .sum()
+                df.groupby(self.sequence_col, as_index=False)
+                .agg(agg_dict)
                 .sort_values(self.count_col, ascending=False)
                 .reset_index(drop=True)
             )
@@ -235,16 +266,26 @@ class DeepTCREvaluator:
             all_samples.extend([specimen] * n)
             all_cls.extend([class_str] * n)
             all_counts.extend(df[self.count_col].astype(int).tolist())
+            if all_v_beta is not None:
+                col = self.v_beta_col
+                vals = df[col].tolist() if col in df.columns else [None] * n
+                all_v_beta.extend(vals)
+            if all_j_beta is not None:
+                col = self.j_beta_col
+                vals = df[col].tolist() if col in df.columns else [None] * n
+                all_j_beta.extend(vals)
             written.add(specimen)
 
         if not all_seqs:
-            return None, None, None, None, written
+            return None, None, None, None, None, None, written
 
         return (
             np.array(all_seqs),
             np.array(all_samples),
             np.array(all_cls),
             np.array(all_counts, dtype=int),
+            np.array(all_v_beta, dtype=object) if all_v_beta is not None else None,
+            np.array(all_j_beta, dtype=object) if all_j_beta is not None else None,
             written,
         )
 
@@ -314,7 +355,7 @@ class DeepTCREvaluator:
         # the full metadata (train + val + test) is loaded each time.
         # ------------------------------------------------------------------
         print("\nLoading all repertoire files into memory...")
-        beta_sequences, sample_labels, class_labels, counts, written = \
+        beta_sequences, sample_labels, class_labels, counts, v_beta, j_beta, written = \
             self._collect_all_data(metadata, target_disease)
 
         if beta_sequences is None:
@@ -360,6 +401,8 @@ class DeepTCREvaluator:
                 sample_labels=sample_labels,
                 class_labels=class_labels,
                 counts=counts,
+                v_beta=v_beta,
+                j_beta=j_beta,
             )
 
             # ----------------------------------------------------------
@@ -427,12 +470,14 @@ class DeepTCREvaluator:
                 num_concepts=self.num_concepts,
                 size_of_net=self.size_of_net,
                 epochs_min=self.epochs_min,
+                epochs_max=self.epochs_max,
                 hinge_loss_t=self.hinge_loss_t,
                 train_loss_min=self.train_loss_min if self.combine_train_valid else None,
                 convergence='training' if self.combine_train_valid else 'validation',
                 batch_size=self.batch_size,
                 suppress_output=False,
             )
+            dtcr.test_pred = make_test_pred_object()
             dtcr._train(write=False, batch_seed=None, iteration=test_fold)
 
             # ----------------------------------------------------------
@@ -540,6 +585,8 @@ if __name__ == '__main__':
                         help='Network size (default: small)')
     parser.add_argument('--epochs_min', type=int, default=10,
                         help='Minimum training epochs (default: 10)')
+    parser.add_argument('--epochs_max', type=int, default=None,
+                        help='Maximum training epochs; None means no cap (default: None)')
     parser.add_argument('--hinge_loss_t', type=float, default=0.1,
                         help='Per-sample hinge loss threshold (default: 0.1)')
     parser.add_argument('--train_loss_min', type=float, default=0.1,
@@ -559,6 +606,7 @@ if __name__ == '__main__':
         num_concepts=args.num_concepts,
         size_of_net=args.size_of_net,
         epochs_min=args.epochs_min,
+        epochs_max=args.epochs_max,
         hinge_loss_t=args.hinge_loss_t,
         train_loss_min=args.train_loss_min,
         batch_size=args.batch_size,

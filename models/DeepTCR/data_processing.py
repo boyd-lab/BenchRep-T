@@ -255,4 +255,3 @@ def make_seq_list(seq,
             ref_list.append(seq_run[ii])
             alt_list.append(r)
     return (seq_run_list, pos, ref_list, alt_list)
-

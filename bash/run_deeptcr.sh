@@ -12,7 +12,7 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-GPUS=(2)
+GPUS=(0 1 2 3)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
@@ -47,7 +47,7 @@ for disease in "${DISEASES[@]}"; do
       echo "[$(date +%T)] start $disease on GPU $gpu"
 
       debug_flags=()
-      $DEBUG && debug_flags=(--debug --debug_repertoires "$DEBUG_REPERTOIRES")
+      $DEBUG && debug_flags=(--debug --debug_repertoires "$DEBUG_REPERTOIRES" --epochs_max 5)
 
       CUDA_VISIBLE_DEVICES="$gpu" python -u -m evals.deeptcr_2021_disease_classification \
         --metadata_path "$METADATA" \
@@ -55,6 +55,7 @@ for disease in "${DISEASES[@]}"; do
         --target_disease "$disease" \
         --output_csv "${RESULTS}/deeptcr_2021_${disease}_classification.csv" \
         --results_dir "${RESULTS}/deeptcr" \
+        --batch_size 4 \
         --device 0 \
         "${debug_flags[@]}"
 

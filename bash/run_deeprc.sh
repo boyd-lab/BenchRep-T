@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # ---- config ----
-GPUS=(3)
+GPUS=(0)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
@@ -37,7 +37,7 @@ for disease in "${DISEASES[@]}"; do
         --repertoire_data_dir "$REPERTOIRE_DIR" \
         --target_disease "$disease" \
         --output_csv "${RESULTS}/deeprc_2020_${disease}_classification.csv" \
-        --batch_size 96
+        --batch_size 32
 
       status=$?
       echo "[$(date +%T)] done  $disease on GPU $gpu (exit $status)"

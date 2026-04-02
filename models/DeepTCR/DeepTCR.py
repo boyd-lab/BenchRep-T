@@ -4036,7 +4036,7 @@ class DeepTCR_WF(DeepTCR_S_base):
                use_only_seq=False, use_only_gene=False, use_only_hla=False, size_of_net='medium',graph_seed = None,
                qualitative_agg=True, quantitative_agg=False, num_agg_layers=0, units_agg=12,
                drop_out_rate=0.0,multisample_dropout=False, multisample_dropout_rate = 0.50,multisample_dropout_num_masks = 64,
-               batch_size = 25,batch_size_update = None, epochs_min = 25,stop_criterion=0.25,stop_criterion_window=10,
+               batch_size = 25,batch_size_update = None, epochs_min = 25,epochs_max=None,stop_criterion=0.25,stop_criterion_window=10,
               accuracy_min = None,train_loss_min=None,hinge_loss_t=0.0,convergence='validation',learning_rate=0.001, suppress_output=False,
                loss_criteria='mean',l2_reg=0.0):
 
@@ -4046,6 +4046,7 @@ class DeepTCR_WF(DeepTCR_S_base):
         train_params.batch_size = batch_size
         train_params.batch_size_update = batch_size_update
         train_params.epochs_min = epochs_min
+        train_params.epochs_max = epochs_max
         train_params.stop_criterion = stop_criterion
         train_params.stop_criterion_window  = stop_criterion_window
         train_params.accuracy_min = accuracy_min
@@ -4184,6 +4185,7 @@ class DeepTCR_WF(DeepTCR_S_base):
         batch_size = train_params.batch_size
         batch_size_update = train_params.batch_size_update
         epochs_min = train_params.epochs_min
+        epochs_max = train_params.epochs_max
         stop_criterion = train_params.stop_criterion
         stop_criterion_window = train_params.stop_criterion_window
         accuracy_min = train_params.accuracy_min
@@ -4252,6 +4254,8 @@ class DeepTCR_WF(DeepTCR_S_base):
 
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
+                    if epochs_max is not None and e >= epochs_max:
+                        break
                     if e > epochs_min:
                         if accuracy_min is not None:
                             if np.mean(train_accuracy_total[-3:]) >= accuracy_min:
