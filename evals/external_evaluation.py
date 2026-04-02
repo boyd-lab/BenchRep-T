@@ -7,7 +7,7 @@ external dataset that may have a different metadata schema and repertoire column
 names.
 
 Supported models:
-  - ml_baseline: Gapped 4-mer + V/J gene logistic regression ensemble
+  - ensemble_regression: Gapped 4-mer + V/J gene logistic regression ensemble
   - emerson_2017: Fisher's exact test + Beta-Binomial generative model
 """
 
@@ -19,17 +19,27 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
-from models.ml_baseline import Gapped_4mer_VJgene
+from models.ensemble_regression import Gapped_4mer_VJgene
 from models.emerson_2017 import CMV_Immunosequencing_Model
 from utils.gene_harmonization import adaptive_to_airr
 
 
-SUPPORTED_MODELS = ['ml_baseline', 'emerson_2017']
+SUPPORTED_MODELS = ['ensemble_regression', 'ensemble_regression_kmer',
+                    'ensemble_regression_vj', 'emerson_2017']
 
 # Model name → display name for output
 MODEL_DISPLAY_NAMES = {
-    'ml_baseline': 'ML_Baseline',
+    'ensemble_regression': 'Ensemble_Regression',
+    'ensemble_regression_kmer': 'Ensemble_Regression_Kmer',
+    'ensemble_regression_vj': 'Ensemble_Regression_VJ',
     'emerson_2017': 'Emerson_2017',
+}
+
+# Map model names to ensemble regression submodel parameter
+_ENSEMBLE_SUBMODEL_MAP = {
+    'ensemble_regression': 'ensemble',
+    'ensemble_regression_kmer': 'kmer_only',
+    'ensemble_regression_vj': 'vj_only',
 }
 
 # Repertoire format presets: column names and file template for known data sources
@@ -59,8 +69,8 @@ class ExternalEvaluator:
 
     INTERNAL_HEALTHY_LABEL = "Healthy/Background"
 
-    def __init__(self, model_name='ml_baseline',
-                 # ML Baseline hyperparameters
+    def __init__(self, model_name='ensemble_regression',
+                 # Ensemble Regression hyperparameters
                  val_split=0.2, n_cv_folds=5,
                  # Emerson 2017 hyperparameters
                  train_val_ratio=0.9,
@@ -166,8 +176,9 @@ class ExternalEvaluator:
     # Model-specific training
     # ------------------------------------------------------------------
 
-    def _train_ml_baseline(self, train_files, train_labels):
-        """Train the ML Baseline model (handles internal 80/20 split)."""
+    def _train_ensemble_regression(self, train_files, train_labels):
+        """Train the Ensemble Regression model (handles internal 80/20 split)."""
+        submodel = _ENSEMBLE_SUBMODEL_MAP.get(self.model_name, 'ensemble')
         self.model = Gapped_4mer_VJgene(
             val_split=self.val_split,
             n_cv_folds=self.n_cv_folds,
@@ -175,6 +186,7 @@ class ExternalEvaluator:
             v_gene_col=self.train_v_gene_col,
             j_gene_col=self.train_j_gene_col,
             ignore_allele=True,
+            submodel=submodel,
         )
         train_result = self.model.train(train_files, train_labels)
         return train_result
@@ -306,7 +318,7 @@ class ExternalEvaluator:
 
     def _switch_to_external_cols(self):
         """Switch the model's column name attributes to external format."""
-        if self.model_name == 'ml_baseline':
+        if self.model_name in _ENSEMBLE_SUBMODEL_MAP:
             self.model.sequence_col = self.ext_sequence_col
             self.model.v_gene_col = self.ext_v_gene_col
             self.model.j_gene_col = self.ext_j_gene_col
@@ -374,8 +386,8 @@ class ExternalEvaluator:
               f"({len(train_files)} samples)")
         print(f"{'='*60}")
 
-        if self.model_name == 'ml_baseline':
-            train_result = self._train_ml_baseline(train_files, train_labels)
+        if self.model_name in _ENSEMBLE_SUBMODEL_MAP:
+            train_result = self._train_ensemble_regression(train_files, train_labels)
         elif self.model_name == 'emerson_2017':
             train_result = self._train_emerson_2017(
                 train_files, train_labels, random_state=random_state
@@ -420,7 +432,7 @@ class ExternalEvaluator:
         print(f"{'='*60}")
         print(f"Training: {len(train_files)} samples (internal)")
 
-        if self.model_name == 'ml_baseline':
+        if self.model_name in _ENSEMBLE_SUBMODEL_MAP:
             print(f"  Best C (k-mer): {train_result['best_c_kmer']}")
             print(f"  Best C (V/J):   {train_result['best_c_vj']}")
             print(f"  Best alpha:     {train_result['best_alpha']:.1f}")
@@ -470,9 +482,9 @@ if __name__ == "__main__":
     )
 
     # Model selection
-    parser.add_argument('--model', type=str, default='ml_baseline',
+    parser.add_argument('--model', type=str, default='ensemble_regression',
                         choices=SUPPORTED_MODELS,
-                        help='Model to use (default: ml_baseline)')
+                        help='Model to use (default: ensemble_regression)')
 
     # Internal (training) dataset
     parser.add_argument('--train_metadata_path', type=str, required=True,
@@ -512,9 +524,9 @@ if __name__ == "__main__":
 
     # Model hyperparameters
     parser.add_argument('--val_split', type=float, default=0.2,
-                        help='Internal val fraction for ML Baseline alpha tuning (default: 0.2)')
+                        help='Internal val fraction for Ensemble Regression alpha tuning (default: 0.2)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
-                        help='CV folds for ML Baseline C tuning (default: 5)')
+                        help='CV folds for Ensemble Regression C tuning (default: 5)')
     parser.add_argument('--train_val_ratio', type=float, default=0.9,
                         help='Train/val ratio for Emerson 2017 tuning (default: 0.9)')
     parser.add_argument('--random_state', type=int, default=7,

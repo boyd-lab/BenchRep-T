@@ -7,7 +7,7 @@ def __getattr__(name):
         from .giana_2020 import GIANA_Classifier
         return GIANA_Classifier
     if name == 'Gapped_4mer_VJgene':
-        from .ml_baseline import Gapped_4mer_VJgene
+        from .ensemble_regression import Gapped_4mer_VJgene
         return Gapped_4mer_VJgene
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

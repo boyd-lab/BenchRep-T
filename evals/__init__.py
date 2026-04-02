@@ -9,9 +9,9 @@ def __getattr__(name):
     if name == 'DemographicFeaturesEvaluator':
         from .demographic_features_disease_classification import DemographicFeaturesEvaluator
         return DemographicFeaturesEvaluator
-    if name == 'MLBaselineEvaluator':
-        from .ml_baseline_disease_classification import MLBaselineEvaluator
-        return MLBaselineEvaluator
+    if name == 'EnsembleRegressionEvaluator':
+        from .ensemble_regression_disease_classification import EnsembleRegressionEvaluator
+        return EnsembleRegressionEvaluator
     if name == 'MetaModelEvaluator':
         from .meta_model_repertoire_demographics_disease_classification import MetaModelEvaluator
         return MetaModelEvaluator
@@ -21,4 +21,4 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = ['Emerson2017Evaluator', 'GIANA2020Evaluator', 'DemographicFeaturesEvaluator',
-           'MLBaselineEvaluator', 'MetaModelEvaluator', 'ExternalEvaluator']
+           'EnsembleRegressionEvaluator', 'MetaModelEvaluator', 'ExternalEvaluator']
