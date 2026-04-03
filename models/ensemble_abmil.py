@@ -2,22 +2,103 @@
 ABMIL wrapper for TCR repertoire classification using gapped 4-mer + V/J gene features.
 
 Reuses per-sequence feature extraction from ensemble_regression.py and applies
-Gated Attention MIL (TCRGatedAttentionMIL) from models/ABMIL/model.py to treat
-each repertoire as a bag of sequence-level instances.
+Gated Attention MIL (TCRGatedAttentionMIL) to treat each repertoire as a bag of
+sequence-level instances.
+
+Reference architecture: Ilse et al. 2018, "Attention-based Deep Multiple Instance
+Learning" (https://arxiv.org/abs/1802.04712).
 """
 
 import os
 import sys
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from models.ABMIL.model import TCRGatedAttentionMIL
 from models.ensemble_regression import _extract_gapped_4mers, Gapped_4mer_VJgene
+
+
+class TCRGatedAttentionMIL(nn.Module):
+    """
+    Gated Attention MIL for TCR repertoire classification.
+
+    Replaces the CNN feature extractor from the original MNIST model with a
+    linear encoder so that pre-computed dense instance features (one vector per
+    sequence) can be used directly.
+
+    Input to forward():
+        H: FloatTensor of shape (K, input_dim) — K sequence-level feature vectors.
+
+    Architecture:
+        encoder:     Linear(input_dim, M) → ReLU
+        attention:   gated mechanism (tanh branch × sigmoid branch → Linear → softmax)
+        classifier:  Linear(M, 1) → Sigmoid
+    """
+
+    def __init__(self, input_dim, M=256, L=128):
+        super(TCRGatedAttentionMIL, self).__init__()
+        self.M = M
+        self.L = L
+
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, M),
+            nn.ReLU(),
+        )
+
+        self.attention_V = nn.Sequential(
+            nn.Linear(M, L),
+            nn.Tanh(),
+        )
+
+        self.attention_U = nn.Sequential(
+            nn.Linear(M, L),
+            nn.Sigmoid(),
+        )
+
+        self.attention_w = nn.Linear(L, 1)
+
+        self.classifier = nn.Sequential(
+            nn.Linear(M, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, H):
+        # H: (K, input_dim)
+        H = self.encoder(H)           # (K, M)
+
+        A_V = self.attention_V(H)     # (K, L)
+        A_U = self.attention_U(H)     # (K, L)
+        A = self.attention_w(A_V * A_U)        # (K, 1)
+        A = torch.transpose(A, 1, 0)           # (1, K)
+        A = F.softmax(A, dim=1)                # (1, K)
+
+        Z = torch.mm(A, H)            # (1, M)
+
+        Y_prob = self.classifier(Z)   # (1, 1)
+        Y_hat = torch.ge(Y_prob, 0.5).float()
+
+        return Y_prob, Y_hat, A
+
+    def calculate_classification_error(self, H, Y):
+        Y = Y.float()
+        _, Y_hat, _ = self.forward(H)
+        error = 1. - Y_hat.eq(Y).cpu().float().mean().item()
+        return error, Y_hat
+
+    def calculate_objective(self, H, Y):
+        Y = Y.float()
+        Y_prob, _, A = self.forward(H)
+        Y_prob = torch.clamp(Y_prob, min=1e-5, max=1. - 1e-5)
+        neg_log_likelihood = -1. * (
+            Y * torch.log(Y_prob) + (1. - Y) * torch.log(1. - Y_prob)
+        )
+        return neg_log_likelihood, A
 
 
 class ABMIL_4mer_VJgene(Gapped_4mer_VJgene):
