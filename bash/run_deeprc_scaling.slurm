@@ -6,7 +6,7 @@
 #SBATCH -N 1
 #SBATCH -c 8
 #SBATCH --mem=64G
-#SBATCH -t 48:00:00
+#SBATCH -t 72:00:00
 
 #SBATCH -A akundaje
 #SBATCH -p akundaje
@@ -22,7 +22,7 @@ conda activate deeprc
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
-DEPTH_INDICES=${REPO_ROOT}/depth_indices.json.gz
+DEPTH_INDICES=${REPO_ROOT}/depth_indices/depth_indices_max75k.json.gz
 RESULTS=${REPO_ROOT}/results
 LOGDIR=${REPO_ROOT}/logs/deeprc_scaling
 
