@@ -16,7 +16,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
-from airr_bench.models.ensemble_abmil import ABMIL_4mer_VJgene
+from models.ensemble_abmil import ABMIL_4mer_VJgene
 
 
 class ABMILEvaluator:
@@ -48,6 +48,7 @@ class ABMILEvaluator:
         subsample_seed=7,
         use_gpu=True,
         indices_map=None,
+        max_repertoires_per_class=None,
     ):
         """
         Args:
@@ -84,6 +85,7 @@ class ABMILEvaluator:
         self.subsample_seed = subsample_seed
         self.use_gpu = use_gpu
         self.indices_map = indices_map
+        self.max_repertoires_per_class = max_repertoires_per_class
         self.model = None
 
     # ------------------------------------------------------------------
@@ -120,6 +122,12 @@ class ABMILEvaluator:
             if before != after:
                 print(f"  Dropped {before - after} rows with missing demographics "
                       f"({before} -> {after})")
+
+        if self.max_repertoires_per_class is not None:
+            pos = filtered[filtered['label'] == 1].head(self.max_repertoires_per_class)
+            neg = filtered[filtered['label'] == 0].head(self.max_repertoires_per_class)
+            filtered = pd.concat([pos, neg])
+            print(f"  (debug) Capped to {self.max_repertoires_per_class} repertoires per class.")
 
         n_disease = (filtered['label'] == 1).sum()
         n_healthy = (filtered['label'] == 0).sum()
@@ -330,6 +338,9 @@ if __name__ == "__main__":
                         help='Early-stopping patience in epochs (default: 10)')
     parser.add_argument('--val_split', type=float, default=0.2,
                         help='Fraction of train bags held out for early stopping (default: 0.2)')
+    parser.add_argument('--max_repertoires_per_class', type=int, default=None,
+                        help='Cap positive and negative repertoires to this count each '
+                             '(useful for debug runs; default: no limit)')
     parser.add_argument('--no_gpu', action='store_true',
                         help='Disable GPU even if CUDA is available')
     parser.add_argument('--require_demographics', action='store_true',
@@ -348,6 +359,7 @@ if __name__ == "__main__":
         patience=args.patience,
         val_split=args.val_split,
         use_gpu=not args.no_gpu,
+        max_repertoires_per_class=args.max_repertoires_per_class,
     )
 
     scores_df = evaluator.run_cross_validation(
