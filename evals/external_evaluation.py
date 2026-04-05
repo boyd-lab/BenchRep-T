@@ -48,22 +48,28 @@ class ExternalEvaluator:
     """
     Train on an internal dataset and evaluate on an external dataset.
 
-    Supports different metadata column names and repertoire file formats
-    between internal (training) and external (test) datasets.
+    Both internal and preprocessed external repertoire files use AIRR column
+    conventions (cdr3_aa, v_call, j_call) with alleles already stripped.
     """
 
+    # AIRR column conventions — fixed after preprocessing
+    SEQUENCE_COL = 'cdr3_aa'
+    V_GENE_COL = 'v_call'
+    J_GENE_COL = 'j_call'
+
+    # Internal dataset conventions
     INTERNAL_HEALTHY_LABEL = "Healthy/Background"
+    _INTERNAL_DISEASE_COL = 'disease'
+    _INTERNAL_PARTICIPANT_COL = 'participant_label'
+    _INTERNAL_FILE_PREFIX = 'part_table_'
+    _INTERNAL_FILE_SUFFIX = '.tsv.gz'
 
     def __init__(self, model_name='ensemble_regression',
                  # Ensemble Regression hyperparameters
                  val_split=0.2, n_cv_folds=5,
                  # Emerson 2017 hyperparameters
                  train_val_ratio=0.9,
-                 p_value_candidates=None,
-                 # Repertoire column names (shared by internal and preprocessed external data)
-                 sequence_col='cdr3_aa',
-                 v_gene_col='v_call',
-                 j_gene_col='j_call'):
+                 p_value_candidates=None):
         if model_name not in SUPPORTED_MODELS:
             raise ValueError(f"Unknown model '{model_name}'. "
                              f"Supported: {SUPPORTED_MODELS}")
@@ -72,25 +78,20 @@ class ExternalEvaluator:
         self.n_cv_folds = n_cv_folds
         self.train_val_ratio = train_val_ratio
         self.p_value_candidates = p_value_candidates or [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
-        self.sequence_col = sequence_col
-        self.v_gene_col = v_gene_col
-        self.j_gene_col = j_gene_col
         self.model = None
 
     # ------------------------------------------------------------------
     # Internal (training) dataset helpers
     # ------------------------------------------------------------------
 
-    def _prepare_train_data(self, metadata_path, data_dir, target_disease,
-                            participant_col='participant_label',
-                            disease_col='disease',
-                            file_prefix='part_table_',
-                            file_suffix='.tsv.gz'):
+    def _prepare_train_data(self, metadata_path, data_dir, target_disease):
         """Load internal metadata, filter to disease vs healthy, resolve file paths."""
         metadata = pd.read_csv(metadata_path, sep='\t')
-        mask = metadata[disease_col].isin([target_disease, self.INTERNAL_HEALTHY_LABEL])
+        mask = metadata[self._INTERNAL_DISEASE_COL].isin(
+            [target_disease, self.INTERNAL_HEALTHY_LABEL]
+        )
         data = metadata[mask].copy()
-        data['label'] = (data[disease_col] == target_disease).astype(int)
+        data['label'] = (data[self._INTERNAL_DISEASE_COL] == target_disease).astype(int)
 
         n_disease = (data['label'] == 1).sum()
         n_healthy = (data['label'] == 0).sum()
@@ -100,7 +101,8 @@ class ExternalEvaluator:
         data['file_path'] = data.apply(
             lambda row: os.path.join(
                 data_dir,
-                f"{file_prefix}{row[participant_col]}_{row['specimen_label']}{file_suffix}"
+                f"{self._INTERNAL_FILE_PREFIX}{row[self._INTERNAL_PARTICIPANT_COL]}"
+                f"_{row['specimen_label']}{self._INTERNAL_FILE_SUFFIX}"
             ), axis=1
         )
 
@@ -118,11 +120,9 @@ class ExternalEvaluator:
     # ------------------------------------------------------------------
 
     def _prepare_external_data(self, ext_metadata_path, ext_data_dir,
-                               sample_col='sample_name',
-                               disease_col='disease_label',
-                               healthy_label='Healthy',
-                               disease_label='T1D',
-                               file_template='{sample_name}_TCRB.tsv'):
+                               sample_col, disease_col,
+                               healthy_label, disease_label,
+                               file_template):
         """Load external metadata, construct file paths, assign binary labels."""
         metadata = pd.read_csv(ext_metadata_path, sep='\t')
         mask = metadata[disease_col].isin([disease_label, healthy_label])
@@ -151,23 +151,40 @@ class ExternalEvaluator:
         return data
 
     # ------------------------------------------------------------------
+    # Model instantiation helpers
+    # ------------------------------------------------------------------
+
+    def _make_ensemble_regression(self, submodel):
+        """Create an Ensemble Regression model with standard AIRR settings."""
+        return Gapped_4mer_VJgene(
+            val_split=self.val_split,
+            n_cv_folds=self.n_cv_folds,
+            sequence_col=self.SEQUENCE_COL,
+            v_gene_col=self.V_GENE_COL,
+            j_gene_col=self.J_GENE_COL,
+            ignore_allele=True,
+            submodel=submodel,
+        )
+
+    def _make_emerson_2017(self, p_value_threshold=1e-4):
+        """Create an Emerson 2017 model with standard AIRR settings."""
+        return CMV_Immunosequencing_Model(
+            p_value_threshold=p_value_threshold,
+            sequence_col=self.SEQUENCE_COL,
+            v_col=self.V_GENE_COL,
+            j_col=self.J_GENE_COL,
+            ignore_allele=True,
+        )
+
+    # ------------------------------------------------------------------
     # Model-specific training
     # ------------------------------------------------------------------
 
     def _train_ensemble_regression(self, train_files, train_labels):
         """Train the Ensemble Regression model (handles internal 80/20 split)."""
         submodel = _ENSEMBLE_SUBMODEL_MAP.get(self.model_name, 'ensemble')
-        self.model = Gapped_4mer_VJgene(
-            val_split=self.val_split,
-            n_cv_folds=self.n_cv_folds,
-            sequence_col=self.sequence_col,
-            v_gene_col=self.v_gene_col,
-            j_gene_col=self.j_gene_col,
-            ignore_allele=True,
-            submodel=submodel,
-        )
-        train_result = self.model.train(train_files, train_labels)
-        return train_result
+        self.model = self._make_ensemble_regression(submodel)
+        return self.model.train(train_files, train_labels)
 
     def _train_emerson_2017(self, train_files, train_labels, random_state=7):
         """
@@ -176,7 +193,6 @@ class ExternalEvaluator:
         Splits training data into train/val, tunes p_value_threshold on val,
         then retrains with the best threshold on all training data.
         """
-        # Split into train and validation for p-value tuning
         indices = np.arange(len(train_files))
         train_idx, val_idx = train_test_split(
             indices,
@@ -192,20 +208,9 @@ class ExternalEvaluator:
 
         print(f"  Train/Val split: {len(base_files)} train, {len(val_files)} val")
 
-        # Create base model for preloading and caching.
-        # ignore_allele=True so diagnostic TCRs are stored allele-free,
-        # enabling gene-level matching with external data.
-        base_model = CMV_Immunosequencing_Model(
-            sequence_col=self.sequence_col,
-            v_col=self.v_gene_col,
-            j_col=self.j_gene_col,
-            ignore_allele=True,
-        )
-
-        # Preload all repertoires once
+        # Preload all repertoires once and compute TCR statistics on the train split
+        base_model = self._make_emerson_2017()
         base_model.preload_repertoires(train_files)
-
-        # Compute TCR statistics on the train split (one-time)
         base_model.compute_tcr_statistics(base_files, base_labels)
 
         # Tune p-value threshold on validation set
@@ -214,13 +219,7 @@ class ExternalEvaluator:
         tuning_results = []
 
         for p_val in self.p_value_candidates:
-            model = CMV_Immunosequencing_Model(
-                p_value_threshold=p_val,
-                sequence_col=self.sequence_col,
-                v_col=self.v_gene_col,
-                j_col=self.j_gene_col,
-                ignore_allele=True,
-            )
+            model = self._make_emerson_2017(p_value_threshold=p_val)
             model._repertoire_cache = base_model._repertoire_cache
             model._tcr_stats_cache = base_model._tcr_stats_cache
 
@@ -236,10 +235,8 @@ class ExternalEvaluator:
 
             model.train_beta_binomial_model(base_files, base_labels)
 
-            val_probs = []
-            for fp in val_files:
-                result = model.predict_diagnosis(fp)
-                val_probs.append(result['probability_positive'])
+            val_probs = [model.predict_diagnosis(fp)['probability_positive']
+                         for fp in val_files]
 
             val_probs_arr = np.array(val_probs)
             val_labels_arr = np.array(val_labels)
@@ -274,13 +271,7 @@ class ExternalEvaluator:
 
         # Retrain on ALL training data with the best threshold
         print(f"\nRetraining on all {len(train_files)} samples with p={best_p_value:.0e}...")
-        self.model = CMV_Immunosequencing_Model(
-            p_value_threshold=best_p_value,
-            sequence_col=self.sequence_col,
-            v_col=self.v_gene_col,
-            j_col=self.j_gene_col,
-            ignore_allele=True,
-        )
+        self.model = self._make_emerson_2017(p_value_threshold=best_p_value)
         self.model._repertoire_cache = base_model._repertoire_cache
         self.model.identify_diagnostic_tcrs(train_files, train_labels)
         self.model.train_beta_binomial_model(train_files, train_labels)
@@ -313,20 +304,6 @@ class ExternalEvaluator:
                                 output_csv=None):
         """
         Train on all internal data and evaluate on external dataset.
-
-        Args:
-            train_metadata_path: Path to internal metadata.tsv.
-            train_data_dir: Directory with internal repertoire files.
-            target_disease: Disease name in internal metadata (e.g. 'T1D').
-            ext_metadata_path: Path to external metadata.tsv.
-            ext_data_dir: Directory with external repertoire files.
-            ext_sample_col: Column with sample identifiers in external metadata.
-            ext_disease_col: Column with disease labels in external metadata.
-            ext_healthy_label: Healthy label string in external metadata.
-            ext_disease_label: Disease label string in external metadata.
-            ext_file_template: Template for external repertoire filenames.
-            random_state: Random seed for reproducibility.
-            output_csv: Optional path to save per-sample scores.
 
         Returns:
             Tuple of (pd.DataFrame with per-sample predictions, metrics dict).
@@ -376,12 +353,10 @@ class ExternalEvaluator:
         print(f"EVALUATING on external dataset ({len(ext_files)} samples)")
         print(f"{'='*60}")
 
-        ext_probs = []
-        for fp in tqdm(ext_files, desc="Predicting on external data"):
-            result = self.model.predict_diagnosis(fp)
-            ext_probs.append(result['probability_positive'])
-
-        ext_probs = np.array(ext_probs)
+        ext_probs = np.array([
+            self.model.predict_diagnosis(fp)['probability_positive']
+            for fp in tqdm(ext_files, desc="Predicting on external data")
+        ])
 
         # --- Compute metrics ---
         auroc = roc_auc_score(ext_labels, ext_probs)
@@ -407,17 +382,14 @@ class ExternalEvaluator:
         print(f"  AUPR:  {aupr:.4f}")
 
         # --- Build per-sample output ---
-        rows = []
-        for (_, row), score in zip(ext_data.iterrows(), ext_probs):
-            rows.append({
-                'sample_name': row[ext_sample_col],
-                'disease_label': int(row['label']),
-                'disease_label_str': row[ext_disease_col],
-                'method': method_name,
-                'disease_model': target_disease,
-                'model_score': float(score),
-            })
-        scores_df = pd.DataFrame(rows)
+        scores_df = pd.DataFrame({
+            'sample_name': ext_data[ext_sample_col].values,
+            'disease_label': ext_data['label'].values,
+            'disease_label_str': ext_data[ext_disease_col].values,
+            'method': method_name,
+            'disease_model': target_disease,
+            'model_score': ext_probs,
+        })
 
         if output_csv:
             scores_df.to_csv(output_csv, index=False)
@@ -472,17 +444,17 @@ if __name__ == "__main__":
 
     # Model hyperparameters
     parser.add_argument('--val_split', type=float, default=0.2,
-                        help='Internal val fraction for Ensemble Regression alpha tuning (default: 0.2)')
+                        help='Internal val fraction for Ensemble Regression alpha tuning')
     parser.add_argument('--n_cv_folds', type=int, default=5,
-                        help='CV folds for Ensemble Regression C tuning (default: 5)')
+                        help='CV folds for Ensemble Regression C tuning')
     parser.add_argument('--train_val_ratio', type=float, default=0.9,
-                        help='Train/val ratio for Emerson 2017 tuning (default: 0.9)')
+                        help='Train/val ratio for Emerson 2017 tuning')
     parser.add_argument('--random_state', type=int, default=7,
-                        help='Random seed (default: 7)')
+                        help='Random seed')
 
     # Output
     parser.add_argument('--output_csv', type=str, default=None,
-                        help='Path to save per-sample scores CSV (optional)')
+                        help='Path to save per-sample scores CSV')
 
     args = parser.parse_args()
 
