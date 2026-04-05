@@ -130,6 +130,7 @@ class GIANAEvaluator:
                  n_threads=1,
                  use_gpu=False,
                  max_seqs_per_specimen=None,
+                 indices_map=None,
                  results_dir='results/giana',
                  debug=False,
                  debug_repertoires=10):
@@ -149,6 +150,9 @@ class GIANAEvaluator:
             n_threads: Number of FAISS CPU threads.
             use_gpu: If True, use GPU-accelerated FAISS index (requires faiss-gpu).
             max_seqs_per_specimen: If set, cap sequences per specimen (top by count).
+            indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
+                         rep_id is the filename without extension, e.g.
+                         'part_table_PARTICIPANT_SPECIMEN'.
             results_dir: Base directory for GIANA cluster output files.
             debug: If True, load only debug_repertoires specimens per class.
             debug_repertoires: Number of repertoires per class in debug mode.
@@ -164,6 +168,7 @@ class GIANAEvaluator:
         self.n_threads = n_threads
         self.use_gpu = use_gpu
         self.max_seqs_per_specimen = max_seqs_per_specimen
+        self.indices_map = indices_map
         self.results_dir = results_dir
         self.debug = debug
         self.debug_repertoires = debug_repertoires
@@ -249,6 +254,11 @@ class GIANAEvaluator:
         try:
             df = pd.read_csv(file_path, sep='\t',
                              usecols=lambda c: c in wanted_cols)
+            if self.indices_map is not None:
+                rep_id = os.path.basename(file_path).replace('.tsv.gz', '').replace('.tsv', '')
+                indices = self.indices_map.get(rep_id)
+                if indices is not None:
+                    df = df.iloc[indices]
         except Exception as e:
             print(f"  Warning: could not read {file_path}: {e}")
             return None
