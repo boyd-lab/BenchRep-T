@@ -4,7 +4,7 @@ set -uo pipefail
 # ---- flags ----
 DEBUG=false
 DEBUG_REPERTOIRES=10
-N_THREADS=16
+N_THREADS=10
 for arg in "$@"; do
   case $arg in
     --debug) DEBUG=true ;;
@@ -59,6 +59,8 @@ for disease in "${DISEASES[@]}"; do
         --n_threads "$N_THREADS" \
         --use_gpu \
         --max_seqs_per_specimen 10000 \
+        --exact \
+        --threshold_iso 7 \
         --output_csv "${RESULTS}/giana_2021_${disease}_classification.csv" \
         "${debug_flags[@]}"
 
