@@ -5,8 +5,8 @@ For each disease (Covid19, HIV, Influenza):
   1. Load VDJdb ground truth, filter to Score >= 2, validate and trim CDR3 sequences.
   2. Find matching Mal-ID specimens for that disease from metadata.
   3. For each specimen, find cdr3_aa sequences with >= 90% Levenshtein similarity
-     to any ground truth sequence.
-  4. Write a per-specimen output file listing matched sequences.
+     to any ground truth sequence (keeping the best match per sample CDR3).
+  4. Collect all matches across all diseases into a single output CSV.
 
 The three diseases are processed in parallel (one process each).
 """
@@ -38,7 +38,7 @@ VDJDB_FILES = {
 METADATA_PATH = os.path.join(REPO_ROOT, "data", "malid_clean", "metadata.tsv")
 TCR_DIR       = os.path.join(REPO_ROOT, "data", "malid_clean", "TCR")
 
-DEFAULT_OUTPUT_DIR = os.path.join(REPO_ROOT, "data", "vdjdb_matches")
+DEFAULT_OUTPUT_PATH = os.path.join(REPO_ROOT, "data", "vdjdb_matches.csv")
 
 SIMILARITY_THRESHOLD = 0.90
 MIN_SCORE = 2
@@ -56,50 +56,61 @@ def seq_similarity(s1: str, s2: str) -> float:
     return 1.0 - Levenshtein.distance(s1, s2) / max_len
 
 
-def load_ground_truth(disease: str, vdjdb_path: str) -> list:
+def load_ground_truth(disease: str, vdjdb_path: str) -> list[dict]:
     """
     Load VDJdb file, filter Score >= MIN_SCORE, validate CDR3 starts with C
     and ends with F, then strip those terminal residues.
-    Returns a list of trimmed CDR3 strings.
+
+    Returns a list of dicts with keys:
+        trimmed_cdr3, cdr3, v, j, score
     """
     df = pd.read_csv(vdjdb_path, sep="\t")
 
-    for col in ("Score", "CDR3"):
+    for col in ("Score", "CDR3", "V", "J"):
         if col not in df.columns:
             sys.exit(f"ERROR: '{col}' column not found in {vdjdb_path}")
 
     df = df[df["Score"] >= MIN_SCORE].copy()
     tqdm.write(f"[{disease}] {len(df)} sequences after Score >= {MIN_SCORE} filter")
 
-    trimmed = []
+    records = []
     for idx, row in df.iterrows():
         seq = str(row["CDR3"])
         if not seq.startswith("C"):
             tqdm.write(f"  WARNING [{disease}] CDR3 at row {idx} does not start with 'C': {seq!r}")
         if not seq.endswith("F"):
             tqdm.write(f"  WARNING [{disease}] CDR3 at row {idx} does not end with 'F': {seq!r}")
-        # Only trim the terminal residues if present
-        if seq.startswith("C"):
-            seq = seq[1:]
-        if seq.endswith("F"):
-            seq = seq[:-1]
-        trimmed.append(seq)
+        trimmed = seq
+        if trimmed.startswith("C"):
+            trimmed = trimmed[1:]
+        if trimmed.endswith("F"):
+            trimmed = trimmed[:-1]
+        records.append({
+            "trimmed_cdr3": trimmed,
+            "cdr3":  seq,
+            "v":     row["V"],
+            "j":     row["J"],
+            "score": row["Score"],
+        })
 
-    tqdm.write(f"[{disease}] {len(trimmed)} ground truth sequences loaded")
-    return trimmed
+    tqdm.write(f"[{disease}] {len(records)} ground truth sequences loaded")
+    return records
 
 
 # ---------------------------------------------------------------------------
 # Per-disease worker (runs in a subprocess)
 # ---------------------------------------------------------------------------
 
-def process_disease(disease: str, vdjdb_path: str, output_dir: str, tqdm_position: int) -> str:
-    """Process one disease. Returns a summary string."""
+def process_disease(disease: str, vdjdb_path: str, tqdm_position: int) -> list[dict]:
+    """
+    Process one disease. Returns a list of result row dicts.
+    """
     tqdm.write(f"\n[{disease}] Starting (VDJdb: {vdjdb_path})")
 
     ground_truth = load_ground_truth(disease, vdjdb_path)
     if not ground_truth:
-        return f"[{disease}] WARNING: no ground truth sequences, skipped."
+        tqdm.write(f"[{disease}] WARNING: no ground truth sequences, skipped.")
+        return []
 
     metadata = pd.read_csv(METADATA_PATH, sep="\t")
     specimens = (
@@ -109,12 +120,10 @@ def process_disease(disease: str, vdjdb_path: str, output_dir: str, tqdm_positio
     tqdm.write(f"[{disease}] Found {len(specimens)} specimens")
 
     if specimens.empty:
-        return f"[{disease}] WARNING: no specimens found in metadata."
+        tqdm.write(f"[{disease}] WARNING: no specimens found in metadata.")
+        return []
 
-    disease_output_dir = os.path.join(output_dir, disease)
-    os.makedirs(disease_output_dir, exist_ok=True)
-
-    n_matched_specimens = 0
+    results = []
     spec_bar = tqdm(
         list(specimens.iterrows()),
         desc=f"{disease} specimens",
@@ -127,6 +136,7 @@ def process_disease(disease: str, vdjdb_path: str, output_dir: str, tqdm_positio
         participant = spec_row["participant_label"]
         specimen    = spec_row["specimen_label"]
         tcr_file    = os.path.join(TCR_DIR, f"part_table_{participant}_{specimen}.tsv.gz")
+        filename    = f"part_table_{participant}_{specimen}"
 
         spec_bar.set_postfix(specimen=specimen)
 
@@ -137,44 +147,65 @@ def process_disease(disease: str, vdjdb_path: str, output_dir: str, tqdm_positio
         with gzip.open(tcr_file, "rt") as fh:
             tcr_df = pd.read_csv(fh, sep="\t", low_memory=False)
 
-        if "cdr3_aa" not in tcr_df.columns:
-            tqdm.write(f"  WARNING [{disease}] 'cdr3_aa' column missing in {tcr_file}, skipping.")
-            continue
+        for col in ("cdr3_aa", "v_call", "j_call"):
+            if col not in tcr_df.columns:
+                tqdm.write(f"  WARNING [{disease}] '{col}' column missing in {tcr_file}, skipping.")
+                continue
 
-        unique_cdr3s = tcr_df["cdr3_aa"].dropna().unique().tolist()
+        unique_rows = (
+            tcr_df[["cdr3_aa", "v_call", "j_call"]]
+            .dropna(subset=["cdr3_aa"])
+            .drop_duplicates(subset=["cdr3_aa"])
+        )
 
-        matched = []
-        for cdr3 in tqdm(
-            unique_cdr3s,
+        n_matched = 0
+        for _, sample_row in tqdm(
+            unique_rows.iterrows(),
+            total=len(unique_rows),
             desc=f"  {specimen} cdr3s",
             unit="seq",
             position=tqdm_position + 1,
             leave=False,
             dynamic_ncols=True,
         ):
-            cdr3_str = str(cdr3)
-            for gt_seq in ground_truth:
-                if seq_similarity(cdr3_str, gt_seq) >= SIMILARITY_THRESHOLD:
-                    matched.append(cdr3_str)
-                    break  # only one GT hit needed per cdr3
+            cdr3_str = str(sample_row["cdr3_aa"])
 
-        if matched:
-            out_path = os.path.join(disease_output_dir, f"{specimen}.tsv")
-            pd.DataFrame({"cdr3_aa": matched}).to_csv(out_path, sep="\t", index=False)
-            tqdm.write(f"  [{disease}] {specimen}: {len(matched)} matched sequences -> {out_path}")
-            n_matched_specimens += 1
-        else:
-            tqdm.write(f"  [{disease}] {specimen}: no matches")
+            # Find the best-matching ground truth entry above threshold
+            best_sim  = -1.0
+            best_gt   = None
+            for gt in ground_truth:
+                sim = seq_similarity(cdr3_str, gt["trimmed_cdr3"])
+                if sim >= SIMILARITY_THRESHOLD and sim > best_sim:
+                    best_sim = sim
+                    best_gt  = gt
 
-    return f"[{disease}] Done. {n_matched_specimens}/{len(specimens)} specimens had matches."
+            if best_gt is not None:
+                results.append({
+                    "disease":            disease,
+                    "sample_cdr3":        cdr3_str,
+                    "sample_vgene":       sample_row["v_call"],
+                    "sample_jgene":       sample_row["j_call"],
+                    "public_clone_cdr3":  best_gt["cdr3"],
+                    "public_clone_vgene": best_gt["v"],
+                    "public_clone_jgene": best_gt["j"],
+                    "similarity":         round(best_sim, 6),
+                    "score":              best_gt["score"],
+                    "filename":           filename,
+                })
+                n_matched += 1
+
+        tqdm.write(f"  [{disease}] {specimen}: {n_matched} matched sequences")
+
+    tqdm.write(f"[{disease}] Done. {len(results)} total matched rows.")
+    return results
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def process(output_dir: str) -> None:
-    os.makedirs(output_dir, exist_ok=True)
+def process(output_path: str) -> None:
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     # Validate metadata columns up front before spawning workers
     metadata = pd.read_csv(METADATA_PATH, sep="\t")
@@ -186,24 +217,33 @@ def process(output_dir: str) -> None:
     # Each disease gets its own tqdm row (position 0, 2, 4) with the inner
     # cdr3 bar on the row below (position 1, 3, 5), leaving no overlap.
     jobs = [
-        (disease, vdjdb_path, output_dir, idx * 2)
+        (disease, vdjdb_path, idx * 2)
         for idx, (disease, vdjdb_path) in enumerate(VDJDB_FILES.items())
     ]
 
+    all_results = []
     with ProcessPoolExecutor(max_workers=len(jobs)) as executor:
         futures = {
-            executor.submit(process_disease, disease, vdjdb_path, output_dir, pos): disease
-            for disease, vdjdb_path, output_dir, pos in jobs
+            executor.submit(process_disease, disease, vdjdb_path, pos): disease
+            for disease, vdjdb_path, pos in jobs
         }
         for future in as_completed(futures):
             disease = futures[future]
             try:
-                summary = future.result()
-                tqdm.write(summary)
+                rows = future.result()
+                all_results.extend(rows)
+                tqdm.write(f"[{disease}] collected {len(rows)} rows")
             except Exception as exc:
                 tqdm.write(f"ERROR [{disease}]: {exc}")
 
-    print("\nAll diseases complete.")
+    out_df = pd.DataFrame(all_results, columns=[
+        "disease", "sample_cdr3", "sample_vgene", "sample_jgene",
+        "public_clone_cdr3", "public_clone_vgene", "public_clone_jgene",
+        "similarity", "score", "filename",
+    ])
+    out_df.to_csv(output_path, index=False)
+    print(f"\nWrote {len(out_df)} rows to {output_path}")
+    print("All diseases complete.")
 
 
 # ---------------------------------------------------------------------------
@@ -215,9 +255,9 @@ if __name__ == "__main__":
         description="Match Mal-ID TCR cdr3_aa sequences against VDJdb ground truth."
     )
     parser.add_argument(
-        "--output-dir",
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Directory to write output files (default: {DEFAULT_OUTPUT_DIR})",
+        "--output-path",
+        default=DEFAULT_OUTPUT_PATH,
+        help=f"Path to write output CSV (default: {DEFAULT_OUTPUT_PATH})",
     )
     args = parser.parse_args()
-    process(args.output_dir)
+    process(args.output_path)
