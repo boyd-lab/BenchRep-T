@@ -1,9 +1,9 @@
 """
-Evaluation script for the ABMIL (Gapped 4-mer + V/J gene) disease classification model.
+Evaluation script for the ABMIL disease classification model.
 
-Applies Gated Attention Multiple Instance Learning over per-sequence gapped 4-mer
-and V/J gene features. Each repertoire is treated as a bag of sequence instances;
-the ABMIL model learns to weight informative sequences via attention pooling.
+Each repertoire is treated as a bag of sequences. Per-sequence features are
+produced end-to-end by TCRSeqEncoder (learned AA embedding + 1-D conv +
+V/J gene embeddings), then aggregated by Gated Attention MIL.
 
 Reference architecture: Ilse et al. 2018, "Attention-based Deep Multiple Instance
 Learning" (https://arxiv.org/abs/1802.04712).
@@ -16,16 +16,15 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score
 from tqdm import tqdm
 
-from models.ensemble_abmil import ABMIL_4mer_VJgene
+from models.ensemble_abmil import ABMIL
 
 
 class ABMILEvaluator:
     """
-    Evaluator for the ABMIL gapped 4-mer + V/J gene model.
+    Evaluator for the ABMIL disease classification model.
 
-    All feature extraction and hyperparameter choices are handled internally
-    by ABMIL_4mer_VJgene; the evaluator passes all non-test data directly to
-    model.train() for each cross-validation fold.
+    The evaluator passes all non-test data directly to ABMIL.train() for each
+    cross-validation fold. A fresh model is instantiated per fold.
     """
 
     HEALTHY_LABEL = "Healthy/Background"
@@ -35,12 +34,12 @@ class ABMILEvaluator:
         sequence_col='cdr3_aa',
         v_gene_col='v_call',
         j_gene_col='j_call',
-        max_instances=500,
-        M=256,
-        L=128,
+        max_instances=10000,
+        M=128,
+        L=64,
         epochs=100,
         lr=5e-4,
-        weight_decay=1e-5,
+        weight_decay=1e-4,
         patience=10,
         val_split=0.2,
         seed=7,
@@ -49,14 +48,22 @@ class ABMILEvaluator:
         use_gpu=True,
         indices_map=None,
         max_repertoires_per_class=None,
+        dropout=0.25,
+        max_length=40,
+        embedding_dim_aa=64,
+        embedding_dim_genes=48,
+        kernel=5,
+        conv_units=(32, 64, 128),
+        features='full',
     ):
         """
         Args:
             sequence_col: Column containing CDR3 amino acid sequences.
             v_gene_col: Column containing V gene calls.
             j_gene_col: Column containing J gene calls.
-            max_instances: Maximum sequences sampled per bag (memory / regularisation).
-            M: ABMIL encoder / bag-embedding hidden dimension.
+            max_instances: Sequences randomly subsampled per bag per training epoch
+                (augmentation / memory control). Evaluation always uses all sequences.
+            M: ABMIL hidden dimension.
             L: ABMIL attention hidden dimension.
             epochs: Maximum training epochs.
             lr: Adam learning rate.
@@ -68,6 +75,13 @@ class ABMILEvaluator:
             subsample_seed: Random seed for repertoire subsampling.
             use_gpu: Use CUDA if available.
             indices_map: Dict mapping specimen_label to pre-computed row indices.
+            max_length: Maximum CDR3 length; longer sequences are truncated.
+            embedding_dim_aa: Learned AA embedding dimension.
+            embedding_dim_genes: Learned V/J gene embedding dimension.
+            kernel: First conv kernel size.
+            conv_units: Output channels for the three conv layers.
+            features: Which features to use — 'full' (CDR3 + V/J genes),
+                'cdr3_only' (CDR3 sequence only), or 'vj_only' (V/J gene identities only).
         """
         self.sequence_col = sequence_col
         self.v_gene_col = v_gene_col
@@ -86,6 +100,13 @@ class ABMILEvaluator:
         self.use_gpu = use_gpu
         self.indices_map = indices_map
         self.max_repertoires_per_class = max_repertoires_per_class
+        self.dropout = dropout
+        self.max_length = max_length
+        self.embedding_dim_aa = embedding_dim_aa
+        self.embedding_dim_genes = embedding_dim_genes
+        self.kernel = kernel
+        self.conv_units = tuple(conv_units)
+        self.features = features
         self.model = None
 
     # ------------------------------------------------------------------
@@ -236,7 +257,7 @@ class ABMILEvaluator:
             test_labels = test_data['label'].tolist()
 
             # Fresh model per fold
-            self.model = ABMIL_4mer_VJgene(
+            self.model = ABMIL(
                 max_instances=self.max_instances,
                 M=self.M,
                 L=self.L,
@@ -253,6 +274,13 @@ class ABMILEvaluator:
                 subsample_seed=self.subsample_seed,
                 indices_map=self.indices_map,
                 use_gpu=self.use_gpu,
+                dropout=self.dropout,
+                max_length=self.max_length,
+                embedding_dim_aa=self.embedding_dim_aa,
+                embedding_dim_genes=self.embedding_dim_genes,
+                kernel=self.kernel,
+                conv_units=self.conv_units,
+                features=self.features,
             )
 
             train_result = self.model.train(train_files, train_labels)
@@ -276,7 +304,7 @@ class ABMILEvaluator:
                     'specimen_label': row['specimen_label'],
                     'disease_label': int(row['label']),
                     'disease_label_str': row[disease_col],
-                    'method': 'ABMIL_Ensemble',
+                    'method': 'ABMIL',
                     'disease_model': target_disease,
                     'model_score': float(score),
                     'malid_cross_validation_fold_id_when_in_test_set': test_fold,
@@ -315,32 +343,47 @@ class ABMILEvaluator:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="ABMIL (Gapped 4-mer + V/J gene) Disease Classification"
-    )
+    parser = argparse.ArgumentParser(description="ABMIL Disease Classification")
     parser.add_argument('--metadata_path', type=str, required=True,
                         help='Path to metadata.tsv')
     parser.add_argument('--repertoire_data_dir', type=str, required=True,
                         help='Directory containing repertoire .tsv.gz files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Disease to classify (e.g. Lupus, T1D, HIV)')
-    parser.add_argument('--max_instances', type=int, default=500,
-                        help='Max sequences sampled per bag (default: 500)')
-    parser.add_argument('--M', type=int, default=256,
-                        help='ABMIL encoder hidden dim (default: 256)')
-    parser.add_argument('--L', type=int, default=128,
-                        help='ABMIL attention hidden dim (default: 128)')
+    parser.add_argument('--max_instances', type=int, default=10000,
+                        help='Sequences randomly subsampled per bag per training epoch '
+                             '(default: 10000; evaluation always uses all sequences)')
+    parser.add_argument('--M', type=int, default=128,
+                        help='ABMIL hidden dim (default: 128)')
+    parser.add_argument('--L', type=int, default=64,
+                        help='ABMIL attention hidden dim (default: 64)')
+    parser.add_argument('--dropout', type=float, default=0.25,
+                        help='Dropout probability (default: 0.25)')
     parser.add_argument('--epochs', type=int, default=100,
                         help='Max training epochs (default: 100)')
+    parser.add_argument('--weight_decay', type=float, default=1e-4,
+                        help='Adam weight decay (default: 1e-4)')
     parser.add_argument('--lr', type=float, default=5e-4,
                         help='Adam learning rate (default: 5e-4)')
     parser.add_argument('--patience', type=int, default=10,
                         help='Early-stopping patience in epochs (default: 10)')
     parser.add_argument('--val_split', type=float, default=0.2,
                         help='Fraction of train bags held out for early stopping (default: 0.2)')
+    parser.add_argument('--max_length', type=int, default=40,
+                        help='Maximum CDR3 length; longer sequences are truncated (default: 40)')
+    parser.add_argument('--embedding_dim_aa', type=int, default=64,
+                        help='Learned AA embedding dimension (default: 64)')
+    parser.add_argument('--embedding_dim_genes', type=int, default=48,
+                        help='Learned V/J gene embedding dimension (default: 48)')
+    parser.add_argument('--kernel', type=int, default=5,
+                        help='First conv kernel size (default: 5)')
+    parser.add_argument('--features', type=str, default='full',
+                        choices=['full', 'cdr3_only', 'vj_only'],
+                        help="Which features to use: 'full' (CDR3 + V/J genes), "
+                             "'cdr3_only' (CDR3 sequence only), or "
+                             "'vj_only' (V/J gene identities only). Default: full")
     parser.add_argument('--max_repertoires_per_class', type=int, default=None,
-                        help='Cap positive and negative repertoires to this count each '
-                             '(useful for debug runs; default: no limit)')
+                        help='Cap repertoires per class (debug; default: no limit)')
     parser.add_argument('--no_gpu', action='store_true',
                         help='Disable GPU even if CUDA is available')
     parser.add_argument('--require_demographics', action='store_true',
@@ -356,10 +399,17 @@ if __name__ == "__main__":
         L=args.L,
         epochs=args.epochs,
         lr=args.lr,
+        weight_decay=args.weight_decay,
         patience=args.patience,
         val_split=args.val_split,
         use_gpu=not args.no_gpu,
         max_repertoires_per_class=args.max_repertoires_per_class,
+        dropout=args.dropout,
+        max_length=args.max_length,
+        embedding_dim_aa=args.embedding_dim_aa,
+        embedding_dim_genes=args.embedding_dim_genes,
+        kernel=args.kernel,
+        features=args.features,
     )
 
     scores_df = evaluator.run_cross_validation(
