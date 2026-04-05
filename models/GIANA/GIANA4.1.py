@@ -794,7 +794,7 @@ def EncodeRepertoire(inputfile, outdir, outfile='',exact=True, ST=3, thr_v=3.7, 
         t2=time.time()
         if verbose:
             print(' Done! Total time elapsed %f' %(t2-t1))
-        Cls = ClusterCDR3(dM, flagL, thr=thr_iso - 0.5*(15-kk), verbose=verbose)  ## change cutoff with different lengths
+        Cls = ClusterCDR3(dM, flagL, thr=thr_iso - 0.5*(15-kk), GPU=GPU, verbose=verbose)  ## change cutoff with different lengths
         Cls = MergeCL(Cls)
         if verbose:
             print("     Handling identical CDR3 groups")

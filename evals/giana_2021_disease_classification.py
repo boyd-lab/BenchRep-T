@@ -123,10 +123,12 @@ class GIANAEvaluator:
                  count_col='duplicate_count',
                  v_gene_col='v_call',
                  use_v_gene=True,
+                 exact=False,
                  threshold_score=3.3,
-                 threshold_iso=7,
+                 threshold_iso=5,
                  threshold_vgene=3.7,
                  n_threads=1,
+                 use_gpu=False,
                  max_seqs_per_specimen=None,
                  results_dir='results/giana',
                  debug=False,
@@ -137,10 +139,15 @@ class GIANAEvaluator:
             count_col: AIRR column with duplicate counts; uses 1 if absent.
             v_gene_col: AIRR column with V-gene calls; pass None to omit V-gene.
             use_v_gene: If False, omit V-gene features in GIANA clustering.
-            threshold_score: Smith-Waterman score threshold (default 3.3, as in paper).
-            threshold_iso: Isometric distance threshold (default 7).
+            exact: If True, run Smith-Waterman alignment after FAISS (10x slower;
+                   not recommended for >1M sequences). Default False.
+            threshold_score: Smith-Waterman score threshold (default 3.3, as in paper;
+                             only used when exact=True).
+            threshold_iso: Isometric distance threshold. Default 5 for non-exact mode
+                           (recommended by authors); use 7 for exact mode.
             threshold_vgene: V-gene similarity threshold (default 3.7).
-            n_threads: Number of FAISS threads for GIANA.
+            n_threads: Number of FAISS CPU threads.
+            use_gpu: If True, use GPU-accelerated FAISS index (requires faiss-gpu).
             max_seqs_per_specimen: If set, cap sequences per specimen (top by count).
             results_dir: Base directory for GIANA cluster output files.
             debug: If True, load only debug_repertoires specimens per class.
@@ -150,10 +157,12 @@ class GIANAEvaluator:
         self.count_col = count_col
         self.v_gene_col = v_gene_col
         self.use_v_gene = use_v_gene and (v_gene_col is not None)
+        self.exact = exact
         self.threshold_score = threshold_score
         self.threshold_iso = threshold_iso
         self.threshold_vgene = threshold_vgene
         self.n_threads = n_threads
+        self.use_gpu = use_gpu
         self.max_seqs_per_specimen = max_seqs_per_specimen
         self.results_dir = results_dir
         self.debug = debug
@@ -326,10 +335,6 @@ class GIANAEvaluator:
         base_no_ext = re.sub(r'\.[txcsv]+$', '', basename)
         outfile = os.path.join(work_dir, base_no_ext + '--RotationEncodingBL62.txt')
 
-        if os.path.exists(outfile):
-            print(f"  Cluster file exists, skipping GIANA: {os.path.basename(outfile)}")
-            return outfile
-
         giana = _load_giana_module()
 
         # Set FAISS thread count
@@ -339,16 +344,18 @@ class GIANAEvaluator:
         # Build V-gene score dict (reads/writes VgeneScores.txt once)
         VScore = _build_vgene_scores(giana) if self.use_v_gene else {}
 
-        print(f"  Running GIANA on {basename} ...")
+        n_lines = sum(1 for _ in open(input_file))
+        print(f"  Running GIANA on {basename} ({n_lines:,} sequences) "
+              f"[exact={self.exact}, gpu={self.use_gpu}] ...")
         giana.EncodeRepertoire(
             input_file, work_dir, '',
-            exact=True, ST=3,
+            exact=self.exact, ST=3,
             thr_v=self.threshold_vgene,
             thr_s=self.threshold_score,
             VDict=VScore,
             Vgene=self.use_v_gene,
             thr_iso=self.threshold_iso,
-            gap=-6, GPU=False, Mat=False, verbose=False,
+            gap=-6, GPU=self.use_gpu, Mat=False, verbose=True,
         )
 
         if not os.path.exists(outfile):
@@ -495,46 +502,42 @@ class GIANAEvaluator:
             combined_file = os.path.join(
                 fold_dir, f"combined_fold{test_fold}.txt"
             )
-            cluster_file_expected = os.path.join(
-                fold_dir, f"combined_fold{test_fold}--RotationEncodingBL62.txt"
-            )
 
-            # Build combined GIANA input file (skip if cluster file already exists)
-            if not os.path.exists(cluster_file_expected):
-                print("\nLoading training sequences...")
-                giana_lines = []
-                n_train_loaded = 0
+            # Build combined GIANA input file
+            print("\nLoading training sequences...")
+            giana_lines = []
+            n_train_loaded = 0
 
-                for _, row in train_data.iterrows():
-                    disease_label = (
-                        target_disease if row['label'] == 1 else self._GIANA_HEALTHY
-                    )
-                    df = self._load_repertoire(row['file_path'])
-                    if df is None or len(df) == 0:
-                        continue
-                    giana_lines.extend(
-                        self._build_giana_rows(df, 'train', disease_label)
-                    )
-                    n_train_loaded += 1
+            for _, row in train_data.iterrows():
+                disease_label = (
+                    target_disease if row['label'] == 1 else self._GIANA_HEALTHY
+                )
+                df = self._load_repertoire(row['file_path'])
+                if df is None or len(df) == 0:
+                    continue
+                giana_lines.extend(
+                    self._build_giana_rows(df, 'train', disease_label)
+                )
+                n_train_loaded += 1
 
-                print(f"  Loaded {len(giana_lines):,} train sequences "
-                      f"from {n_train_loaded} specimens.")
+            print(f"  Loaded {len(giana_lines):,} train sequences "
+                  f"from {n_train_loaded} specimens.")
 
-                print("Loading test sequences...")
-                n_test_loaded = 0
-                for _, row in test_data.iterrows():
-                    df = self._load_repertoire(row['file_path'])
-                    if df is None or len(df) == 0:
-                        continue
-                    giana_lines.extend(
-                        self._build_giana_rows(df, 'test', row['specimen_label'])
-                    )
-                    n_test_loaded += 1
+            print("Loading test sequences...")
+            n_test_loaded = 0
+            for _, row in test_data.iterrows():
+                df = self._load_repertoire(row['file_path'])
+                if df is None or len(df) == 0:
+                    continue
+                giana_lines.extend(
+                    self._build_giana_rows(df, 'test', row['specimen_label'])
+                )
+                n_test_loaded += 1
 
-                print(f"  Loaded test sequences from {n_test_loaded} specimens.")
-                print(f"Total sequences for GIANA: {len(giana_lines):,}")
+            print(f"  Loaded test sequences from {n_test_loaded} specimens.")
+            print(f"Total sequences for GIANA: {len(giana_lines):,}")
 
-                self._write_giana_input(giana_lines, combined_file)
+            self._write_giana_input(giana_lines, combined_file)
 
             # Run GIANA clustering
             cluster_file = self._run_giana(combined_file, fold_dir)
@@ -632,14 +635,19 @@ if __name__ == '__main__':
                         help='Path to save per-sample scores CSV (optional)')
     parser.add_argument('--results_dir', type=str, default='results/giana',
                         help='Directory for GIANA cluster files (default: results/giana)')
+    parser.add_argument('--exact', action='store_true',
+                        help='Enable Smith-Waterman exact mode (10x slower; not recommended '
+                             'for >1M sequences). Default: non-exact mode.')
     parser.add_argument('--threshold_score', type=float, default=3.3,
-                        help='Smith-Waterman score threshold (default: 3.3)')
-    parser.add_argument('--threshold_iso', type=float, default=7,
-                        help='Isometric distance threshold (default: 7)')
+                        help='Smith-Waterman score threshold; only used with --exact (default: 3.3)')
+    parser.add_argument('--threshold_iso', type=float, default=5,
+                        help='Isometric distance threshold (default: 5 for non-exact mode)')
     parser.add_argument('--threshold_vgene', type=float, default=3.7,
                         help='V-gene similarity threshold (default: 3.7)')
     parser.add_argument('--n_threads', type=int, default=1,
-                        help='Number of FAISS threads (default: 1)')
+                        help='Number of FAISS CPU threads (default: 1)')
+    parser.add_argument('--use_gpu', action='store_true',
+                        help='Use GPU-accelerated FAISS index (requires faiss-gpu)')
     parser.add_argument('--no_v_gene', action='store_true',
                         help='Disable V-gene features (CDR3 only)')
     parser.add_argument('--max_seqs_per_specimen', type=int, default=None,
@@ -652,10 +660,12 @@ if __name__ == '__main__':
 
     evaluator = GIANAEvaluator(
         use_v_gene=not args.no_v_gene,
+        exact=args.exact,
         threshold_score=args.threshold_score,
         threshold_iso=args.threshold_iso,
         threshold_vgene=args.threshold_vgene,
         n_threads=args.n_threads,
+        use_gpu=args.use_gpu,
         max_seqs_per_specimen=args.max_seqs_per_specimen,
         results_dir=args.results_dir,
         debug=args.debug,
