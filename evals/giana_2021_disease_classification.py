@@ -413,9 +413,14 @@ class GIANAEvaluator:
         if len(test_df) == 0:
             return {}
 
-        # Disease fraction per cluster (from training sequences only)
+        # Disease fraction per cluster (from training sequences only).
+        # Clusters with >100 training sequences are excluded: per Liu et al. 2021
+        # these large "hub" clusters arise from small-world connections and are
+        # not informative for disease specificity.
         cluster_disease_frac = {}
         for cluster_id, grp in train_df.groupby(1):
+            if len(grp) > 100:
+                continue
             n_disease = (grp[4] == target_disease).sum()
             cluster_disease_frac[cluster_id] = n_disease / max(len(grp), 1)
 

@@ -7,7 +7,6 @@
 #SBATCH -c 8
 #SBATCH --mem=64G
 #SBATCH --time=7-00:00:00    
-#SBATCH --qos=long  
 
 #SBATCH -A akundaje
 #SBATCH -p akundaje
