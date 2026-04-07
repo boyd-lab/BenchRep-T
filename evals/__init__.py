@@ -18,7 +18,11 @@ def __getattr__(name):
     if name == 'ExternalEvaluator':
         from .external_evaluation import ExternalEvaluator
         return ExternalEvaluator
+    if name == 'Emerson2017DriverIdentificationEvaluator':
+        from .emerson_2017_driver_identification import Emerson2017DriverIdentificationEvaluator
+        return Emerson2017DriverIdentificationEvaluator
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = ['Emerson2017Evaluator', 'GIANA2020Evaluator', 'DemographicFeaturesEvaluator',
-           'EnsembleRegressionEvaluator', 'MetaModelEvaluator', 'ExternalEvaluator']
+           'EnsembleRegressionEvaluator', 'MetaModelEvaluator', 'ExternalEvaluator',
+           'Emerson2017DriverIdentificationEvaluator']

@@ -64,6 +64,9 @@ class ExternalEvaluator:
     _INTERNAL_FILE_PREFIX = 'part_table_'
     _INTERNAL_FILE_SUFFIX = '.tsv.gz'
 
+    # External file naming convention (set by preprocess_repertoires.py)
+    _EXT_FILE_TEMPLATE = '{sample_name}_TCRB.tsv'
+
     def __init__(self, model_name='ensemble_regression',
                  # Ensemble Regression hyperparameters
                  val_split=0.2, n_cv_folds=5,
@@ -299,7 +302,6 @@ class ExternalEvaluator:
                                 ext_disease_col='disease_label',
                                 ext_healthy_label='Healthy',
                                 ext_disease_label='T1D',
-                                ext_file_template='{sample_name}_TCRB.tsv',
                                 random_state=7,
                                 output_csv=None):
         """
@@ -340,7 +342,7 @@ class ExternalEvaluator:
             disease_col=ext_disease_col,
             healthy_label=ext_healthy_label,
             disease_label=ext_disease_label,
-            file_template=ext_file_template,
+            file_template=self._EXT_FILE_TEMPLATE,
         )
         ext_files = ext_data['file_path'].tolist()
         ext_labels = ext_data['label'].values
@@ -439,9 +441,6 @@ if __name__ == "__main__":
                         help='Healthy label string in external metadata')
     parser.add_argument('--ext_disease_label', type=str, default='T1D',
                         help='Disease label string in external metadata')
-    parser.add_argument('--ext_file_template', type=str, default='{sample_name}_TCRB.tsv',
-                        help='File template for external repertoires')
-
     # Model hyperparameters
     parser.add_argument('--val_split', type=float, default=0.2,
                         help='Internal val fraction for Ensemble Regression alpha tuning')
@@ -475,7 +474,6 @@ if __name__ == "__main__":
         ext_disease_col=args.ext_disease_col,
         ext_healthy_label=args.ext_healthy_label,
         ext_disease_label=args.ext_disease_label,
-        ext_file_template=args.ext_file_template,
         random_state=args.random_state,
         output_csv=args.output_csv,
     )
