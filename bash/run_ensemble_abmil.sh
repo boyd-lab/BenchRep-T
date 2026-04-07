@@ -4,20 +4,22 @@ set -uo pipefail
 # ---- flags ----
 DEBUG=false
 DEBUG_REPERTOIRES=10
+FEATURES="vj_only"
 for arg in "$@"; do
   case $arg in
     --debug) DEBUG=true ;;
     --debug_repertoires=*) DEBUG_REPERTOIRES="${arg#*=}" ;;
+    --features=*) FEATURES="${arg#*=}" ;;
   esac
 done
 
 # ---- config ----
-GPUS=(0 1 2 3)
+GPUS=(2 3)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
 RESULTS=${REPO_ROOT}/results
-LOGDIR=${REPO_ROOT}/logs/ensemble_abmil
+LOGDIR=${REPO_ROOT}/logs/abmil
 mkdir -p "$LOGDIR" "$RESULTS"
 
 if $DEBUG; then
@@ -40,7 +42,7 @@ for disease in "${DISEASES[@]}"; do
 
   {
     ts=$(date +%Y%m%d_%H%M%S)
-    log="${LOGDIR}/ensemble_abmil_${disease}_${ts}.log"
+    log="${LOGDIR}/abmil_${disease}_${FEATURES}_${ts}.log"
     echo "[$(date +%T)] start $disease on GPU $gpu -> $log"
 
     {
@@ -53,7 +55,8 @@ for disease in "${DISEASES[@]}"; do
         --metadata_path "$METADATA" \
         --repertoire_data_dir "$REPERTOIRE_DIR" \
         --target_disease "$disease" \
-        --output_csv "${RESULTS}/ensemble_abmil_${disease}_classification.csv" \
+        --features "$FEATURES" \
+        --output_csv "${RESULTS}/abmil_${disease}_${FEATURES}_classification.csv" \
         "${debug_flags[@]}"
 
       status=$?

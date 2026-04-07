@@ -32,7 +32,7 @@ def create_evaluator(model_name, indices_map=None):
     Create an evaluator instance for the specified model.
 
     Args:
-        model_name: One of 'emerson_2017', 'ostmeyer_2019', 'giana_2020',
+        model_name: One of 'emerson_2017', 'ostmeyer_2019', 'giana_2021',
             'ensemble_regression', 'ensemble_regression_kmer', 'ensemble_regression_vj'
         indices_map: Dict mapping rep_id to pre-computed row indices
 
@@ -45,9 +45,9 @@ def create_evaluator(model_name, indices_map=None):
     elif model_name == 'ostmeyer_2019':
         from evals.ostmeyer_2019_disease_classification import Ostmeyer2019Evaluator
         return Ostmeyer2019Evaluator(indices_map=indices_map)
-    elif model_name == 'giana_2020':
-        from evals.giana_2020_disease_classification import GIANA2020Evaluator
-        return GIANA2020Evaluator(indices_map=indices_map)
+    elif model_name == 'giana_2021':
+        from evals.giana_2021_disease_classification import GIANAEvaluator
+        return GIANAEvaluator(indices_map=indices_map, exact=False)
     elif model_name == 'deeprc_2020':
         from evals.deeprc_2020_disease_classification import DeepRC2020Evaluator
         return DeepRC2020Evaluator(indices_map=indices_map,
@@ -64,7 +64,7 @@ def create_evaluator(model_name, indices_map=None):
             indices_map=indices_map, submodel=submodel_map[model_name])
     else:
         raise ValueError(f"Unknown model: {model_name}. "
-                         f"Choose from: emerson_2017, ostmeyer_2019, giana_2020, "
+                         f"Choose from: emerson_2017, ostmeyer_2019, giana_2021, "
                          f"ensemble_regression, ensemble_regression_kmer, ensemble_regression_vj")
 
 
@@ -280,9 +280,10 @@ if __name__ == "__main__":
                     "at varying sequencing depths using pre-generated indices"
     )
     parser.add_argument('--model', type=str, required=True,
-                        choices=['emerson_2017', 'ostmeyer_2019', 'giana_2020',
-                                 'ensemble_regression', 'ensemble_regression_kmer',
-                                 'ensemble_regression_vj', 'deeprc_2020'],
+                        choices=['emerson_2017', 'ostmeyer_2019',
+                                 'giana_2021', 'ensemble_regression',
+                                 'ensemble_regression_kmer', 'ensemble_regression_vj',
+                                 'deeprc_2020'],
                         help='Model to evaluate')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Target disease to classify (e.g., CMV, Lupus, T1D)')
