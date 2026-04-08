@@ -1,130 +1,149 @@
 # AIRRBench
 
-Benchmarking framework for adaptive immune receptor repertoire (AIRR) based disease classification.
+Benchmarking framework for TCR repertoire-based disease classification methods, evaluated on the Mal-ID cohort.
 
 ## Overview
 
-This repository evaluates and compares computational methods that use T-cell receptor (TCR) repertoire sequencing data to predict disease status. Methods are benchmarked on a common evaluation framework using pre-defined 3-fold cross-validation splits, with AUROC and AUPR as primary metrics.
+AIRRBench provides a standardized comparison of computational methods that predict disease status from T-cell receptor beta (TRB) repertoire sequencing data. The benchmark covers a range of approaches — from statistical association tests to deep learning — and evaluates them on shared cross-validation splits across multiple diseases (HIV, Covid-19, Influenza, Lupus, T1D, and others).
+
+Beyond disease classification, the framework includes experiments for driver sequence identification, sequencing depth sensitivity, external dataset generalization, and demographic confounding analysis.
 
 ## Repository Structure
 
 ```
-models/            Repertoire-based classification methods
-  DeepRC/          Modern Hopfield network (Widrich et al. 2020)
-  DeepTCR/         Deep learning TCR framework (Sidhom et al. 2021)
-  GIANA/           Isometric CDR3 encoding (Liu et al. 2021)
-evals/             Evaluation harness, cross-validation, and experiments
-preprocessing/     Raw data cleaning and preparation scripts
-utils/             Shared I/O and gene harmonization utilities
-external_data_process/  External dataset preprocessing
+models/                          Classification methods
+├── emerson_2017.py              Emerson et al. 2017
+├── ostmeyer_2019.py             Ostmeyer et al. 2019
+├── ensemble_regression.py       Gapped k-mer + V/J gene ensemble
+├── ensemble_abmil.py            Attention-based deep MIL
+├── GIANA/                       Zhang et al. 2021 (GIANA 4.1)
+├── DeepRC/                      Widrich et al. 2020
+└── DeepTCR/                     Sidhom et al. 2021
+evals/                           Evaluation harness and experiments
+preprocessing/                   Data cleaning and preparation
+utils/                           Repertoire I/O and gene name harmonization
+external_data_process/           External dataset conversion (Adaptive -> AIRR)
 ```
 
-## Implemented Models
+## Implemented Methods
 
-| Model | File | Approach |
-|-------|------|----------|
-| **Emerson 2017** | `models/emerson_2017.py` | Fisher's exact test for diagnostic TCR discovery + Beta-Binomial generative scoring |
-| **Ostmeyer 2019** | `models/ostmeyer_2019.py` | Multiple instance learning with 4-mer motifs, Atchley factor encoding, logistic regression |
-| **GIANA** | `models/GIANA/` | Isometric CDR3 encoding + similarity-based clustering + per-cluster disease fraction scoring |
-| **Ensemble Regression** | `models/ensemble_regression.py` | Gapped 4-mer + V/J gene frequency features, weighted ensemble of two logistic regression models |
-| **Ensemble ABMIL** | `models/ensemble_abmil.py` | Attention-based deep MIL with learned AA embeddings, 1D-CNN encoder, gated attention aggregation |
-| **DeepRC** | `models/DeepRC/` | 1D-CNN sequence embedding + modern Hopfield network aggregation (end-to-end differentiable) |
-| **DeepTCR** | `models/DeepTCR/` | Deep learning framework supporting supervised classification with CDR3 + V/D/J gene features |
+### Statistical
 
-All models follow a common API: `load_repertoire()`, `preload_repertoires()`, `clear_cache()`, `train()`, `predict_diagnosis()`.
+- **Emerson et al. 2017** — Identifies disease-associated CDR3 sequences via Fisher's exact test, then scores repertoires using a Beta-Binomial generative model over the discovered sequences.
 
-## Evaluation Suite
+### Feature Engineering
+
+- **Ostmeyer et al. 2019** — Multiple instance learning over 4-mer motifs extracted from CDR3 sequences, encoded with Atchley factors and classified by logistic regression with random restarts.
+- **Ensemble Regression** — Weighted combination of two logistic regression models: one over gapped 4-mer frequencies from CDR3 sequences, the other over V/J gene usage frequencies. Hyperparameters (regularization strength, ensemble weight) are tuned via internal cross-validation.
+
+### Deep Learning
+
+- **GIANA (Zhang et al. 2021)** — Isometric encoding of CDR3 sequences into fixed-length vectors, followed by similarity-based clustering. Test repertoires are scored by the disease fraction of clusters their sequences fall into.
+- **DeepRC (Widrich et al. 2020)** — 1D-CNN sequence embedding aggregated via modern Hopfield networks for end-to-end repertoire classification.
+- **DeepTCR (Sidhom et al. 2021)** — Deep learning framework operating on CDR3 sequences with V/D/J gene features for supervised repertoire classification.
+- **Attention-Based MIL (ABMIL)** — Learned amino acid and V/J gene embeddings fed through a 1D-CNN encoder, aggregated via gated attention over each repertoire's sequences.
+
+## Experiments
 
 ### Disease Classification
 
-Each evaluator loads metadata, constructs binary (disease vs. Healthy/Background) labels, and runs 3-fold CV with a 90/10 train/validation split for hyperparameter tuning.
+The primary evaluation task. Each method is trained to distinguish a target disease from healthy/background controls in a binary classification setting. Evaluation uses pre-defined 3-fold cross-validation with a 90/10 train/validation split for hyperparameter tuning. A **demographics-only baseline** (logistic regression on age, sex, ancestry) is included to quantify confounding.
 
-| Evaluator | Model | Notes |
-|-----------|-------|-------|
-| `Emerson2017Evaluator` | Emerson 2017 | Tunes p-value threshold on validation set |
-| `Ostmeyer2019Evaluator` | Ostmeyer 2019 | Configurable restarts, abundance method (A or B) |
-| `GIANAEvaluator` | GIANA | Clusters train+test sequences, scores test by cluster disease fraction |
-| `EnsembleRegressionEvaluator` | Ensemble Regression | Supports `ensemble`, `kmer_only`, `vj_only` sub-models |
-| `ABMILEvaluator` | Ensemble ABMIL | GPU-accelerated, early stopping |
-| `DeepRC2020Evaluator` | DeepRC | GPU-accelerated, reads AIRR .tsv.gz directly |
-| `DeepTCREvaluator` | DeepTCR | GPU-accelerated, loads sequences in memory |
-| `DemographicFeaturesEvaluator` | Logistic regression | Baseline using age, sex, ancestry only (confounding control) |
+Metrics: AUROC, AUPR.
 
 ### Driver Sequence Identification
 
-Evaluates whether models can recover known disease-associated TCR sequences (ground truth from VDJdb, score >= 2, Levenshtein similarity >= 90%).
+Tests whether models can recover known disease-associated TCR sequences. Ground truth is derived from VDJdb (confidence score >= 2), matched to repertoires via Levenshtein similarity (>= 90%). Currently supported for Emerson 2017 (ranked by Fisher's test p-value) and Ensemble Regression (ranked by decision function score).
 
-| Evaluator | Model | Scoring |
-|-----------|-------|---------|
-| `Emerson2017DriverIdentificationEvaluator` | Emerson 2017 | Ranks CDR3s by Fisher's exact test p-value |
-| `EnsembleRegressionDriverIdentificationEvaluator` | Ensemble Regression | Ranks CDR3s by decision function score |
+Metrics: recall@k (macro-averaged across repertoires).
 
-Metrics: precision@k and recall@k, macro-averaged across repertoires.
+### Sequencing Depth Sensitivity
 
-### Additional Experiments
+Evaluates how classification performance scales with repertoire size. Models are tested at subsampled depths of 1K, 5K, 10K, 25K, 50K, and 75K sequences, with 5 independent repetitions per depth using pre-computed nested subsampling indices for reproducibility.
 
-| Experiment | File | Description |
-|------------|------|-------------|
-| **Sequencing Depth** | `evals/sequencing_depth_experiment.py` | Evaluates all models at depths 1K–75K sequences (5 repetitions per depth) using pre-computed subsampling indices |
-| **External Evaluation** | `evals/external_evaluation.py` | Trains on all internal data, evaluates on external datasets (Adaptive format converted to AIRR) |
-| **Meta-Model** | `evals/meta_model_repertoire_demographics_disease_classification.py` | Stacks TCR model predictions with demographic features to test orthogonality of signal sources |
+### External Cohort Generalization
 
-## Data Format
+Trains on all internal Mal-ID data and evaluates on independently collected external datasets. External repertoires (originally in Adaptive/immunoSEQ format) are converted to AIRR format with gene name harmonization.
 
-### Repertoire Files
+### Demographic Confounding
 
-Gzip-compressed TSV (`.tsv.gz`) with AIRR-standard columns:
+A stacking experiment to test whether TCR-derived predictions and demographic features carry orthogonal signal. A logistic regression meta-model is trained on the combination of a base model's out-of-sample predictions and demographic features (age, sex, ancestry). If the meta-model substantially outperforms the base model alone, it suggests demographic confounding in the classification signal.
 
-- `cdr3_aa` — CDR3 amino acid sequence
-- `v_call` — V gene call (IMGT nomenclature, e.g., TRBV7-2*01)
-- `j_call` — J gene call
-- `duplicate_count` — Sequence count (optional; defaults to 1)
+## Data
 
-File naming: `part_table_<participant>_<specimen>.tsv.gz`
+### Format
+
+Repertoire files are gzip-compressed TSV (`.tsv.gz`) in AIRR standard format. The key columns used by all methods are:
+
+| Column | Description |
+|--------|-------------|
+| `cdr3_aa` | CDR3 amino acid sequence |
+| `v_call` | V gene (IMGT nomenclature, e.g., TRBV7-2\*01) |
+| `j_call` | J gene |
+| `duplicate_count` | Clone count (optional; assumed 1 if absent) |
+
+File naming convention: `part_table_<participant>_<specimen>.tsv.gz`
 
 ### Metadata
 
-Tab-separated file (`metadata.tsv`) with columns:
+A tab-separated `metadata.tsv` file provides sample annotations:
 
-- `participant_label`, `specimen_label` — Sample identifiers
-- `disease` — Disease label (e.g., HIV, Lupus, T1D, Covid19, Influenza, Healthy/Background)
-- `malid_cross_validation_fold_id_when_in_test_set` — Pre-defined CV fold (0, 1, or 2)
-- `age`, `sex`, `ancestry` — Demographics (used by baseline and meta-model evaluators)
+| Column | Description |
+|--------|-------------|
+| `participant_label` | Participant identifier |
+| `specimen_label` | Specimen identifier |
+| `disease` | Disease label (e.g., HIV, Covid19, Healthy/Background) |
+| `malid_cross_validation_fold_id_when_in_test_set` | Pre-assigned CV fold (0, 1, or 2) |
+| `age`, `sex`, `ancestry` | Demographics |
 
-### Expected Directory Layout
+### Directory Layout
 
 ```
 data/
-├── metadata.tsv
-├── malid_clean/TCR/              Per-specimen repertoire files
-├── public_clones/                VDJdb ground truth driver sequences
-├── depth_indices_seed7.json.gz   Pre-computed subsampling indices
-├── external_raw/                 External repertoires (Adaptive format)
-└── external_processed/           Converted external repertoires (AIRR format)
+├── metadata.tsv                     Sample annotations and CV fold assignments
+├── malid_clean/TCR/                 Per-specimen repertoire files (.tsv.gz)
+├── public_clones/                   VDJdb ground truth driver sequences per disease
+├── depth_indices_seed7.json.gz      Pre-computed subsampling indices
+├── external_raw/                    External repertoires (Adaptive format)
+└── external_processed/              External repertoires (converted to AIRR)
 ```
 
 ## Preprocessing
 
-| Script | Purpose |
-|--------|---------|
-| `clean_tcr_data.py` | Filters non-productive/low-confidence sequences, standardizes V gene names, validates against reference |
-| `clean_tcr_data_to_airr.py` | Converts internal column names to AIRR standard format |
-| `clean_airr_split_by_specimen.py` | Splits per-participant files into per-specimen files, filtering to metadata-matched specimens |
-| `generate_depth_indices.py` | Pre-generates reproducible subsampling indices (seed=7) for sequencing depth experiments |
-| `process_driver_sequences.py` | Matches VDJdb ground truth to Mal-ID repertoires via Levenshtein similarity (>= 90%) |
-| `check_demographics.py` | Analyzes demographic completeness per disease, generates summary plots |
+The `preprocessing/` directory contains scripts for preparing raw data:
 
-## Utilities
+- **Sequence QC** (`clean_tcr_data.py`) — Filters non-productive and low-confidence sequences, removes sequences with non-standard amino acids, standardizes V gene nomenclature, and validates against a reference gene set.
+- **Format conversion** (`clean_tcr_data_to_airr.py`) — Maps internal column names to AIRR standard.
+- **Specimen splitting** (`clean_airr_split_by_specimen.py`) — Splits per-participant files into per-specimen files, retaining only specimens present in metadata.
+- **Depth indices** (`generate_depth_indices.py`) — Pre-generates reproducible subsampling indices for the sequencing depth experiment.
+- **Driver sequence matching** (`process_driver_sequences.py`) — Matches VDJdb entries to Mal-ID repertoires via Levenshtein similarity for the driver identification evaluation.
+- **Demographic analysis** (`check_demographics.py`) — Summarizes demographic completeness per disease.
 
-- **`utils/repertoire_io.py`** — Unified repertoire loading with optional subsampling (by indices, count, or fraction)
-- **`utils/gene_harmonization.py`** — Adaptive-to-AIRR gene name conversion, allele stripping for cross-dataset compatibility
+Gene name harmonization between Adaptive/immunoSEQ and AIRR/IMGT conventions is handled by `utils/gene_harmonization.py`.
 
 ## Setup
 
-**Python**: 3.10+ (conda environment `antibody_py310`)
+Requires Python >= 3.10. Install with [uv](https://docs.astral.sh/uv/):
 
-**Core dependencies**: pandas, numpy, scipy, scikit-learn, tqdm
+```bash
+# Core dependencies (Emerson, Ostmeyer, Ensemble Regression)
+uv sync
 
-**Deep learning** (optional, for ABMIL/DeepRC/DeepTCR): PyTorch with CUDA support
+# With specific model extras
+uv sync --extra giana       # GIANA (adds faiss-cpu)
+uv sync --extra abmil       # Attention-based MIL (adds PyTorch)
+uv sync --extra deeptcr     # DeepTCR (adds TensorFlow, umap-learn, etc.)
+uv sync --extra drivers     # Driver sequence identification (adds python-Levenshtein)
 
-**Additional**: Levenshtein (driver sequence matching), matplotlib/seaborn (plots), faiss-cpu (GIANA clustering)
+# Everything
+uv sync --all-extras
+```
+
+Alternatively, with pip:
+
+```bash
+pip install -e .             # core only
+pip install -e ".[all]"      # all extras
+```
+
+For GPU-accelerated models (ABMIL, DeepTCR), ensure CUDA-compatible versions of PyTorch or TensorFlow are installed for your system.
