@@ -6,22 +6,35 @@ and multi-disease repertoire classification"
 
 Approach
 --------
-For each CV fold, sequences from all training specimens (labelled 'train' with their
-disease category) and all test specimens (labelled 'test' with their specimen ID) are
-combined into a single GIANA input file.  GIANA clusters these sequences by sequence
-similarity.  For each resulting cluster the disease fraction is computed from training
-sequences only:
+The paper uses a two-phase query mode:
 
-    disease_frac(cluster) = (#train seqs labelled as target disease)
-                            / (#total train seqs in cluster)
+  Phase 1 — Reference clustering (training data only)
+    All training sequences are clustered with EncodeRepertoire.  The resulting
+    reference cluster file has a fixed composition: for each cluster, the fraction
+    of training TCRs belonging to the target disease is computed once and does not
+    change when test data is introduced.
 
-Each test specimen receives a score equal to the mean disease fraction across all of
-its sequences that appear in the cluster file.  Sequences that are unique and do not
-cluster with anything are absent from GIANA output and contribute a score of 0.
+  Phase 2 — Query assignment (test data)
+    For each test TCR, GIANA's query mode finds its nearest neighbor among the
+    reference sequences (FAISS isometric search, same threshold as reference
+    clustering).  The test TCR and its reference neighbor are written to a
+    candidate file.  EncodeRepertoire (GIANA4.1) re-clusters those candidates
+    with Smith-Waterman refinement.  MergeExist then maps the resulting query
+    cluster IDs back to reference cluster IDs by matching shared reference TCRs.
 
-This is methodologically equivalent to the paper's query mode (where reference clusters
-are fixed from training data) but implemented as a single joint clustering step, which
-is simpler to run and avoids GIANA's file-path assumptions in query mode.
+  Scoring
+    For each test specimen the score is the mean disease fraction over all of its
+    TCRs that were assigned to a reference cluster:
+
+        disease_frac(cluster) = (#ref TCRs labelled as target disease)
+                                / (#total ref TCRs in that cluster)
+
+    Reference clusters whose membership exceeds 100 TCRs are excluded (Liu et al.
+    2021: "we first removed TCR clusters with more than 100 [TCRs], as these TCRs
+    were likely generated from small-world connections and not informative to
+    disease specificity").  Test TCRs that have no close reference neighbor
+    (absent from the candidate search) or whose cluster is excluded are omitted
+    from the mean — they do not count as 0 and do not affect the denominator.
 """
 
 import os
@@ -51,11 +64,15 @@ def _load_giana_module():
     """
     Import GIANA4.1.py as a Python module (once per process).
 
+    GIANA4.1.py is used throughout (reference clustering, candidate
+    re-clustering) rather than the original GIANA4.py because 4.1 hardcodes
+    the pre-computed optimised encoding matrix X, making results deterministic
+    and avoiding the one-time MDS fit in GIANA4.py.  query.py's MakeQuery
+    called `python3 GIANA4.py` as a subprocess; we replace that with a direct
+    call to EncodeRepertoire from the already-loaded GIANA4.1 module.
+
     sys.path is extended so that GIANA4.1's `from query import *` and
-    query.py's `from GIANA4 import *` resolve correctly.  GIANA4.py runs
-    a one-time MDS fit on import; GIANA4.1 immediately overrides the result
-    with its pre-computed hardcoded encoding matrix, so the cost is paid
-    once per process and does not affect encoding correctness.
+    query.py's `from GIANA4 import *` resolve correctly.
     """
     global _giana_module
     if _giana_module is not None:
@@ -110,9 +127,10 @@ class GIANAEvaluator:
     Evaluator for GIANA on binary disease classification.
 
     Reads AIRR .tsv.gz files, extracts CDR3 beta sequences (+ optional V-gene),
-    combines training and test sequences into one GIANA input file per CV fold,
-    runs GIANA clustering, then computes per-specimen disease scores as the mean
-    fraction of co-clustered training TCRs that belong to the target disease.
+    builds reference clusters from training sequences, assigns test sequences to
+    reference clusters via GIANA query mode, then computes per-specimen disease
+    scores as the mean fraction of co-clustered reference TCRs belonging to the
+    target disease.
     """
 
     HEALTHY_LABEL = "Healthy/Background"
@@ -314,7 +332,7 @@ class GIANAEvaluator:
           col2: source_tag  ('train' or 'test')
           col3: label       (disease label for train, specimen_label for test)
 
-        After GIANA clustering inserts a cluster_id column after col0, the
+        After EncodeRepertoire inserts a cluster_id column after col0, the
         cluster file columns become: CDR3, cluster_id, V_gene, source_tag, label.
         """
         _PLACEHOLDER_V = 'TRBV2*01'
@@ -335,27 +353,28 @@ class GIANAEvaluator:
 
     def _run_giana(self, input_file, work_dir):
         """
-        Run GIANA clustering on input_file by calling EncodeRepertoire directly.
+        Run GIANA4.1 EncodeRepertoire on input_file.
 
-        Returns path to the produced cluster file.
+        Returns path to the produced cluster file.  Output columns (after
+        skipping 2 ## header lines) match the input columns with a cluster_id
+        inserted after the CDR3:
+          CDR3, cluster_id, <remaining input columns...>
         """
         basename = os.path.basename(input_file)
-        # GIANA removes the last file extension (matching [txcsv]+) then appends
-        # '--RotationEncodingBL62.txt'
+        # EncodeRepertoire strips the trailing extension matching [txcsv]+ and
+        # appends '--RotationEncodingBL62.txt' with a double dash.
         base_no_ext = re.sub(r'\.[txcsv]+$', '', basename)
         outfile = os.path.join(work_dir, base_no_ext + '--RotationEncodingBL62.txt')
 
         giana = _load_giana_module()
 
-        # Set FAISS thread count
         import faiss
         faiss.omp_set_num_threads(self.n_threads)
 
-        # Build V-gene score dict (reads/writes VgeneScores.txt once)
         VScore = _build_vgene_scores(giana) if self.use_v_gene else {}
 
         n_lines = sum(1 for _ in open(input_file))
-        print(f"  Running GIANA on {basename} ({n_lines:,} sequences) "
+        print(f"  Running GIANA4.1 on {basename} ({n_lines:,} sequences) "
               f"[exact={self.exact}, gpu={self.use_gpu}] ...")
         giana.EncodeRepertoire(
             input_file, work_dir, '',
@@ -374,61 +393,229 @@ class GIANAEvaluator:
             )
         return outfile
 
-    def _parse_cluster_file(self, cluster_file):
-        """
-        Parse GIANA cluster output (skip 2 header lines).
+    # ------------------------------------------------------------------
+    # Query mode
+    # ------------------------------------------------------------------
 
-        Expected columns after joint clustering of our combined input:
+    def _run_query(self, query_file, rData, ref_cluster_file, work_dir):
+        """
+        Assign test TCRs to reference clusters using GIANA query mode.
+
+        Replicates query.py MakeQuery + MergeExist exactly, replacing only the
+        `python3 GIANA4.py` subprocess call with a direct call to EncodeRepertoire
+        from the already-loaded GIANA4.1 module.
+
+        For each CDR3 length bucket (matching MakeQuery's per-length loop):
+          1. Build a combined FAISS index over [query | reference] sequences.
+          2. Search each query sequence against the combined index for its 2
+             nearest neighbors (D[:,0] is self at distance 0; D[:,1] is the
+             nearest *other* sequence, which may be another query or a reference).
+          3. vv0 — queries with no close neighbor (D[:,1] > thr) but with
+             collapsed duplicates (flagL > 0): written as standalone 'query'
+             entries, matching MakeQuery lines 130-135.
+          4. vv  — queries with a close neighbor (D[:,1] <= thr): both the query
+             and its neighbor are written, tagged 'query' or 'ref' according to
+             whether their index falls in the query or reference half of the
+             combined array, matching MakeQuery lines 136-163.
+          5. EncodeRepertoire (GIANA4.1) re-clusters the candidate file (SW pass),
+             replacing the `python3 GIANA4.py -f tmp_query.txt` subprocess.
+          6. MergeExist maps candidate cluster IDs back to reference cluster IDs
+             by matching shared reference-tagged TCRs.
+
+        Args:
+            query_file: GIANA-format input file with test sequences
+                        (CDR3, Vgene, 'test', specimen_label).
+            rData: Reference data from giana.CreateReference(train_file) —
+                   [LDu_r, VDu_r, IDu_r, SDu_r, dMD_r].
+            ref_cluster_file: Path to the EncodeRepertoire cluster file for
+                              training sequences (5-column format with ## headers).
+            work_dir: Directory for intermediate and output files.
+
+        Returns:
+            Path to the merged query file (MergeExist output, 6-column, no header),
+            or None if no candidate lines were produced.
+
+        Merged file columns (written by MergeExist, no header):
           0: CDR3
-          1: cluster_id
+          1: cluster_id   (query cluster ID mapped to reference cluster)
           2: V_gene
-          3: source_tag  ('train' or 'test')
-          4: label       (disease label or specimen_label)
+          3: source_tag   ('train' for reference rows, 'test' for query rows)
+          4: label        (disease label for reference rows; specimen_label for query rows)
+          5: role         ('ref' = reference/training TCR, 'query' = test TCR)
         """
-        df = pd.read_csv(cluster_file, sep='\t', header=None, skiprows=2)
-        return df
+        import faiss
+        faiss.omp_set_num_threads(self.n_threads)
 
-    def _compute_specimen_scores(self, cluster_df, target_disease):
+        giana = _load_giana_module()
+
+        _LDu_r, _VDu_r, IDu_r, SDu_r, dMD_r = rData
+
+        # Encode query sequences with CreateReference (same bucketing/encoding as
+        # reference, using GIANA4.1's pre-computed M6 matrix).
+        print("  Encoding query sequences for candidate search...")
+        qData = giana.CreateReference(query_file, Vgene=self.use_v_gene, ST=3)
+        LDu_q, _VDu_q, IDu_q, SDu_q, dMD_q = qData
+
+        candidate_lines = []
+        written: set = set()
+
+        for kk in LDu_q:
+            dM_q = dMD_q[kk].astype('float32')
+            vss_q = SDu_q[kk]
+            vInfo_q = IDu_q[kk]
+            nq = dM_q.shape[0]
+            # flagL[i] = number of collapsed identical entries for unique seq i minus 1.
+            # > 0 means the (CDR3, Vgene) appeared more than once in the query file.
+            flagL = np.array([len(x) - 1 for x in vInfo_q])
+
+            if kk in dMD_r:
+                dM_r = dMD_r[kk].astype('float32')
+                vss_r = SDu_r[kk]
+                vInfo_r = IDu_r[kk]
+                # Combined array: query sequences first (indices 0..nq-1),
+                # reference sequences second (indices nq..nq+nr-1).
+                dMc = np.concatenate([dM_q, dM_r])
+                vssc = vss_q + vss_r
+                vInfoc = vInfo_q + vInfo_r
+            else:
+                # No reference sequences at this length; query-only bucket.
+                dMc = dM_q
+                vssc = vss_q
+                vInfoc = vInfo_q
+
+            index = faiss.IndexFlatL2(dMc.shape[1])
+            if self.use_gpu:
+                res = faiss.StandardGpuResources()
+                index = faiss.index_cpu_to_gpu(res, 0, index)
+            index.add(dMc)
+            # Search only query sequences; D[:,0]=0 (self), D[:,1]=nearest other.
+            D, I = index.search(dM_q, 2)
+
+            # vv0: isolated queries (no close neighbor) that have duplicates.
+            # Written as standalone 'query' entries so they appear in the candidate
+            # cluster file and can still be scored via MergeExist if a reference
+            # cluster shares the same sequence.
+            vv0 = np.where((D[:, 1] > self.threshold_iso) & (flagL > 0))[0]
+            for v in vv0:
+                for info in vInfoc[int(v)]:
+                    key = (vssc[int(v)], info, 'query')
+                    if key not in written:
+                        candidate_lines.append(f"{vssc[int(v)]}\t{info}\tquery")
+                        written.add(key)
+
+            # vv: queries with a close neighbor — write both members of the pair.
+            vv = np.where(D[:, 1] <= self.threshold_iso)[0]
+            for v in vv:
+                tmpI = I[int(v)].copy()
+                # Ensure self is at position 0 (FAISS may return a duplicate at 0
+                # instead of the sequence itself when embeddings collide).
+                if int(v) not in tmpI:
+                    tmpI[0] = int(v)
+                idx1 = int(tmpI[0])
+                idx2 = int(tmpI[1])
+                tag1 = 'query' if idx1 < nq else 'ref'
+                tag2 = 'query' if idx2 < nq else 'ref'
+                for info in vInfoc[idx1]:
+                    key = (vssc[idx1], info, tag1)
+                    if key not in written:
+                        candidate_lines.append(f"{vssc[idx1]}\t{info}\t{tag1}")
+                        written.add(key)
+                for info in vInfoc[idx2]:
+                    key = (vssc[idx2], info, tag2)
+                    if key not in written:
+                        candidate_lines.append(f"{vssc[idx2]}\t{info}\t{tag2}")
+                        written.add(key)
+
+        if not candidate_lines:
+            print("  Warning: no candidate pairs produced; all test specimens "
+                  "will receive score 0.")
+            return None
+
+        candidate_file = os.path.join(work_dir, 'candidates.txt')
+        self._write_giana_input(candidate_lines, candidate_file)
+
+        # Re-cluster candidates with EncodeRepertoire (GIANA4.1), replacing the
+        # `python3 GIANA4.py -f tmp_query.txt` subprocess call in MakeQuery.
+        # Input columns:  CDR3, Vgene, source_tag, label, role  (5 cols)
+        # Output columns: CDR3, cluster_id, Vgene, source_tag, label, role  (6 cols)
+        cand_cluster_file = self._run_giana(candidate_file, work_dir)
+
+        # MergeExist maps candidate cluster IDs to reference cluster IDs by finding
+        # candidate clusters that share a 'ref'-tagged TCR with a reference cluster.
+        # Requires ref_cluster_file (5 cols) to have exactly one fewer column than
+        # cand_cluster_file (6 cols) — satisfied by our file formats.
+        merged_file = os.path.join(work_dir, 'queryFinal.txt')
+        giana.MergeExist(
+            refClusterFile=ref_cluster_file,
+            outFile=merged_file,
+            queryClusterFile=cand_cluster_file,
+            direction='q',
+        )
+
+        if not os.path.exists(merged_file):
+            raise RuntimeError(
+                f"MergeExist did not produce expected output file: {merged_file}"
+            )
+        return merged_file
+
+    def _compute_specimen_scores(self, merged_file, target_disease):
         """
-        Compute per-specimen disease scores from the cluster DataFrame.
+        Compute per-specimen disease scores from the MergeExist output.
 
-        For each cluster: disease_frac = (#train rows with label==target_disease)
-                                         / (#total train rows).
-        For each test specimen: score = mean disease_frac over all its sequences.
-        Sequences absent from the cluster file (unclustered singletons) contribute 0.
+        Disease fractions are derived from 'ref'-tagged rows (reference/training
+        TCRs).  Cluster exclusion (>100 ref TCRs) is applied before scoring.
+        Test specimen scores come from 'query'-tagged rows.
+
+        Args:
+            merged_file: Path to MergeExist output (6-column TSV, no header).
+            target_disease: Disease label string to score against.
 
         Returns:
             dict mapping specimen_label -> float score in [0, 1].
         """
-        if cluster_df.shape[1] < 5:
-            print("Warning: cluster file has fewer columns than expected; "
+        try:
+            df = pd.read_csv(merged_file, sep='\t', header=None)
+        except Exception as e:
+            print(f"Warning: could not read merged file {merged_file}: {e}")
+            return {}
+
+        if df.shape[1] < 6:
+            print("Warning: merged file has fewer than 6 columns; "
                   "column layout may be wrong.")
             return {}
 
-        train_mask = cluster_df[3] == 'train'
-        test_mask = cluster_df[3] == 'test'
-        train_df = cluster_df[train_mask]
-        test_df = cluster_df[test_mask]
+        ref_df = df[df[5] == 'ref']
+        # 'query'-tagged rows with source_tag 'test' are the test specimen TCRs.
+        query_df = df[(df[5] == 'query') & (df[3] == 'test')]
 
-        if len(test_df) == 0:
+        if len(query_df) == 0:
             return {}
 
-        # Disease fraction per cluster (from training sequences only).
-        # Clusters with >100 training sequences are excluded: per Liu et al. 2021
-        # these large "hub" clusters arise from small-world connections and are
-        # not informative for disease specificity.
+        # Exclude clusters whose reference membership exceeds 100 TCRs, matching
+        # the paper's criterion applied to reference clusters.
+        cluster_ref_size = ref_df.groupby(1).size()
+        excluded_clusters = {
+            cid for cid, sz in cluster_ref_size.items() if sz > 100
+        }
+
+        # Disease fraction per cluster (from reference rows only).
         cluster_disease_frac = {}
-        for cluster_id, grp in train_df.groupby(1):
-            if len(grp) > 100:
+        for cluster_id, grp in ref_df.groupby(1):
+            if cluster_id in excluded_clusters:
                 continue
             n_disease = (grp[4] == target_disease).sum()
             cluster_disease_frac[cluster_id] = n_disease / max(len(grp), 1)
 
-        # Aggregate per test specimen
+        # Aggregate per test specimen.
+        # Test TCRs in excluded clusters or with no matching reference TCR are
+        # omitted from the mean entirely (not scored as 0).
         specimen_fracs: dict[str, list[float]] = {}
-        for _, row in test_df.iterrows():
+        for _, row in query_df.iterrows():
+            cluster_id = row[1]
+            if cluster_id in excluded_clusters:
+                continue
             specimen = row[4]
-            frac = cluster_disease_frac.get(row[1], 0.0)
+            frac = cluster_disease_frac.get(cluster_id, 0.0)
             specimen_fracs.setdefault(specimen, []).append(frac)
 
         return {s: float(np.mean(fracs)) for s, fracs in specimen_fracs.items()}
@@ -450,10 +637,14 @@ class GIANAEvaluator:
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
-        For each fold, a joint GIANA input file is built from all training
-        sequences (labelled 'train') and all test sequences (labelled 'test'),
-        GIANA is run once per fold, and per-specimen disease scores are derived
-        from the cluster output.
+        For each fold:
+          1. All training sequences are written to a file and clustered with
+             EncodeRepertoire (GIANA4.1) to produce the reference cluster file.
+          2. CreateReference encodes the training sequences for FAISS lookup.
+          3. All test sequences are written to a query file.
+          4. _run_query assigns each test TCR to its nearest reference cluster
+             and produces a merged file via MergeExist.
+          5. Per-specimen disease scores are derived from the merged file.
 
         Args:
             metadata_path: Path to metadata.tsv.
@@ -514,13 +705,11 @@ class GIANAEvaluator:
             )
             os.makedirs(fold_dir, exist_ok=True)
 
-            combined_file = os.path.join(
-                fold_dir, f"combined_fold{test_fold}.txt"
-            )
-
-            # Build combined GIANA input file
+            # ----------------------------------------------------------
+            # Phase 1: Build reference clusters from training data only
+            # ----------------------------------------------------------
             print("\nLoading training sequences...")
-            giana_lines = []
+            train_lines = []
             n_train_loaded = 0
 
             for _, row in train_data.iterrows():
@@ -530,49 +719,69 @@ class GIANAEvaluator:
                 df = self._load_repertoire(row['file_path'])
                 if df is None or len(df) == 0:
                     continue
-                giana_lines.extend(
+                train_lines.extend(
                     self._build_giana_rows(df, 'train', disease_label)
                 )
                 n_train_loaded += 1
 
-            print(f"  Loaded {len(giana_lines):,} train sequences "
+            print(f"  Loaded {len(train_lines):,} train sequences "
                   f"from {n_train_loaded} specimens.")
 
-            print("Loading test sequences...")
+            train_file = os.path.join(fold_dir, f"train_fold{test_fold}.txt")
+            self._write_giana_input(train_lines, train_file)
+
+            print("Clustering training sequences to build reference...")
+            ref_cluster_file = self._run_giana(train_file, fold_dir)
+
+            # Encode training sequences for FAISS query lookup.
+            giana = _load_giana_module()
+            print("Encoding reference sequences for query mode...")
+            rData = giana.CreateReference(train_file, Vgene=self.use_v_gene, ST=3)
+
+            # ----------------------------------------------------------
+            # Phase 2: Assign test sequences to reference clusters
+            # ----------------------------------------------------------
+            print("\nLoading test sequences...")
+            test_lines = []
             n_test_loaded = 0
+
             for _, row in test_data.iterrows():
                 df = self._load_repertoire(row['file_path'])
                 if df is None or len(df) == 0:
                     continue
-                giana_lines.extend(
+                test_lines.extend(
                     self._build_giana_rows(df, 'test', row['specimen_label'])
                 )
                 n_test_loaded += 1
 
             print(f"  Loaded test sequences from {n_test_loaded} specimens.")
-            print(f"Total sequences for GIANA: {len(giana_lines):,}")
 
-            self._write_giana_input(giana_lines, combined_file)
+            query_file = os.path.join(fold_dir, f"query_fold{test_fold}.txt")
+            self._write_giana_input(test_lines, query_file)
 
-            # Run GIANA clustering
-            cluster_file = self._run_giana(combined_file, fold_dir)
+            merged_file = self._run_query(
+                query_file, rData, ref_cluster_file, fold_dir
+            )
 
-            # Parse cluster output and compute scores
-            print("Parsing cluster output...")
-            cluster_df = self._parse_cluster_file(cluster_file)
-            scores = self._compute_specimen_scores(cluster_df, target_disease)
+            # ----------------------------------------------------------
+            # Scoring
+            # ----------------------------------------------------------
+            if merged_file is None:
+                scores = {}
+            else:
+                print("Computing specimen scores from merged query file...")
+                scores = self._compute_specimen_scores(merged_file, target_disease)
 
             print(f"Scored {len(scores)} test specimens.")
 
-            # Collect per-specimen results
             fold_probs = []
             fold_labels = []
 
             for _, row in test_data.iterrows():
                 specimen = row['specimen_label']
                 if specimen not in scores:
-                    print(f"  Warning: no cluster-file entries for specimen '{specimen}'; "
-                          f"assigning score 0.")
+                    print(f"  Warning: no reference cluster assignment for specimen "
+                          f"'{specimen}'; assigning score 0.")
                     score = 0.0
                 else:
                     score = scores[specimen]
