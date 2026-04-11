@@ -22,16 +22,24 @@ SUBMODEL_METHOD_NAMES = {
 }
 
 
-# Per-disease demographic filters applied symmetrically to both the
-# target-disease cohort and the Healthy/Background controls so the
-# comparison is drawn from a matched demographic slice. Age bounds are
-# inclusive on both ends.
+# Per-disease demographic adjustments for fair comparison. Two modes:
+#
+#   'filter'
+#       Filter both the disease cohort and the Healthy/Background controls to
+#       the same demographic slice (e.g. HIV -> African ancestry). Age bounds,
+#       if given, are inclusive on both ends.
+#
+#   'age_match_healthy'
+#       Leave the disease cohort untouched and subsample the Healthy/Background
+#       controls so that their age-histogram shape matches the disease cohort.
+#       ``bin_width`` controls the histogram bin size in years.
+#
+# Covid19 is intentionally omitted (left unadjusted).
 DEMOGRAPHIC_ADJUSTMENTS = {
-    'HIV': {'ancestry': 'African'},
-    'Lupus': {'sex': 'F', 'age_min': 10, 'age_max': 20},
-    'T1D': {'age_min': 10, 'age_max': 20},
-    'Influenza': {'age_min': 20, 'age_max': 30},
-    # Covid19 is intentionally omitted (left unadjusted).
+    'HIV': {'mode': 'filter', 'ancestry': 'African'},
+    'Lupus': {'mode': 'age_match_healthy', 'bin_width': 10},
+    'T1D': {'mode': 'age_match_healthy', 'bin_width': 10},
+    'Influenza': {'mode': 'age_match_healthy', 'bin_width': 10},
 }
 
 
@@ -83,15 +91,12 @@ class EnsembleRegressionEvaluator:
     def load_metadata(self, metadata_path):
         return pd.read_csv(metadata_path, sep='\t')
 
-    @staticmethod
-    def _apply_demographic_adjustment(df, target_disease):
+    def _apply_demographic_adjustment(self, df, target_disease):
         """
-        Filter a combined disease+healthy DataFrame to the demographic slice
-        prescribed for ``target_disease``. The same filter is applied to both
-        the disease and healthy rows so the comparison is matched.
-
-        Unknown diseases and those without an entry in ``DEMOGRAPHIC_ADJUSTMENTS``
-        (e.g. Covid19) are returned unchanged.
+        Dispatch to the demographic adjustment strategy configured in
+        ``DEMOGRAPHIC_ADJUSTMENTS`` for ``target_disease``. The input is a
+        combined disease+healthy DataFrame with a ``label`` column already
+        populated (1 = disease, 0 = healthy). Returns the adjusted DataFrame.
         """
         rule = DEMOGRAPHIC_ADJUSTMENTS.get(target_disease)
         if not rule:
@@ -99,6 +104,17 @@ class EnsembleRegressionEvaluator:
                   f"- leaving cohort unchanged.")
             return df
 
+        mode = rule.get('mode', 'filter')
+        if mode == 'filter':
+            return self._apply_filter_adjustment(df, target_disease, rule)
+        if mode == 'age_match_healthy':
+            return self._apply_age_match_adjustment(df, target_disease, rule)
+        raise ValueError(f"Unknown demographic adjustment mode '{mode}' "
+                         f"for disease '{target_disease}'")
+
+    @staticmethod
+    def _apply_filter_adjustment(df, target_disease, rule):
+        """Symmetric filter on both disease and healthy rows."""
         mask = pd.Series(True, index=df.index)
         desc = []
         if 'ancestry' in rule:
@@ -118,9 +134,121 @@ class EnsembleRegressionEvaluator:
 
         before = len(df)
         filtered = df[mask].copy()
-        print(f"  Demographic adjustment for '{target_disease}' "
+        print(f"  Demographic filter for '{target_disease}' "
               f"({', '.join(desc)}): {before} -> {len(filtered)} rows")
         return filtered
+
+    def _apply_age_match_adjustment(self, df, target_disease, rule):
+        """
+        Leave the disease cohort unchanged and subsample the Healthy/Background
+        controls so their age histogram (``bin_width``-year bins) has the same
+        shape as the disease cohort's. The healthy sample count is maximized
+        subject to not exceeding the number of available healthy samples in any
+        bin; it need not equal the disease count.
+
+        If a disease bin has no healthy samples available, that bin is dropped
+        from the target distribution with a warning and the remaining disease
+        bins are used to define the shape. Healthy rows with missing age are
+        excluded from sampling; disease rows with missing age are kept as-is
+        but cannot contribute to (or be matched in) the histogram.
+        """
+        bin_width = int(rule.get('bin_width', 10))
+
+        disease_df = df[df['label'] == 1].copy()
+        healthy_df = df[df['label'] == 0].copy()
+
+        disease_age = pd.to_numeric(disease_df['age'], errors='coerce')
+        healthy_age = pd.to_numeric(healthy_df['age'], errors='coerce')
+
+        d_age_valid_mask = disease_age.notna()
+        h_age_valid_mask = healthy_age.notna()
+
+        n_disease_nan = int((~d_age_valid_mask).sum())
+        n_healthy_nan = int((~h_age_valid_mask).sum())
+
+        disease_with_age = disease_df[d_age_valid_mask]
+        healthy_with_age = healthy_df[h_age_valid_mask]
+        d_ages = disease_age[d_age_valid_mask]
+        h_ages = healthy_age[h_age_valid_mask]
+
+        if len(disease_with_age) == 0 or len(healthy_with_age) == 0:
+            print(f"  Warning: insufficient age data to age-match "
+                  f"'{target_disease}'. Leaving cohort unchanged.")
+            return df
+
+        combined_min = float(min(d_ages.min(), h_ages.min()))
+        combined_max = float(max(d_ages.max(), h_ages.max()))
+        bin_start = int(np.floor(combined_min / bin_width)) * bin_width
+        bin_end = (int(np.floor(combined_max / bin_width)) + 1) * bin_width
+        bin_edges = np.arange(bin_start, bin_end + bin_width, bin_width)
+        n_bins = len(bin_edges) - 1
+
+        d_bin = pd.cut(d_ages, bin_edges, right=False, labels=False).astype(int)
+        h_bin = pd.cut(h_ages, bin_edges, right=False, labels=False).astype(int)
+
+        d_counts = np.bincount(d_bin.values, minlength=n_bins)
+        h_counts = np.bincount(h_bin.values, minlength=n_bins)
+
+        active_bins = [i for i in range(n_bins) if d_counts[i] > 0 and h_counts[i] > 0]
+        uncovered_bins = [i for i in range(n_bins) if d_counts[i] > 0 and h_counts[i] == 0]
+
+        if uncovered_bins:
+            missed = int(sum(d_counts[i] for i in uncovered_bins))
+            labels = ', '.join(f"[{bin_edges[i]},{bin_edges[i+1]})"
+                               for i in uncovered_bins)
+            print(f"  Warning: {missed} disease sample(s) fall in bin(s) "
+                  f"{labels} with no healthy counterparts; these bins are "
+                  f"excluded from the target distribution.")
+
+        if not active_bins:
+            print(f"  Warning: no coverable age bins for '{target_disease}'. "
+                  f"Leaving cohort unchanged.")
+            return df
+
+        active_d = np.array([d_counts[i] for i in active_bins], dtype=float)
+        active_h = np.array([h_counts[i] for i in active_bins], dtype=float)
+        props = active_d / active_d.sum()
+        max_n = int(np.floor(float(np.min(active_h / props))))
+        if max_n <= 0:
+            print(f"  Warning: maximum matched healthy N is 0 for "
+                  f"'{target_disease}'. Leaving cohort unchanged.")
+            return df
+
+        rng = np.random.RandomState(self.subsample_seed)
+        sampled_parts = []
+        h_final_counts = np.zeros(n_bins, dtype=int)
+        # Map each healthy row's original index to its bin index.
+        h_bin_by_index = pd.Series(h_bin.values, index=healthy_with_age.index)
+
+        for j, bin_idx in enumerate(active_bins):
+            target = int(round(max_n * props[j]))
+            target = min(target, int(active_h[j]))
+            if target <= 0:
+                continue
+            pool = healthy_with_age.loc[h_bin_by_index[h_bin_by_index == bin_idx].index]
+            sampled = pool.sample(n=target, random_state=int(rng.randint(0, 2**31 - 1)))
+            sampled_parts.append(sampled)
+            h_final_counts[bin_idx] = target
+
+        sampled_healthy = (pd.concat(sampled_parts, axis=0)
+                           if sampled_parts else healthy_with_age.iloc[0:0])
+
+        print(f"  Age-matched cohort for '{target_disease}' "
+              f"(bin width {bin_width}y): disease {len(disease_df)} (unchanged), "
+              f"healthy {len(healthy_df)} -> {len(sampled_healthy)}")
+        print(f"    Per-bin (disease / healthy available / healthy sampled):")
+        for i in range(n_bins):
+            if d_counts[i] == 0 and h_counts[i] == 0:
+                continue
+            print(f"      [{bin_edges[i]:3d},{bin_edges[i+1]:3d}):  "
+                  f"{d_counts[i]:3d}  /  {h_counts[i]:3d}  /  {h_final_counts[i]:3d}")
+        if n_disease_nan:
+            print(f"    Note: {n_disease_nan} disease row(s) have missing age "
+                  f"(kept, not used for histogram)")
+        if n_healthy_nan:
+            print(f"    Note: {n_healthy_nan} healthy row(s) dropped for missing age")
+
+        return pd.concat([disease_df, sampled_healthy], axis=0)
 
     def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
                              require_demographics=False,
@@ -374,10 +502,13 @@ if __name__ == "__main__":
                         help='Drop repertoires with missing demographic data '
                              '(age, sex, ancestry) to match demographic baseline subset')
     parser.add_argument('--adjust_demographics', action='store_true',
-                        help='Apply per-disease demographic filter to both the '
-                             'disease cohort and Healthy/Background controls: '
-                             'HIV=African ancestry; Lupus=Female age 10-20; '
-                             'T1D=age 10-20; Influenza=age 20-30; Covid19 unchanged.')
+                        help='Apply per-disease demographic adjustment for '
+                             'fair comparison. HIV: filter both cohorts to '
+                             'African ancestry. Lupus/T1D/Influenza: keep the '
+                             'disease cohort unchanged and subsample '
+                             'Healthy/Background so its age distribution '
+                             '(10y bins) matches the disease cohort. '
+                             'Covid19 is left unadjusted.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
