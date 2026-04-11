@@ -1,0 +1,41 @@
+[project]
+name = "airr-bench"
+version = "0.1.0"
+description = "Benchmarking framework for TCR repertoire-based disease classification"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "tqdm",
+    "biopython",
+    "matplotlib",
+    "seaborn",
+]
+
+[project.optional-dependencies]
+# GIANA clustering model
+giana = [
+    "faiss-cpu",
+]
+# Attention-based MIL model (requires PyTorch)
+abmil = [
+    "torch",
+]
+# DeepTCR model (requires TensorFlow)
+deeptcr = [
+    "tensorflow",
+    "umap-learn",
+    "logomaker",
+    "distinctipy",
+    "h5py",
+]
+# Driver sequence identification experiment
+drivers = [
+    "python-Levenshtein",
+]
+# All optional dependencies
+all = [
+    "airr-bench[giana,abmil,deeptcr,drivers]",
+]

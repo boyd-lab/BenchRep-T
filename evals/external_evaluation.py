@@ -1,9 +1,14 @@
 """
-External dataset evaluation: train on internal data, evaluate on an external dataset.
+External dataset evaluation for TCR-based disease classification.
 
-Trains a model on ALL internal data (disease vs. Healthy/Background) with an
-internal train/val split for hyperparameter tuning, then evaluates on an
-external dataset.
+Two evaluation modes are supported:
+
+  hold_out: Train on ALL internal data (disease vs. Healthy/Background) with
+            an internal train/val split for hyperparameter tuning, then
+            evaluate on an external dataset.
+
+  cv:       Run k-fold cross-validation directly on an external dataset using
+            its pre-defined fold assignments. Mirrors the internal CV setup.
 
 External data must be preprocessed to AIRR column conventions (cdr3_aa, v_call,
 j_call) before use.  See external_data_process/preprocess_repertoires.py.
@@ -63,6 +68,9 @@ class ExternalEvaluator:
     _INTERNAL_PARTICIPANT_COL = 'participant_label'
     _INTERNAL_FILE_PREFIX = 'part_table_'
     _INTERNAL_FILE_SUFFIX = '.tsv.gz'
+
+    # External file naming convention (set by preprocess_repertoires.py)
+    _EXT_FILE_TEMPLATE = '{sample_name}_TCRB.tsv'
 
     def __init__(self, model_name='ensemble_regression',
                  # Ensemble Regression hyperparameters
@@ -299,7 +307,7 @@ class ExternalEvaluator:
                                 ext_disease_col='disease_label',
                                 ext_healthy_label='Healthy',
                                 ext_disease_label='T1D',
-                                ext_file_template='{sample_name}_TCRB.tsv',
+                                file_template=None,
                                 random_state=7,
                                 output_csv=None):
         """
@@ -340,7 +348,7 @@ class ExternalEvaluator:
             disease_col=ext_disease_col,
             healthy_label=ext_healthy_label,
             disease_label=ext_disease_label,
-            file_template=ext_file_template,
+            file_template=file_template or self._EXT_FILE_TEMPLATE,
         )
         ext_files = ext_data['file_path'].tolist()
         ext_labels = ext_data['label'].values
@@ -403,6 +411,188 @@ class ExternalEvaluator:
             'n_external': len(ext_files),
         }
 
+    # ------------------------------------------------------------------
+    # External k-fold cross-validation
+    # ------------------------------------------------------------------
+
+    def _train_fold(self, train_files, train_labels, random_state):
+        """Dispatch to the correct per-model training routine for a CV fold."""
+        if self.model_name in _ENSEMBLE_SUBMODEL_MAP:
+            return self._train_ensemble_regression(train_files, train_labels)
+        if self.model_name == 'emerson_2017':
+            return self._train_emerson_2017(
+                train_files, train_labels, random_state=random_state
+            )
+        raise ValueError(f"Unknown model '{self.model_name}'")
+
+    def run_cross_validation(self,
+                             ext_metadata_path,
+                             ext_data_dir,
+                             file_template,
+                             ext_sample_col='sample_name',
+                             ext_disease_col='disease_label',
+                             ext_healthy_label='Healthy',
+                             ext_disease_label='Rheumatoid Arthritis',
+                             fold_col='fold',
+                             n_folds=3,
+                             random_state=7,
+                             target_disease=None,
+                             output_csv=None):
+        """
+        Run k-fold cross-validation on an external dataset using its
+        pre-defined fold column.
+
+        For each fold, samples with ``fold_col == k`` form the test set and
+        all other samples are passed to the model's training routine (which
+        handles its own internal tuning). Predictions are aggregated across
+        folds into a single per-sample scores DataFrame.
+
+        Args:
+            ext_metadata_path: Path to external metadata TSV.
+            ext_data_dir: Directory with preprocessed external repertoire files.
+            file_template: Format string that maps a sample name to a file
+                name, e.g. ``'{sample_name}.tsv'`` or
+                ``'{sample_name}_TCRB.tsv'``.
+            ext_sample_col: Column in the metadata with sample identifiers.
+            ext_disease_col: Column with disease labels.
+            ext_healthy_label: Value in ``ext_disease_col`` that marks the
+                negative class (e.g. ``'Healthy'``, ``'Controller'``).
+            ext_disease_label: Value in ``ext_disease_col`` that marks the
+                positive class (e.g. ``'Rheumatoid Arthritis'``,
+                ``'Progressor'``).
+            fold_col: Column containing pre-defined fold IDs (default: 'fold').
+            n_folds: Number of folds to iterate over (default: 3).
+            random_state: Random seed passed to per-model tuning.
+            target_disease: Label written to the ``disease_model`` output
+                column; defaults to ``ext_disease_label`` when omitted.
+            output_csv: Optional path to save the per-sample scores CSV.
+
+        Returns:
+            Tuple of (pd.DataFrame with per-sample predictions, metrics dict).
+        """
+        method_name = MODEL_DISPLAY_NAMES[self.model_name]
+        if target_disease is None:
+            target_disease = ext_disease_label
+
+        data = self._prepare_external_data(
+            ext_metadata_path, ext_data_dir,
+            sample_col=ext_sample_col,
+            disease_col=ext_disease_col,
+            healthy_label=ext_healthy_label,
+            disease_label=ext_disease_label,
+            file_template=file_template,
+        )
+
+        if fold_col not in data.columns:
+            raise ValueError(
+                f"Fold column '{fold_col}' not found in external metadata. "
+                f"Available columns: {list(data.columns)}"
+            )
+
+        all_rows = []
+        all_probs = []
+        all_labels = []
+        fold_results = []
+
+        for test_fold in range(n_folds):
+            print(f"\n{'='*60}")
+            print(f"FOLD {test_fold}: Test fold = {test_fold}")
+            print(f"{'='*60}")
+
+            test_mask = data[fold_col] == test_fold
+            test_data = data[test_mask]
+            train_data = data[~test_mask]
+
+            print(f"Train: {len(train_data)}, Test: {len(test_data)}")
+
+            if len(test_data) == 0:
+                print(f"No samples in fold {test_fold}; skipping.")
+                continue
+            if len(train_data) == 0:
+                raise ValueError(
+                    f"No training samples available for fold {test_fold}."
+                )
+
+            train_files = train_data['file_path'].tolist()
+            train_labels = train_data['label'].tolist()
+            test_files = test_data['file_path'].tolist()
+            test_labels = test_data['label'].tolist()
+
+            train_result = self._train_fold(
+                train_files, train_labels, random_state=random_state
+            )
+
+            # Handle the Emerson-specific degenerate case
+            if (self.model_name == 'emerson_2017'
+                    and train_result.get('no_diagnostic_tcrs', False)):
+                print(f"No diagnostic TCRs in fold {test_fold}; "
+                      f"assigning chance-level predictions (0.5).")
+                test_probs = np.full(len(test_files), 0.5)
+            else:
+                # Clear training repertoires before predicting on the held-out fold
+                self.model.clear_cache()
+                test_probs = np.array([
+                    self.model.predict_diagnosis(fp)['probability_positive']
+                    for fp in tqdm(test_files, desc="Testing")
+                ])
+
+            test_labels_arr = np.array(test_labels)
+            test_auroc = roc_auc_score(test_labels_arr, test_probs)
+            test_aupr = average_precision_score(test_labels_arr, test_probs)
+            print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
+
+            for (_, row), score in zip(test_data.iterrows(), test_probs):
+                all_rows.append({
+                    'sample_name': row[ext_sample_col],
+                    'disease_label': int(row['label']),
+                    'disease_label_str': row[ext_disease_col],
+                    'method': method_name,
+                    'disease_model': target_disease,
+                    'model_score': float(score),
+                    'fold': int(test_fold),
+                })
+
+            fold_results.append({
+                'fold': test_fold,
+                'test_auroc': test_auroc,
+                'test_aupr': test_aupr,
+                'train_result': train_result,
+            })
+            all_probs.extend(test_probs.tolist())
+            all_labels.extend(test_labels)
+
+        all_probs_arr = np.array(all_probs)
+        all_labels_arr = np.array(all_labels)
+        overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
+        overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
+
+        fold_aurocs = [r['test_auroc'] for r in fold_results]
+        fold_auprs = [r['test_aupr'] for r in fold_results]
+
+        print(f"\n{'='*60}")
+        print(f"OVERALL CV RESULTS: {method_name} on "
+              f"{ext_disease_label} vs {ext_healthy_label}")
+        print(f"{'='*60}")
+        print(f"Mean Test AUROC: {np.mean(fold_aurocs):.4f} "
+              f"± {np.std(fold_aurocs):.4f}")
+        print(f"Mean Test AUPR:  {np.mean(fold_auprs):.4f} "
+              f"± {np.std(fold_auprs):.4f}")
+        print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
+        print(f"Overall AUPR  (all folds combined): {overall_aupr:.4f}")
+
+        scores_df = pd.DataFrame(all_rows)
+        if output_csv:
+            scores_df.to_csv(output_csv, index=False)
+            print(f"\nScores saved to: {output_csv}")
+
+        return scores_df, {
+            'fold_results': fold_results,
+            'overall_auroc': overall_auroc,
+            'overall_aupr': overall_aupr,
+            'mean_test_auroc': float(np.mean(fold_aurocs)),
+            'mean_test_aupr': float(np.mean(fold_auprs)),
+        }
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -410,23 +600,33 @@ class ExternalEvaluator:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="External dataset evaluation: train on internal, evaluate on external"
+        description="External dataset evaluation: hold-out (train on internal, "
+                    "evaluate on external) or k-fold CV on the external dataset."
     )
+
+    # Mode
+    parser.add_argument('--mode', type=str, default='hold_out',
+                        choices=['hold_out', 'cv'],
+                        help='Evaluation mode: hold_out (default) trains on '
+                             'internal data and evaluates on external; cv runs '
+                             'k-fold cross-validation on the external dataset.')
 
     # Model selection
     parser.add_argument('--model', type=str, default='ensemble_regression',
                         choices=SUPPORTED_MODELS,
                         help='Model to use (default: ensemble_regression)')
 
-    # Internal (training) dataset
-    parser.add_argument('--train_metadata_path', type=str, required=True,
-                        help='Path to internal metadata.tsv')
-    parser.add_argument('--train_data_dir', type=str, required=True,
-                        help='Directory containing internal repertoire files')
-    parser.add_argument('--target_disease', type=str, required=True,
-                        help='Disease to classify (must exist in internal metadata)')
+    # Internal (training) dataset — required only in hold_out mode
+    parser.add_argument('--train_metadata_path', type=str, default=None,
+                        help='Path to internal metadata.tsv (hold_out mode)')
+    parser.add_argument('--train_data_dir', type=str, default=None,
+                        help='Directory containing internal repertoire files (hold_out mode)')
+    parser.add_argument('--target_disease', type=str, default=None,
+                        help='Disease label for the output scores CSV. Required '
+                             'in hold_out mode (must exist in internal metadata); '
+                             'optional in cv mode (defaults to --ext_disease_label).')
 
-    # External (test) dataset — assumes preprocessed files with AIRR column names
+    # External dataset — assumes preprocessed files with AIRR column names
     parser.add_argument('--ext_metadata_path', type=str, required=True,
                         help='Path to external metadata file')
     parser.add_argument('--ext_data_dir', type=str, required=True,
@@ -436,11 +636,22 @@ if __name__ == "__main__":
     parser.add_argument('--ext_disease_col', type=str, default='disease_label',
                         help='Column with disease labels in external metadata')
     parser.add_argument('--ext_healthy_label', type=str, default='Healthy',
-                        help='Healthy label string in external metadata')
+                        help='Negative-class label in external metadata '
+                             '(e.g. Healthy, Controller)')
     parser.add_argument('--ext_disease_label', type=str, default='T1D',
-                        help='Disease label string in external metadata')
-    parser.add_argument('--ext_file_template', type=str, default='{sample_name}_TCRB.tsv',
-                        help='File template for external repertoires')
+                        help='Positive-class label in external metadata '
+                             '(e.g. Rheumatoid Arthritis, Progressor, T1D)')
+    parser.add_argument('--file_template', type=str, default='{sample_name}_TCRB.tsv',
+                        help='Format string mapping sample_name to file name. '
+                             'Use "{sample_name}.tsv" for RA/TB (whose sample '
+                             'names already include _TCRB or are bare), or '
+                             '"{sample_name}_TCRB.tsv" for T1D.')
+
+    # CV-mode-only args
+    parser.add_argument('--fold_col', type=str, default='fold',
+                        help='Fold column in external metadata (cv mode, default: fold)')
+    parser.add_argument('--n_folds', type=int, default=3,
+                        help='Number of folds to iterate over (cv mode, default: 3)')
 
     # Model hyperparameters
     parser.add_argument('--val_split', type=float, default=0.2,
@@ -458,6 +669,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if args.mode == 'hold_out':
+        missing = [k for k in ('train_metadata_path', 'train_data_dir', 'target_disease')
+                   if getattr(args, k) is None]
+        if missing:
+            parser.error(f"hold_out mode requires: {', '.join('--' + m for m in missing)}")
+
     evaluator = ExternalEvaluator(
         model_name=args.model,
         val_split=args.val_split,
@@ -465,17 +682,33 @@ if __name__ == "__main__":
         train_val_ratio=args.train_val_ratio,
     )
 
-    scores_df, metrics = evaluator.run_external_evaluation(
-        train_metadata_path=args.train_metadata_path,
-        train_data_dir=args.train_data_dir,
-        target_disease=args.target_disease,
-        ext_metadata_path=args.ext_metadata_path,
-        ext_data_dir=args.ext_data_dir,
-        ext_sample_col=args.ext_sample_col,
-        ext_disease_col=args.ext_disease_col,
-        ext_healthy_label=args.ext_healthy_label,
-        ext_disease_label=args.ext_disease_label,
-        ext_file_template=args.ext_file_template,
-        random_state=args.random_state,
-        output_csv=args.output_csv,
-    )
+    if args.mode == 'hold_out':
+        scores_df, metrics = evaluator.run_external_evaluation(
+            train_metadata_path=args.train_metadata_path,
+            train_data_dir=args.train_data_dir,
+            target_disease=args.target_disease,
+            ext_metadata_path=args.ext_metadata_path,
+            ext_data_dir=args.ext_data_dir,
+            ext_sample_col=args.ext_sample_col,
+            ext_disease_col=args.ext_disease_col,
+            ext_healthy_label=args.ext_healthy_label,
+            ext_disease_label=args.ext_disease_label,
+            file_template=args.file_template,
+            random_state=args.random_state,
+            output_csv=args.output_csv,
+        )
+    else:
+        scores_df, metrics = evaluator.run_cross_validation(
+            ext_metadata_path=args.ext_metadata_path,
+            ext_data_dir=args.ext_data_dir,
+            file_template=args.file_template,
+            ext_sample_col=args.ext_sample_col,
+            ext_disease_col=args.ext_disease_col,
+            ext_healthy_label=args.ext_healthy_label,
+            ext_disease_label=args.ext_disease_label,
+            fold_col=args.fold_col,
+            n_folds=args.n_folds,
+            random_state=args.random_state,
+            target_disease=args.target_disease,
+            output_csv=args.output_csv,
+        )
