@@ -22,6 +22,19 @@ SUBMODEL_METHOD_NAMES = {
 }
 
 
+# Per-disease demographic filters applied symmetrically to both the
+# target-disease cohort and the Healthy/Background controls so the
+# comparison is drawn from a matched demographic slice. Age bounds are
+# inclusive on both ends.
+DEMOGRAPHIC_ADJUSTMENTS = {
+    'HIV': {'ancestry': 'African'},
+    'Lupus': {'sex': 'F', 'age_min': 10, 'age_max': 20},
+    'T1D': {'age_min': 10, 'age_max': 20},
+    'Influenza': {'age_min': 20, 'age_max': 30},
+    # Covid19 is intentionally omitted (left unadjusted).
+}
+
+
 class EnsembleRegressionEvaluator:
     """
     Evaluator for the Gapped 4-mer + V/J gene ensemble model.
@@ -70,8 +83,48 @@ class EnsembleRegressionEvaluator:
     def load_metadata(self, metadata_path):
         return pd.read_csv(metadata_path, sep='\t')
 
+    @staticmethod
+    def _apply_demographic_adjustment(df, target_disease):
+        """
+        Filter a combined disease+healthy DataFrame to the demographic slice
+        prescribed for ``target_disease``. The same filter is applied to both
+        the disease and healthy rows so the comparison is matched.
+
+        Unknown diseases and those without an entry in ``DEMOGRAPHIC_ADJUSTMENTS``
+        (e.g. Covid19) are returned unchanged.
+        """
+        rule = DEMOGRAPHIC_ADJUSTMENTS.get(target_disease)
+        if not rule:
+            print(f"  No demographic adjustment defined for '{target_disease}' "
+                  f"- leaving cohort unchanged.")
+            return df
+
+        mask = pd.Series(True, index=df.index)
+        desc = []
+        if 'ancestry' in rule:
+            mask &= (df['ancestry'] == rule['ancestry'])
+            desc.append(f"ancestry={rule['ancestry']}")
+        if 'sex' in rule:
+            mask &= (df['sex'] == rule['sex'])
+            desc.append(f"sex={rule['sex']}")
+        if 'age_min' in rule or 'age_max' in rule:
+            age = pd.to_numeric(df['age'], errors='coerce')
+            if 'age_min' in rule:
+                mask &= (age >= rule['age_min'])
+            if 'age_max' in rule:
+                mask &= (age <= rule['age_max'])
+            desc.append(f"age in [{rule.get('age_min', '-inf')},"
+                        f"{rule.get('age_max', 'inf')}]")
+
+        before = len(df)
+        filtered = df[mask].copy()
+        print(f"  Demographic adjustment for '{target_disease}' "
+              f"({', '.join(desc)}): {before} -> {len(filtered)} rows")
+        return filtered
+
     def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
-                             require_demographics=False):
+                             require_demographics=False,
+                             adjust_demographics=False):
         """
         Filter metadata to target disease vs. Healthy/Background and add binary labels.
 
@@ -81,6 +134,9 @@ class EnsembleRegressionEvaluator:
             disease_col: Column with disease labels.
             require_demographics: If True, drop rows with missing age, sex,
                 or ancestry so the subset matches the demographic baseline.
+            adjust_demographics: If True, apply the per-disease demographic
+                filter from ``DEMOGRAPHIC_ADJUSTMENTS`` to both the disease
+                cohort and the Healthy/Background controls.
 
         Returns:
             DataFrame with a 'label' column (1 = disease, 0 = healthy).
@@ -88,6 +144,9 @@ class EnsembleRegressionEvaluator:
         mask = metadata[disease_col].isin([target_disease, self.HEALTHY_LABEL])
         filtered = metadata[mask].copy()
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
+
+        if adjust_demographics:
+            filtered = self._apply_demographic_adjustment(filtered, target_disease)
 
         if require_demographics:
             before = len(filtered)
@@ -146,7 +205,8 @@ class EnsembleRegressionEvaluator:
                               n_folds=3, random_state=7,
                               tune_parameters=True,
                               allowed_participants=None,
-                              require_demographics=False):
+                              require_demographics=False,
+                              adjust_demographics=False):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -172,13 +232,18 @@ class EnsembleRegressionEvaluator:
             require_demographics: If True, drop repertoires with missing
                                   demographic data (age, sex, ancestry) so the
                                   subset matches the demographic baseline.
+            adjust_demographics: If True, apply the per-disease demographic
+                                 filter from ``DEMOGRAPHIC_ADJUSTMENTS`` to
+                                 both the disease and healthy cohorts to make
+                                 the comparison fairer.
 
         Returns:
             Dict with fold-level results and overall AUROC / AUPR.
         """
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col,
-                                                require_demographics=require_demographics)
+                                                require_demographics=require_demographics,
+                                                adjust_demographics=adjust_demographics)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
@@ -308,6 +373,11 @@ if __name__ == "__main__":
     parser.add_argument('--require_demographics', action='store_true',
                         help='Drop repertoires with missing demographic data '
                              '(age, sex, ancestry) to match demographic baseline subset')
+    parser.add_argument('--adjust_demographics', action='store_true',
+                        help='Apply per-disease demographic filter to both the '
+                             'disease cohort and Healthy/Background controls: '
+                             'HIV=African ancestry; Lupus=Female age 10-20; '
+                             'T1D=age 10-20; Influenza=age 20-30; Covid19 unchanged.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
@@ -323,6 +393,7 @@ if __name__ == "__main__":
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         require_demographics=args.require_demographics,
+        adjust_demographics=args.adjust_demographics,
     )
 
     if args.output_csv:
