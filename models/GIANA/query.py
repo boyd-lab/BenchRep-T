@@ -178,33 +178,33 @@ def MergeExist(refClusterFile, outFile='queryFinal.txt',queryClusterFile='tmp_qu
         print("No query file is generated.")
         return
     gn=np.unique(queryT[1])
-    queryTs=pd.DataFrame([], columns=queryT.columns)
+    keep=[]
     for nn in gn:
             tmp_ddq=queryT.loc[np.where(queryT[1]==nn)[0],:]
             cls_lab=np.unique(tmp_ddq[nq-1])
             if len(cls_lab)==1:
                 if cls_lab[0]=='ref':
                     continue
-            queryTs=queryTs._append(tmp_ddq)
-    queryTs.index=range(queryTs.shape[0])
+            keep.append(tmp_ddq)
+    queryTs=pd.concat(keep, ignore_index=True) if keep else pd.DataFrame(columns=queryT.columns)
     keyr=refT[0]+'_'+refT[2]
     keyq=queryTs[0]+'_'+queryTs[2]
     vvr=np.where(queryTs[nq-1]=='ref')[0]
     vvr_in=np.where(keyr.isin(keyq[vvr]))[0]
     gn_r=list(refT.loc[vvr_in,1].drop_duplicates())
-    ddo=pd.DataFrame([], columns=refT.columns)
+    ddo_parts=[]
     for nn in gn_r:
-        tmp_dd=refT.loc[np.where(refT[1]==nn)[0],:]
+        tmp_dd=refT.loc[np.where(refT[1]==nn)[0],:].copy()
         tmpkey=tmp_dd[0]+'_'+tmp_dd[2]
         vv=np.where(keyq.isin(tmpkey))[0][0]
         gq=queryTs[1][vv]
         tmp_dd[1]=gq
-        ddo=ddo._append(tmp_dd)
+        ddo_parts.append(tmp_dd)
+    ddo=pd.concat(ddo_parts, ignore_index=True) if ddo_parts else pd.DataFrame(columns=refT.columns)
     if direction=='q':
         ddo[nq-1]='ref'
         ## remove groups that contain only ref group
-        queryTs=queryTs._append(ddo)
-        queryTs=queryTs.drop_duplicates()
+        queryTs=pd.concat([queryTs, ddo], ignore_index=True).drop_duplicates()
         queryTs.to_csv(outFile, sep='\t',header=False,index=False)
 #    queryTs.index=range(queryTs.shape[0])
     if direction=='r':
