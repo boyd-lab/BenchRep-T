@@ -433,6 +433,30 @@ class DeepRC(nn.Module):
         
         return predictions
     
+    def forward_embedding(self, inputs_flat, sequence_lengths_flat, n_sequences_per_bag):
+        """Return bag-level representation before output_nn (shape: (N, n_kernels)).
+
+        Identical to forward() up to the attention-weighted sum; the output_nn
+        is NOT applied.  Use this to extract per-repertoire embeddings for
+        downstream residualization or linear probing.
+        """
+        mb_emb_seqs = self.sequence_embedding(
+            inputs_flat, sequence_lengths=sequence_lengths_flat
+        ).to(dtype=torch.float32)
+        mb_attention_weights = self.attention_nn(mb_emb_seqs)
+
+        mb_emb_seqs_after_attention = []
+        start_i = 0
+        for n_seqs in n_sequences_per_bag:
+            attention_weights = mb_attention_weights[start_i:start_i + n_seqs]
+            emb_seqs = mb_emb_seqs[start_i:start_i + n_seqs]
+            attention_weights = torch.softmax(attention_weights, dim=0)
+            emb_seqs_after_attention = emb_seqs * attention_weights
+            mb_emb_seqs_after_attention.append(emb_seqs_after_attention.sum(dim=0))
+            start_i += n_seqs
+
+        return torch.stack(mb_emb_seqs_after_attention, dim=0)  # (N, n_kernels)
+
     def __compute_features__(self, sequence_char_indices, sequence_lengths, max_mb_seq_len, counts_per_sequence):
         """Compute one-hot sequence features + position features with shape (n_sequences, sequence_length, n_features)
         from sequence indices

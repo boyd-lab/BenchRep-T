@@ -11,8 +11,10 @@ import argparse
 
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
+from sklearn.preprocessing import StandardScaler
 
 # All DeepTCR sources live in a flat models/DeepTCR/ directory.
 _DEEPTCR_DIR = os.path.join(
@@ -25,6 +27,8 @@ from DeepTCR import DeepTCR_WF
 from utils_s import Get_Train_Valid_Test_KFold
 from data_processing import Process_Seq
 from Layers import make_test_pred_object
+
+from utils.covariate_residualization import CovariateResidualizer
 
 
 class DeepTCREvaluator:
@@ -302,7 +306,8 @@ class DeepTCREvaluator:
                               random_state=None,
                               tune_parameters=True,
                               p_value_candidates=None,
-                              allowed_participants=None):
+                              allowed_participants=None,
+                              covariate_adjust=False):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -478,16 +483,7 @@ class DeepTCREvaluator:
                 suppress_output=False,
             )
             dtcr.test_pred = make_test_pred_object()
-            dtcr._train(write=False, batch_seed=None, iteration=test_fold)
-
-            # ----------------------------------------------------------
-            # Collect per-sample predictions
-            # ----------------------------------------------------------
-            # dtcr.y_pred: shape [n_test, n_classes], same order as test[0]
-            # dtcr.test[0]: array of specimen labels (no file extension)
-            test_sample_names = dtcr.test[0]
-            test_preds = dtcr.y_pred            # [n_test, n_classes]
-            test_labels_arr = dtcr.y_test       # [n_test, n_classes] one-hot
+            dtcr._train(write=covariate_adjust, batch_seed=None, iteration=test_fold)
 
             id_to_row = {
                 row['specimen_label']: row
@@ -497,26 +493,108 @@ class DeepTCREvaluator:
             fold_probs = []
             fold_labels = []
 
-            for fname, pred_vec, label_vec in zip(
-                    test_sample_names, test_preds, test_labels_arr):
-                specimen = fname  # Load_Data stores names without .tsv extension
-                if specimen not in id_to_row:
-                    continue
-                row = id_to_row[specimen]
-                score = float(pred_vec[disease_class_idx])
-                true_label = int(row['label'])
-                fold_probs.append(score)
-                fold_labels.append(true_label)
-                all_test_rows.append({
-                    'participant_label': row[participant_col],
-                    'specimen_label': specimen,
-                    'disease_label': true_label,
-                    'disease_label_str': row[disease_col],
-                    'method': 'DeepTCR',
-                    'disease_model': target_disease,
-                    'model_score': score,
-                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                })
+            if covariate_adjust:
+                # ----------------------------------------------------------
+                # Covariate-adjusted prediction via Sample_Features embeddings
+                # ----------------------------------------------------------
+                dtcr.Sample_Features(set='all')
+                sf = dtcr.sample_features  # DataFrame indexed by specimen label
+
+                tv_specimen_names = np.concatenate([dtcr.train[0], dtcr.valid[0]])
+                tv_labels_oh = np.concatenate([dtcr.train[1], dtcr.valid[1]], axis=0)
+                tv_labels_bin = (tv_labels_oh.argmax(axis=1) == disease_class_idx).astype(int)
+
+                test_specimen_names = dtcr.test[0]
+                test_labels_bin = (dtcr.y_test.argmax(axis=1) == disease_class_idx).astype(int)
+
+                meta_idx = metadata.set_index('specimen_label')
+
+                def _has_demo(specimen):
+                    if specimen not in meta_idx.index or specimen not in sf.index:
+                        return False
+                    row = meta_idx.loc[specimen]
+                    return (
+                        pd.notna(row.get('age')) and
+                        pd.notna(row.get('sex')) and
+                        pd.notna(row.get('ancestry')) and
+                        str(row.get('ancestry', '')).strip() != ''
+                    )
+
+                tv_mask = np.array([_has_demo(s) for s in tv_specimen_names])
+                test_mask = np.array([_has_demo(s) for s in test_specimen_names])
+
+                tv_spec = tv_specimen_names[tv_mask]
+                tv_lbl = tv_labels_bin[tv_mask]
+                test_spec = test_specimen_names[test_mask]
+                test_lbl = test_labels_bin[test_mask]
+
+                print(f"  Covariate adjust: {len(tv_spec)} train/val, "
+                      f"{len(test_spec)} test samples with complete demographics.")
+
+                X_tv = sf.loc[tv_spec].values.astype(float)
+                X_test_emb = sf.loc[test_spec].values.astype(float)
+                tv_meta = meta_idx.loc[tv_spec]
+                test_meta = meta_idx.loc[test_spec]
+
+                residualizer = CovariateResidualizer()
+                X_tv_res = residualizer.fit_transform(tv_meta, X_tv)
+                X_test_res = residualizer.transform(test_meta, X_test_emb)
+
+                scaler = StandardScaler()
+                X_tv_sc = scaler.fit_transform(X_tv_res)
+                X_test_sc = scaler.transform(X_test_res)
+
+                clf = LogisticRegression(C=1.0, penalty='l1', solver='liblinear', max_iter=1000)
+                clf.fit(X_tv_sc, tv_lbl)
+                test_probs_cov = clf.predict_proba(X_test_sc)[:, 1]
+
+                fold_probs = test_probs_cov.tolist()
+                fold_labels = test_lbl.tolist()
+
+                for specimen, score in zip(test_spec, test_probs_cov):
+                    if specimen not in id_to_row:
+                        continue
+                    row = id_to_row[specimen]
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': specimen,
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': 'DeepTCR_CovAdj',
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
+            else:
+                # ----------------------------------------------------------
+                # Standard DeepTCR prediction
+                # ----------------------------------------------------------
+                # dtcr.y_pred: shape [n_test, n_classes], same order as test[0]
+                # dtcr.test[0]: array of specimen labels (no file extension)
+                test_sample_names = dtcr.test[0]
+                test_preds = dtcr.y_pred            # [n_test, n_classes]
+                test_labels_arr = dtcr.y_test       # [n_test, n_classes] one-hot
+
+                for fname, pred_vec, label_vec in zip(
+                        test_sample_names, test_preds, test_labels_arr):
+                    specimen = fname  # Load_Data stores names without .tsv extension
+                    if specimen not in id_to_row:
+                        continue
+                    row = id_to_row[specimen]
+                    score = float(pred_vec[disease_class_idx])
+                    true_label = int(row['label'])
+                    fold_probs.append(score)
+                    fold_labels.append(true_label)
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': specimen,
+                        'disease_label': true_label,
+                        'disease_label_str': row[disease_col],
+                        'method': 'DeepTCR',
+                        'disease_model': target_disease,
+                        'model_score': score,
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
 
             if len(fold_labels) < 2 or len(set(fold_labels)) < 2:
                 print(f"Warning: fold {test_fold} has <2 classes in test, skipping metrics.")

@@ -45,7 +45,11 @@ import importlib.util
 
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
+from sklearn.preprocessing import StandardScaler
+
+from utils.covariate_residualization import CovariateResidualizer
 
 # GIANA source files live in models/GIANA/
 _GIANA_DIR = os.path.join(
@@ -633,7 +637,8 @@ class GIANAEvaluator:
                               random_state=None,
                               tune_parameters=True,
                               p_value_candidates=None,
-                              allowed_participants=None):
+                              allowed_participants=None,
+                              covariate_adjust=False):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -689,6 +694,8 @@ class GIANAEvaluator:
         all_probs = []
         all_labels = []
         fold_results = []
+        fold_raw_scores = {}  # test_fold → {specimen → raw_giana_score}
+        fold_raw_meta = {}    # test_fold → test_data DataFrame
 
         for test_fold in range(n_folds):
             print(f"\n{'='*60}")
@@ -774,6 +781,10 @@ class GIANAEvaluator:
 
             print(f"Scored {len(scores)} test specimens.")
 
+            # Store raw scores for covariate_adjust cross-fold OLS (pass 2)
+            fold_raw_scores[test_fold] = scores
+            fold_raw_meta[test_fold] = test_data
+
             fold_probs = []
             fold_labels = []
 
@@ -824,6 +835,139 @@ class GIANAEvaluator:
             })
             all_probs.extend(fold_probs)
             all_labels.extend(fold_labels)
+
+        if covariate_adjust and fold_raw_scores:
+            # ----------------------------------------------------------
+            # Pass 2: Cross-fold OLS residualization
+            # For each fold k, use OTHER folds' test scores as OLS training data.
+            # This avoids circularity since GIANA training TCRs ARE the reference.
+            # ----------------------------------------------------------
+            print(f"\n{'='*60}")
+            print(f"[CovAdj] Cross-fold OLS residualization for {target_disease}")
+            print(f"{'='*60}")
+
+            def _drop_missing_demo(df):
+                for col in ['age', 'sex', 'ancestry']:
+                    if col not in df.columns:
+                        return df.iloc[:0]
+                df = df.dropna(subset=['age', 'sex', 'ancestry'])
+                return df[df['ancestry'].str.strip() != '']
+
+            cov_fold_results = []
+            cov_all_probs = []
+            cov_all_labels = []
+
+            for test_fold in range(n_folds):
+                if test_fold not in fold_raw_scores:
+                    continue
+                test_data_cov_raw = fold_raw_meta[test_fold]
+                test_scores_dict = fold_raw_scores[test_fold]
+
+                # Build "training" set from ALL other folds' test specimens
+                other_rows = []
+                for other_fold in range(n_folds):
+                    if other_fold == test_fold or other_fold not in fold_raw_scores:
+                        continue
+                    for _, row in fold_raw_meta[other_fold].iterrows():
+                        spec = row['specimen_label']
+                        r = row.to_dict()
+                        r['_giana_score'] = fold_raw_scores[other_fold].get(spec, 0.0)
+                        other_rows.append(r)
+
+                if not other_rows:
+                    print(f"  Fold {test_fold}: no other-fold data; skipping.")
+                    continue
+
+                other_df = pd.DataFrame(other_rows)
+                other_cov = _drop_missing_demo(other_df)
+
+                test_df_copy = test_data_cov_raw.copy()
+                test_df_copy['_giana_score'] = test_df_copy['specimen_label'].map(
+                    lambda s: test_scores_dict.get(s, 0.0)  # noqa: B023
+                )
+                test_cov = _drop_missing_demo(test_df_copy)
+
+                print(f"  Fold {test_fold}: {len(other_cov)} other-fold, "
+                      f"{len(test_cov)} test specimens with complete demographics.")
+
+                if len(other_cov) == 0 or len(test_cov) == 0:
+                    continue
+
+                X_other = other_cov['_giana_score'].values.reshape(-1, 1)
+                y_other = other_cov['label'].values
+                X_test_emb = test_cov['_giana_score'].values.reshape(-1, 1)
+                y_test_cov = test_cov['label'].values
+
+                residualizer = CovariateResidualizer()
+                X_other_res = residualizer.fit_transform(other_cov, X_other)
+                X_test_res = residualizer.transform(test_cov, X_test_emb)
+
+                scaler = StandardScaler()
+                X_other_sc = scaler.fit_transform(X_other_res)
+                X_test_sc = scaler.transform(X_test_res)
+
+                clf = LogisticRegression(C=1.0, penalty='l1', solver='liblinear', max_iter=1000)
+                clf.fit(X_other_sc, y_other)
+                test_probs_cov = clf.predict_proba(X_test_sc)[:, 1]
+
+                for (_, row), score in zip(test_cov.iterrows(), test_probs_cov):
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': 'GIANA_CovAdj',
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
+
+                if len(y_test_cov) >= 2 and len(set(y_test_cov.tolist())) >= 2:
+                    ca_auroc = roc_auc_score(y_test_cov, test_probs_cov)
+                    ca_aupr = average_precision_score(y_test_cov, test_probs_cov)
+                    ca_preds = (test_probs_cov >= 0.5).astype(int)
+                    ca_balanced_acc = balanced_accuracy_score(y_test_cov, ca_preds)
+                    ca_f1 = f1_score(y_test_cov, ca_preds)
+                    print(f"  [CovAdj] Test AUROC: {ca_auroc:.4f}, Test AUPR: {ca_aupr:.4f}, "
+                          f"Balanced Acc: {ca_balanced_acc:.4f}, F1: {ca_f1:.4f}")
+                    cov_fold_results.append({
+                        'fold': test_fold,
+                        'test_auroc': ca_auroc,
+                        'test_aupr': ca_aupr,
+                        'test_balanced_acc': ca_balanced_acc,
+                        'test_f1': ca_f1,
+                    })
+                    cov_all_probs.extend(test_probs_cov.tolist())
+                    cov_all_labels.extend(y_test_cov.tolist())
+
+            if len(cov_all_labels) >= 2 and len(set(cov_all_labels)) >= 2:
+                ca_arr = np.array(cov_all_probs)
+                ca_lbl = np.array(cov_all_labels)
+                print(f"\n{'='*60}")
+                print(f"OVERALL RESULTS [CovAdj]: {target_disease} vs Healthy")
+                print(f"{'='*60}")
+                if cov_fold_results:
+                    print(f"Mean Test AUROC:        "
+                          f"{np.mean([r['test_auroc'] for r in cov_fold_results]):.4f} ± "
+                          f"{np.std([r['test_auroc'] for r in cov_fold_results]):.4f}")
+                    print(f"Mean Test AUPR:         "
+                          f"{np.mean([r['test_aupr'] for r in cov_fold_results]):.4f} ± "
+                          f"{np.std([r['test_aupr'] for r in cov_fold_results]):.4f}")
+                    print(f"Mean Test Balanced Acc: "
+                          f"{np.mean([r['test_balanced_acc'] for r in cov_fold_results]):.4f} ± "
+                          f"{np.std([r['test_balanced_acc'] for r in cov_fold_results]):.4f}")
+                    print(f"Mean Test F1:           "
+                          f"{np.mean([r['test_f1'] for r in cov_fold_results]):.4f} ± "
+                          f"{np.std([r['test_f1'] for r in cov_fold_results]):.4f}")
+                ca_preds_all = (ca_arr >= 0.5).astype(int)
+                print(f"Overall AUROC (all folds combined):        "
+                      f"{roc_auc_score(ca_lbl, ca_arr):.4f}")
+                print(f"Overall AUPR  (all folds combined):        "
+                      f"{average_precision_score(ca_lbl, ca_arr):.4f}")
+                print(f"Overall Balanced Acc (all folds combined): "
+                      f"{balanced_accuracy_score(ca_lbl, ca_preds_all):.4f}")
+                print(f"Overall F1 (all folds combined):           "
+                      f"{f1_score(ca_lbl, ca_preds_all):.4f}")
 
         if len(all_labels) >= 2 and len(set(all_labels)) >= 2:
             all_probs_arr = np.array(all_probs)

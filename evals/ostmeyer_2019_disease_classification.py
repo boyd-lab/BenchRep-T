@@ -8,11 +8,14 @@ for evaluating the MIL_TCR_Classifier on disease classification tasks.
 import os
 import pandas as pd
 import numpy as np
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from models.ostmeyer_2019 import MIL_TCR_Classifier
+from utils.covariate_residualization import CovariateResidualizer
 
 
 class Ostmeyer2019Evaluator:
@@ -327,7 +330,8 @@ class Ostmeyer2019Evaluator:
                               n_folds=3, random_state=7,
                               tune_parameters=True,
                               abundance_method_candidates=None,
-                              allowed_participants=None):
+                              allowed_participants=None,
+                              covariate_adjust=False):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -451,14 +455,80 @@ class Ostmeyer2019Evaluator:
             print(f"\nFinal Validation AUROC: {val_auroc:.4f}, AUPR: {val_aupr:.4f}, "
                   f"Balanced Acc: {val_balanced_acc:.4f}, F1: {val_f1:.4f}")
 
-            # Evaluate on test set
-            test_probs = []
-            for file_path in tqdm(test_files, desc="Testing"):
-                result = self.model.predict_diagnosis(file_path)
-                test_probs.append(result['probability_positive'])
+            if covariate_adjust:
+                # ----------------------------------------------------------
+                # Score-level covariate adjustment
+                # ----------------------------------------------------------
+                def _drop_missing_demo(df):
+                    df = df.dropna(subset=['age', 'sex', 'ancestry'])
+                    return df[df['ancestry'].str.strip() != '']
 
-            test_probs = np.array(test_probs)
-            test_labels_arr = np.array(test_labels)
+                train_val_combined = pd.concat([train_data, val_data], ignore_index=True)
+                tv_cov = _drop_missing_demo(train_val_combined)
+                test_cov = _drop_missing_demo(test_data)
+                print(f"  Covariate adjust: {len(tv_cov)} train/val, "
+                      f"{len(test_cov)} test samples with complete demographics.")
+
+                tv_scores = []
+                for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train/val"):
+                    result = self.model.predict_diagnosis(fp)
+                    tv_scores.append(result['probability_positive'])
+                X_tv = np.array(tv_scores).reshape(-1, 1)
+                y_tv = tv_cov['label'].values
+
+                test_scores = []
+                for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test"):
+                    result = self.model.predict_diagnosis(fp)
+                    test_scores.append(result['probability_positive'])
+                X_test_emb = np.array(test_scores).reshape(-1, 1)
+
+                residualizer = CovariateResidualizer()
+                X_tv_res = residualizer.fit_transform(tv_cov, X_tv)
+                X_test_res = residualizer.transform(test_cov, X_test_emb)
+
+                scaler = StandardScaler()
+                X_tv_sc = scaler.fit_transform(X_tv_res)
+                X_test_sc = scaler.transform(X_test_res)
+
+                clf = LogisticRegression(C=1.0, penalty='l1', solver='liblinear', max_iter=1000)
+                clf.fit(X_tv_sc, y_tv)
+                test_probs = clf.predict_proba(X_test_sc)[:, 1]
+                test_labels_arr = test_cov['label'].values
+
+                for (_, row), score in zip(test_cov.iterrows(), test_probs):
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': 'Ostmeyer_2019_CovAdj',
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
+            else:
+                # ----------------------------------------------------------
+                # Standard Ostmeyer 2019 prediction
+                # ----------------------------------------------------------
+                test_probs = []
+                for file_path in tqdm(test_files, desc="Testing"):
+                    result = self.model.predict_diagnosis(file_path)
+                    test_probs.append(result['probability_positive'])
+
+                test_probs = np.array(test_probs)
+                test_labels_arr = np.array(test_labels)
+
+                for (_, row), score in zip(test_data.iterrows(), test_probs):
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': 'Ostmeyer_2019',
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
 
             # Compute AUROC, AUPR, Balanced Accuracy, and F1 for test set
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
@@ -468,19 +538,6 @@ class Ostmeyer2019Evaluator:
             test_f1 = f1_score(test_labels_arr, test_preds)
             print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
                   f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
-
-            # Build per-sample rows for output DataFrame
-            for (_, row), score in zip(test_data.iterrows(), test_probs):
-                all_test_rows.append({
-                    'participant_label': row[participant_col],
-                    'specimen_label': row['specimen_label'],
-                    'disease_label': int(row['label']),
-                    'disease_label_str': row[disease_col],
-                    'method': 'Ostmeyer_2019',
-                    'disease_model': target_disease,
-                    'model_score': float(score),
-                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                })
 
             fold_results.append({
                 'fold': test_fold,
@@ -494,7 +551,7 @@ class Ostmeyer2019Evaluator:
             })
 
             all_probs.extend(test_probs.tolist())
-            all_labels.extend(test_labels)
+            all_labels.extend(test_labels_arr.tolist())
 
             # Clear cache between folds to save memory
             self.model.clear_cache()

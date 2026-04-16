@@ -13,10 +13,13 @@ import os
 import argparse
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from models.ensemble_abmil import ABMIL
+from utils.covariate_residualization import CovariateResidualizer
 
 
 class ABMILEvaluator:
@@ -197,7 +200,8 @@ class ABMILEvaluator:
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7,
                               allowed_participants=None,
-                              require_demographics=False):
+                              require_demographics=False,
+                              covariate_adjust=False):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -218,6 +222,13 @@ class ABMILEvaluator:
             allowed_participants: Optional set of specimen labels to restrict to.
             require_demographics: If True, drop repertoires with missing
                                   demographic data (age, sex, ancestry).
+            covariate_adjust: If True, extract the trained model's attention-
+                weighted bag embedding (Z, shape M) for each repertoire, residualize
+                against demographic covariates (age, sex, ancestry) fitted on the
+                non-test fold only, then train an L1 logistic regression on the
+                residualized embeddings. Samples with missing demographics are
+                excluded. The ABMIL network is still trained on all non-test data.
+                Default: False.
 
         Returns:
             DataFrame with per-sample scores across all folds.
@@ -285,14 +296,84 @@ class ABMILEvaluator:
 
             train_result = self.model.train(train_files, train_labels)
 
-            # Evaluate on test set
-            test_probs = []
-            for fp in tqdm(test_files, desc="Testing"):
-                result = self.model.predict_diagnosis(fp)
-                test_probs.append(result['probability_positive'])
+            if covariate_adjust:
+                # ----------------------------------------------------------
+                # Covariate-adjusted prediction via bag embeddings
+                # ----------------------------------------------------------
+                def _drop_missing_demo(df):
+                    df = df.dropna(subset=['age', 'sex', 'ancestry'])
+                    return df[df['ancestry'].str.strip() != '']
 
-            test_probs = np.array(test_probs)
-            test_labels_arr = np.array(test_labels)
+                train_cov = _drop_missing_demo(train_data)
+                test_cov  = _drop_missing_demo(test_data)
+                print(f"  Covariate adjust: {len(train_cov)} train, "
+                      f"{len(test_cov)} test samples with complete demographics.")
+
+                # Extract attention-weighted bag embeddings (Z, shape M)
+                print("  Extracting train bag embeddings...")
+                X_train = np.stack([
+                    self.model.get_bag_embedding(fp)
+                    for fp in tqdm(train_cov['file_path'].tolist(), leave=False)
+                ])
+                print("  Extracting test bag embeddings...")
+                X_test = np.stack([
+                    self.model.get_bag_embedding(fp)
+                    for fp in tqdm(test_cov['file_path'].tolist(), leave=False)
+                ])
+                y_train_cov = train_cov['label'].values
+                y_test_cov  = test_cov['label'].values
+
+                # Residualize (fitted on train fold only)
+                residualizer = CovariateResidualizer()
+                X_train_res = residualizer.fit_transform(train_cov, X_train)
+                X_test_res  = residualizer.transform(test_cov,  X_test)
+
+                scaler = StandardScaler()
+                X_train_sc = scaler.fit_transform(X_train_res)
+                X_test_sc  = scaler.transform(X_test_res)
+
+                clf = LogisticRegression(
+                    C=1.0, penalty='l1', solver='liblinear', max_iter=1000
+                )
+                clf.fit(X_train_sc, y_train_cov)
+                test_probs      = clf.predict_proba(X_test_sc)[:, 1]
+                test_labels_arr = y_test_cov
+
+                method_name = 'ABMIL_CovAdj'
+                for (_, row), score in zip(test_cov.iterrows(), test_probs):
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': method_name,
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
+            else:
+                # ----------------------------------------------------------
+                # Standard ABMIL prediction
+                # ----------------------------------------------------------
+                raw_probs = []
+                for fp in tqdm(test_files, desc="Testing"):
+                    result = self.model.predict_diagnosis(fp)
+                    raw_probs.append(result['probability_positive'])
+
+                test_probs      = np.array(raw_probs)
+                test_labels_arr = np.array(test_labels)
+
+                for (_, row), score in zip(test_data.iterrows(), test_probs):
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': 'ABMIL',
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
 
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
@@ -301,18 +382,6 @@ class ABMILEvaluator:
             test_f1 = f1_score(test_labels_arr, test_preds)
             print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
                   f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
-
-            for (_, row), score in zip(test_data.iterrows(), test_probs):
-                all_test_rows.append({
-                    'participant_label': row[participant_col],
-                    'specimen_label': row['specimen_label'],
-                    'disease_label': int(row['label']),
-                    'disease_label_str': row[disease_col],
-                    'method': 'ABMIL',
-                    'disease_model': target_disease,
-                    'model_score': float(score),
-                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                })
 
             fold_results.append({
                 'fold': test_fold,
@@ -324,7 +393,7 @@ class ABMILEvaluator:
                 'test_f1': test_f1,
             })
             all_probs.extend(test_probs.tolist())
-            all_labels.extend(test_labels)
+            all_labels.extend(test_labels_arr.tolist())
 
         all_probs_arr = np.array(all_probs)
         all_labels_arr = np.array(all_labels)

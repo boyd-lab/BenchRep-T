@@ -601,6 +601,34 @@ class ABMIL(_RepertoireBase):
 
         return {"best_val_loss": best_val_loss, "epochs_trained": epochs_trained}
 
+    def get_bag_embedding(self, file_path):
+        """Return the attention-weighted bag embedding (shape: (M,)) before the classifier.
+
+        Runs the trained encoder and gated-attention mechanism without applying
+        the final classification linear layer.  Use this to extract per-repertoire
+        representations for downstream residualization or linear probing.
+        """
+        if self.encoder is None or self.model is None:
+            raise RuntimeError("Model has not been trained yet.")
+
+        self.encoder.eval()
+        self.model.eval()
+
+        seq_arr, v_arr, j_arr = self._get_per_seq_arrays(file_path, apply_subsampling=False)
+        if seq_arr.shape[0] == 0:
+            return np.zeros(self.M, dtype=np.float32)
+
+        seq_t, v_t, j_t = self._to_tensors(seq_arr, v_arr, j_arr)
+        with torch.no_grad():
+            H = self.encoder(seq_t, v_t, j_t)              # (K, encoder.output_dim)
+            H_enc = self.model.encoder(H)                   # (K, M)
+            A = self.model.attention_w(
+                self.model.attention_V(H_enc) * self.model.attention_U(H_enc)
+            )                                               # (K, 1)
+            A = F.softmax(A.transpose(1, 0), dim=1)        # (1, K)
+            Z = torch.mm(A, H_enc)                         # (1, M)
+        return Z.squeeze(0).cpu().numpy()                   # (M,)
+
     def predict_diagnosis(self, file_path):
         """
         Predict disease probability for a single repertoire.

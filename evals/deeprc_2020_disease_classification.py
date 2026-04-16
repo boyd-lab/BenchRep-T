@@ -12,8 +12,12 @@ import argparse
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+from utils.covariate_residualization import CovariateResidualizer
 
 # Allow imports from models/DeepRC (no __init__.py there)
 _DEEPRC_MODELS_DIR = os.path.join(
@@ -191,6 +195,24 @@ class DeepRC2020Evaluator:
                 all_ids.extend(sample_ids)
         return all_ids, np.array(all_probs)
 
+    def _get_bag_embeddings(self, model, dataloader):
+        """Return (sample_ids, embeddings) using forward_embedding() instead of output_nn."""
+        model.eval()
+        all_ids = []
+        all_embs = []
+        with torch.no_grad():
+            for targets, inputs, seq_lens, counts, sample_ids in dataloader:
+                targets, inputs, seq_lens, n_seqs = model.reduce_and_stack_minibatch(
+                    targets, inputs, seq_lens, counts)
+                embs = model.forward_embedding(
+                    inputs_flat=inputs,
+                    sequence_lengths_flat=seq_lens,
+                    n_sequences_per_bag=n_seqs,
+                )
+                all_embs.append(embs.cpu().numpy())
+                all_ids.extend(sample_ids)
+        return all_ids, np.vstack(all_embs)
+
     # ------------------------------------------------------------------
     # Cross-validation
     # ------------------------------------------------------------------
@@ -205,7 +227,8 @@ class DeepRC2020Evaluator:
                               tune_parameters=True,
                               p_value_candidates=None,
                               allowed_participants=None,
-                              raw_file_cache=None):
+                              raw_file_cache=None,
+                              covariate_adjust=False):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -230,6 +253,11 @@ class DeepRC2020Evaluator:
             raw_file_cache: Optional shared dict for caching raw file contents
                 across folds; pass the same dict to all run_cross_validation calls
                 to avoid redundant disk reads across repeats.
+            covariate_adjust: If True, extract the trained model's attention-weighted
+                bag embedding for each repertoire, residualize against demographic
+                covariates (age, sex, ancestry) fitted on the non-test fold only,
+                then train an L1 logistic regression on the residualized embeddings.
+                Samples with missing demographics are excluded. Default: False.
 
         Returns:
             pd.DataFrame with per-sample scores across all folds.
@@ -308,8 +336,88 @@ class DeepRC2020Evaluator:
                 results_directory=fold_results_dir,
             )
 
-            test_ids, test_probs = self._predict_proba(model, testset_eval)
-            test_labels_arr = np.array(test_data['label'].tolist())
+            if covariate_adjust:
+                # ----------------------------------------------------------
+                # Covariate-adjusted prediction via bag embeddings
+                # ----------------------------------------------------------
+                # Filter to samples with complete demographics
+                def _drop_missing_demo(df):
+                    df = df.dropna(subset=['age', 'sex', 'ancestry'])
+                    return df[df['ancestry'].str.strip() != '']
+
+                tv_cov = _drop_missing_demo(train_val_data)
+                ts_cov = _drop_missing_demo(test_data)
+                print(f"  Covariate adjust: {len(tv_cov)} non-test, "
+                      f"{len(ts_cov)} test samples with complete demographics.")
+
+                # Extract bag embeddings (attention-weighted sum before output_nn)
+                tr_ids, tr_embs = self._get_bag_embeddings(model, trainingset_eval)
+                vl_ids, vl_embs = self._get_bag_embeddings(model, validationset_eval)
+                ts_ids, ts_embs = self._get_bag_embeddings(model, testset_eval)
+
+                # Build specimen→embedding dicts and align with covariate-complete metadata
+                tv_emb_map = {sid: emb
+                               for sid, emb in zip(tr_ids + vl_ids,
+                                                   np.vstack([tr_embs, vl_embs]))}
+                ts_emb_map = {sid: emb for sid, emb in zip(ts_ids, ts_embs)}
+
+                tv_cov = tv_cov[tv_cov['specimen_label'].isin(tv_emb_map)].copy()
+                ts_cov = ts_cov[ts_cov['specimen_label'].isin(ts_emb_map)].copy()
+
+                X_tv = np.stack([tv_emb_map[s] for s in tv_cov['specimen_label']])
+                X_ts = np.stack([ts_emb_map[s] for s in ts_cov['specimen_label']])
+                y_tv = tv_cov['label'].values
+                y_ts = ts_cov['label'].values
+
+                # Residualize (residualizer fitted on non-test data only)
+                residualizer = CovariateResidualizer()
+                X_tv_res = residualizer.fit_transform(tv_cov, X_tv)
+                X_ts_res = residualizer.transform(ts_cov, X_ts)
+
+                scaler = StandardScaler()
+                X_tv_sc = scaler.fit_transform(X_tv_res)
+                X_ts_sc = scaler.transform(X_ts_res)
+
+                clf = LogisticRegression(
+                    C=1.0, penalty='l1', solver='liblinear', max_iter=1000
+                )
+                clf.fit(X_tv_sc, y_tv)
+                test_probs = clf.predict_proba(X_ts_sc)[:, 1]
+                test_labels_arr = y_ts
+
+                method_name = 'DeepRC_2020_CovAdj'
+                for (_, row), score in zip(ts_cov.iterrows(), test_probs):
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': method_name,
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
+            else:
+                # ----------------------------------------------------------
+                # Standard DeepRC prediction
+                # ----------------------------------------------------------
+                test_ids, test_probs = self._predict_proba(model, testset_eval)
+                test_labels_arr = np.array(test_data['label'].tolist())
+
+                id_to_row = {row['specimen_label']: row
+                             for _, row in test_data.iterrows()}
+                for sid, score in zip(test_ids, test_probs):
+                    row = id_to_row[sid]
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': 'DeepRC_2020',
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
 
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr  = average_precision_score(test_labels_arr, test_probs)
@@ -318,21 +426,6 @@ class DeepRC2020Evaluator:
             test_f1 = f1_score(test_labels_arr, test_preds)
             print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
                   f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
-
-            id_to_row = {row['specimen_label']: row
-                         for _, row in test_data.iterrows()}
-            for sid, score in zip(test_ids, test_probs):
-                row = id_to_row[sid]
-                all_test_rows.append({
-                    'participant_label': row[participant_col],
-                    'specimen_label': row['specimen_label'],
-                    'disease_label': int(row['label']),
-                    'disease_label_str': row[disease_col],
-                    'method': 'DeepRC_2020',
-                    'disease_model': target_disease,
-                    'model_score': float(score),
-                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                })
 
             fold_results.append({
                 'fold': test_fold,
