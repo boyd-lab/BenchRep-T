@@ -12,12 +12,10 @@ import argparse
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 
-from utils.covariate_residualization import CovariateResidualizer
+from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 
 # Allow imports from models/DeepRC (no __init__.py there)
 _DEEPRC_MODELS_DIR = os.path.join(
@@ -340,13 +338,8 @@ class DeepRC2020Evaluator:
                 # ----------------------------------------------------------
                 # Covariate-adjusted prediction via bag embeddings
                 # ----------------------------------------------------------
-                # Filter to samples with complete demographics
-                def _drop_missing_demo(df):
-                    df = df.dropna(subset=['age', 'sex', 'ancestry'])
-                    return df[df['ancestry'].str.strip() != '']
-
-                tv_cov = _drop_missing_demo(train_val_data)
-                ts_cov = _drop_missing_demo(test_data)
+                tv_cov = filter_complete_demographics(train_val_data)
+                ts_cov = filter_complete_demographics(test_data)
                 print(f"  Covariate adjust: {len(tv_cov)} non-test, "
                       f"{len(ts_cov)} test samples with complete demographics.")
 
@@ -369,20 +362,7 @@ class DeepRC2020Evaluator:
                 y_tv = tv_cov['label'].values
                 y_ts = ts_cov['label'].values
 
-                # Residualize (residualizer fitted on non-test data only)
-                residualizer = CovariateResidualizer()
-                X_tv_res = residualizer.fit_transform(tv_cov, X_tv)
-                X_ts_res = residualizer.transform(ts_cov, X_ts)
-
-                scaler = StandardScaler()
-                X_tv_sc = scaler.fit_transform(X_tv_res)
-                X_ts_sc = scaler.transform(X_ts_res)
-
-                clf = LogisticRegression(
-                    C=1.0, penalty='l1', solver='liblinear', max_iter=1000
-                )
-                clf.fit(X_tv_sc, y_tv)
-                test_probs = clf.predict_proba(X_ts_sc)[:, 1]
+                test_probs = covariate_adjusted_predict(X_tv, tv_cov, y_tv, X_ts, ts_cov)
                 test_labels_arr = y_ts
 
                 method_name = 'DeepRC_2020_CovAdj'

@@ -8,14 +8,12 @@ for evaluating the CMV_Immunosequencing_Model on disease classification tasks.
 import os
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
-from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from models.emerson_2017 import CMV_Immunosequencing_Model
-from utils.covariate_residualization import CovariateResidualizer
+from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 
 
 class Emerson2017Evaluator:
@@ -517,40 +515,26 @@ class Emerson2017Evaluator:
                 # ----------------------------------------------------------
                 # Score-level covariate adjustment
                 # ----------------------------------------------------------
-                def _drop_missing_demo(df):
-                    df = df.dropna(subset=['age', 'sex', 'ancestry'])
-                    return df[df['ancestry'].str.strip() != '']
-
                 train_val_combined = pd.concat([train_data, val_data], ignore_index=True)
-                tv_cov = _drop_missing_demo(train_val_combined)
-                test_cov = _drop_missing_demo(test_data)
+                tv_cov = filter_complete_demographics(train_val_combined)
+                test_cov = filter_complete_demographics(test_data)
                 print(f"  Covariate adjust: {len(tv_cov)} train/val, "
                       f"{len(test_cov)} test samples with complete demographics.")
 
-                tv_scores = []
-                for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train/val"):
-                    result = self.model.predict_diagnosis(fp)
-                    tv_scores.append(result['probability_positive'])
+                tv_scores = [
+                    self.model.predict_diagnosis(fp)['probability_positive']
+                    for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train/val")
+                ]
+                test_scores = [
+                    self.model.predict_diagnosis(fp)['probability_positive']
+                    for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test")
+                ]
                 X_tv = np.array(tv_scores).reshape(-1, 1)
-                y_tv = tv_cov['label'].values
-
-                test_scores = []
-                for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test"):
-                    result = self.model.predict_diagnosis(fp)
-                    test_scores.append(result['probability_positive'])
                 X_test_emb = np.array(test_scores).reshape(-1, 1)
 
-                residualizer = CovariateResidualizer()
-                X_tv_res = residualizer.fit_transform(tv_cov, X_tv)
-                X_test_res = residualizer.transform(test_cov, X_test_emb)
-
-                scaler = StandardScaler()
-                X_tv_sc = scaler.fit_transform(X_tv_res)
-                X_test_sc = scaler.transform(X_test_res)
-
-                clf = LogisticRegression(C=1.0, penalty='l1', solver='liblinear', max_iter=1000)
-                clf.fit(X_tv_sc, y_tv)
-                test_probs = clf.predict_proba(X_test_sc)[:, 1]
+                test_probs = covariate_adjusted_predict(
+                    X_tv, tv_cov, tv_cov['label'].values, X_test_emb, test_cov
+                )
                 test_labels_arr = test_cov['label'].values
 
                 for (_, row), score in zip(test_cov.iterrows(), test_probs):

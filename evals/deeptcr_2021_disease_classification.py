@@ -11,10 +11,8 @@ import argparse
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
-from sklearn.preprocessing import StandardScaler
 
 # All DeepTCR sources live in a flat models/DeepTCR/ directory.
 _DEEPTCR_DIR = os.path.join(
@@ -28,7 +26,7 @@ from utils_s import Get_Train_Valid_Test_KFold
 from data_processing import Process_Seq
 from Layers import make_test_pred_object
 
-from utils.covariate_residualization import CovariateResidualizer
+from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 
 
 class DeepTCREvaluator:
@@ -536,17 +534,9 @@ class DeepTCREvaluator:
                 tv_meta = meta_idx.loc[tv_spec]
                 test_meta = meta_idx.loc[test_spec]
 
-                residualizer = CovariateResidualizer()
-                X_tv_res = residualizer.fit_transform(tv_meta, X_tv)
-                X_test_res = residualizer.transform(test_meta, X_test_emb)
-
-                scaler = StandardScaler()
-                X_tv_sc = scaler.fit_transform(X_tv_res)
-                X_test_sc = scaler.transform(X_test_res)
-
-                clf = LogisticRegression(C=1.0, penalty='l1', solver='liblinear', max_iter=1000)
-                clf.fit(X_tv_sc, tv_lbl)
-                test_probs_cov = clf.predict_proba(X_test_sc)[:, 1]
+                test_probs_cov = covariate_adjusted_predict(
+                    X_tv, tv_meta, tv_lbl, X_test_emb, test_meta
+                )
 
                 fold_probs = test_probs_cov.tolist()
                 fold_labels = test_lbl.tolist()

@@ -45,11 +45,9 @@ import importlib.util
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
-from sklearn.preprocessing import StandardScaler
 
-from utils.covariate_residualization import CovariateResidualizer
+from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 
 # GIANA source files live in models/GIANA/
 _GIANA_DIR = os.path.join(
@@ -846,13 +844,6 @@ class GIANAEvaluator:
             print(f"[CovAdj] Cross-fold OLS residualization for {target_disease}")
             print(f"{'='*60}")
 
-            def _drop_missing_demo(df):
-                for col in ['age', 'sex', 'ancestry']:
-                    if col not in df.columns:
-                        return df.iloc[:0]
-                df = df.dropna(subset=['age', 'sex', 'ancestry'])
-                return df[df['ancestry'].str.strip() != '']
-
             cov_fold_results = []
             cov_all_probs = []
             cov_all_labels = []
@@ -879,13 +870,13 @@ class GIANAEvaluator:
                     continue
 
                 other_df = pd.DataFrame(other_rows)
-                other_cov = _drop_missing_demo(other_df)
+                other_cov = filter_complete_demographics(other_df)
 
                 test_df_copy = test_data_cov_raw.copy()
                 test_df_copy['_giana_score'] = test_df_copy['specimen_label'].map(
                     lambda s: test_scores_dict.get(s, 0.0)  # noqa: B023
                 )
-                test_cov = _drop_missing_demo(test_df_copy)
+                test_cov = filter_complete_demographics(test_df_copy)
 
                 print(f"  Fold {test_fold}: {len(other_cov)} other-fold, "
                       f"{len(test_cov)} test specimens with complete demographics.")
@@ -898,17 +889,9 @@ class GIANAEvaluator:
                 X_test_emb = test_cov['_giana_score'].values.reshape(-1, 1)
                 y_test_cov = test_cov['label'].values
 
-                residualizer = CovariateResidualizer()
-                X_other_res = residualizer.fit_transform(other_cov, X_other)
-                X_test_res = residualizer.transform(test_cov, X_test_emb)
-
-                scaler = StandardScaler()
-                X_other_sc = scaler.fit_transform(X_other_res)
-                X_test_sc = scaler.transform(X_test_res)
-
-                clf = LogisticRegression(C=1.0, penalty='l1', solver='liblinear', max_iter=1000)
-                clf.fit(X_other_sc, y_other)
-                test_probs_cov = clf.predict_proba(X_test_sc)[:, 1]
+                test_probs_cov = covariate_adjusted_predict(
+                    X_other, other_cov, y_other, X_test_emb, test_cov
+                )
 
                 for (_, row), score in zip(test_cov.iterrows(), test_probs_cov):
                     all_test_rows.append({

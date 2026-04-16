@@ -13,13 +13,11 @@ import os
 import argparse
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
-from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from models.ensemble_abmil import ABMIL
-from utils.covariate_residualization import CovariateResidualizer
+from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 
 
 class ABMILEvaluator:
@@ -300,16 +298,11 @@ class ABMILEvaluator:
                 # ----------------------------------------------------------
                 # Covariate-adjusted prediction via bag embeddings
                 # ----------------------------------------------------------
-                def _drop_missing_demo(df):
-                    df = df.dropna(subset=['age', 'sex', 'ancestry'])
-                    return df[df['ancestry'].str.strip() != '']
-
-                train_cov = _drop_missing_demo(train_data)
-                test_cov  = _drop_missing_demo(test_data)
+                train_cov = filter_complete_demographics(train_data)
+                test_cov  = filter_complete_demographics(test_data)
                 print(f"  Covariate adjust: {len(train_cov)} train, "
                       f"{len(test_cov)} test samples with complete demographics.")
 
-                # Extract attention-weighted bag embeddings (Z, shape M)
                 print("  Extracting train bag embeddings...")
                 X_train = np.stack([
                     self.model.get_bag_embedding(fp)
@@ -320,24 +313,12 @@ class ABMILEvaluator:
                     self.model.get_bag_embedding(fp)
                     for fp in tqdm(test_cov['file_path'].tolist(), leave=False)
                 ])
-                y_train_cov = train_cov['label'].values
-                y_test_cov  = test_cov['label'].values
 
-                # Residualize (fitted on train fold only)
-                residualizer = CovariateResidualizer()
-                X_train_res = residualizer.fit_transform(train_cov, X_train)
-                X_test_res  = residualizer.transform(test_cov,  X_test)
-
-                scaler = StandardScaler()
-                X_train_sc = scaler.fit_transform(X_train_res)
-                X_test_sc  = scaler.transform(X_test_res)
-
-                clf = LogisticRegression(
-                    C=1.0, penalty='l1', solver='liblinear', max_iter=1000
+                test_probs      = covariate_adjusted_predict(
+                    X_train, train_cov, train_cov['label'].values,
+                    X_test,  test_cov,
                 )
-                clf.fit(X_train_sc, y_train_cov)
-                test_probs      = clf.predict_proba(X_test_sc)[:, 1]
-                test_labels_arr = y_test_cov
+                test_labels_arr = test_cov['label'].values
 
                 method_name = 'ABMIL_CovAdj'
                 for (_, row), score in zip(test_cov.iterrows(), test_probs):

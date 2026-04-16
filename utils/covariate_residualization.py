@@ -11,10 +11,18 @@ Typical usage (inside a CV loop):
     residualizer = CovariateResidualizer()
     X_train_res = residualizer.fit_transform(train_metadata, X_train)
     X_test_res  = residualizer.transform(test_metadata,  X_test)
+
+Or use the high-level helper that handles everything in one call:
+
+    test_probs = covariate_adjusted_predict(
+        X_train, train_meta, y_train, X_test, test_meta
+    )
 """
 
 import numpy as np
 import scipy.sparse as sp
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
 
 def encode_covariates(metadata, ancestry_categories=None):
@@ -143,3 +151,43 @@ class CovariateResidualizer:
         if sp.issparse(X):
             return np.asarray(X.todense())
         return np.asarray(X)
+
+
+# ---------------------------------------------------------------------------
+# High-level helpers shared by all eval scripts
+# ---------------------------------------------------------------------------
+
+def filter_complete_demographics(df):
+    """Drop rows with missing or blank age, sex, or ancestry."""
+    df = df.dropna(subset=['age', 'sex', 'ancestry'])
+    return df[df['ancestry'].str.strip() != '']
+
+
+def covariate_adjusted_predict(X_train, train_meta, y_train, X_test, test_meta):
+    """
+    Residualize features against demographics, then classify with L1 logistic regression.
+
+    Fits OLS residualization and StandardScaler on training data only; applies
+    both to test data using the same coefficients.
+
+    Args:
+        X_train: ndarray or sparse matrix of shape (n_train, n_features).
+        train_meta: DataFrame with 'age', 'sex', 'ancestry' columns (n_train rows).
+        y_train: array-like of binary labels (n_train,).
+        X_test: ndarray or sparse matrix of shape (n_test, n_features).
+        test_meta: DataFrame with 'age', 'sex', 'ancestry' columns (n_test rows).
+
+    Returns:
+        ndarray of shape (n_test,): predicted positive-class probabilities.
+    """
+    residualizer = CovariateResidualizer()
+    X_train_res = residualizer.fit_transform(train_meta, X_train)
+    X_test_res = residualizer.transform(test_meta, X_test)
+
+    scaler = StandardScaler()
+    X_train_sc = scaler.fit_transform(X_train_res)
+    X_test_sc = scaler.transform(X_test_res)
+
+    clf = LogisticRegression(C=1.0, penalty='l1', solver='liblinear', max_iter=1000)
+    clf.fit(X_train_sc, y_train)
+    return clf.predict_proba(X_test_sc)[:, 1]
