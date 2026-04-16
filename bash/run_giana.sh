@@ -14,7 +14,8 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-GPUS=(0 1 2 3)
+GPUS=(0 3)
+JOBS_PER_GPU=3  # concurrent jobs sharing each GPU
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
@@ -33,7 +34,9 @@ fifo=$(mktemp -u)
 mkfifo "$fifo"
 exec 3<>"$fifo"
 rm -f "$fifo"
-for g in "${GPUS[@]}"; do echo "$g" >&3; done
+for g in "${GPUS[@]}"; do
+  for _ in $(seq 1 "$JOBS_PER_GPU"); do echo "$g" >&3; done
+done
 
 cd "${REPO_ROOT}"
 

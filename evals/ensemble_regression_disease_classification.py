@@ -13,6 +13,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, balanced_acc
 from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
+from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 
 
 SUBMODEL_METHOD_NAMES = {
@@ -252,7 +253,7 @@ class EnsembleRegressionEvaluator:
 
     def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
                              require_demographics=False,
-                             adjust_demographics=False):
+                             adjust_distribution_by_demographics=False):
         """
         Filter metadata to target disease vs. Healthy/Background and add binary labels.
 
@@ -262,7 +263,7 @@ class EnsembleRegressionEvaluator:
             disease_col: Column with disease labels.
             require_demographics: If True, drop rows with missing age, sex,
                 or ancestry so the subset matches the demographic baseline.
-            adjust_demographics: If True, apply the per-disease demographic
+            adjust_distribution_by_demographics: If True, apply the per-disease demographic
                 filter from ``DEMOGRAPHIC_ADJUSTMENTS`` to both the disease
                 cohort and the Healthy/Background controls.
 
@@ -273,7 +274,7 @@ class EnsembleRegressionEvaluator:
         filtered = metadata[mask].copy()
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
 
-        if adjust_demographics:
+        if adjust_distribution_by_demographics:
             filtered = self._apply_demographic_adjustment(filtered, target_disease)
 
         if require_demographics:
@@ -334,7 +335,8 @@ class EnsembleRegressionEvaluator:
                               tune_parameters=True,
                               allowed_participants=None,
                               require_demographics=False,
-                              adjust_demographics=False):
+                              adjust_distribution_by_demographics=False,
+                              covariate_adjust=False):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -360,7 +362,7 @@ class EnsembleRegressionEvaluator:
             require_demographics: If True, drop repertoires with missing
                                   demographic data (age, sex, ancestry) so the
                                   subset matches the demographic baseline.
-            adjust_demographics: If True, apply the per-disease demographic
+            adjust_distribution_by_demographics: If True, apply the per-disease demographic
                                  filter from ``DEMOGRAPHIC_ADJUSTMENTS`` to
                                  both the disease and healthy cohorts to make
                                  the comparison fairer.
@@ -371,7 +373,7 @@ class EnsembleRegressionEvaluator:
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col,
                                                 require_demographics=require_demographics,
-                                                adjust_demographics=adjust_demographics)
+                                                adjust_distribution_by_demographics=adjust_distribution_by_demographics)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
@@ -419,14 +421,64 @@ class EnsembleRegressionEvaluator:
 
             train_result = self.model.train(train_files, train_labels)
 
-            # Evaluate on test set
-            test_probs = []
-            for fp in tqdm(test_files, desc="Testing"):
-                result = self.model.predict_diagnosis(fp)
-                test_probs.append(result['probability_positive'])
+            if covariate_adjust:
+                # ----------------------------------------------------------
+                # Score-level covariate adjustment
+                # ----------------------------------------------------------
+                tv_cov = filter_complete_demographics(train_data)
+                test_cov = filter_complete_demographics(test_data)
+                print(f"  Covariate adjust: {len(tv_cov)} train, "
+                      f"{len(test_cov)} test samples with complete demographics.")
 
-            test_probs = np.array(test_probs)
-            test_labels_arr = np.array(test_labels)
+                tv_scores = [
+                    self.model.predict_diagnosis(fp)['probability_positive']
+                    for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train")
+                ]
+                test_scores = [
+                    self.model.predict_diagnosis(fp)['probability_positive']
+                    for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test")
+                ]
+                X_tv = np.array(tv_scores).reshape(-1, 1)
+                X_test_emb = np.array(test_scores).reshape(-1, 1)
+
+                test_probs = covariate_adjusted_predict(
+                    X_tv, tv_cov, tv_cov['label'].values, X_test_emb, test_cov
+                )
+                test_labels_arr = test_cov['label'].values
+
+                method_name = SUBMODEL_METHOD_NAMES[self.submodel] + '_CovAdj'
+                for (_, row), score in zip(test_cov.iterrows(), test_probs):
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': method_name,
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
+            else:
+                # ----------------------------------------------------------
+                # Standard prediction
+                # ----------------------------------------------------------
+                test_probs = np.array([
+                    self.model.predict_diagnosis(fp)['probability_positive']
+                    for fp in tqdm(test_files, desc="Testing")
+                ])
+                test_labels_arr = np.array(test_labels)
+
+                for (_, row), score in zip(test_data.iterrows(), test_probs):
+                    all_test_rows.append({
+                        'participant_label': row[participant_col],
+                        'specimen_label': row['specimen_label'],
+                        'disease_label': int(row['label']),
+                        'disease_label_str': row[disease_col],
+                        'method': SUBMODEL_METHOD_NAMES[self.submodel],
+                        'disease_model': target_disease,
+                        'model_score': float(score),
+                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                    })
 
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
@@ -435,19 +487,6 @@ class EnsembleRegressionEvaluator:
             test_f1 = f1_score(test_labels_arr, test_preds)
             print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
                   f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
-
-            # Build per-sample rows for output DataFrame
-            for (_, row), score in zip(test_data.iterrows(), test_probs):
-                all_test_rows.append({
-                    'participant_label': row[participant_col],
-                    'specimen_label': row['specimen_label'],
-                    'disease_label': int(row['label']),
-                    'disease_label_str': row[disease_col],
-                    'method': SUBMODEL_METHOD_NAMES[self.submodel],
-                    'disease_model': target_disease,
-                    'model_score': float(score),
-                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                })
 
             fold_results.append({
                 'fold': test_fold,
@@ -461,7 +500,7 @@ class EnsembleRegressionEvaluator:
                 'test_f1': test_f1,
             })
             all_probs.extend(test_probs.tolist())
-            all_labels.extend(test_labels)
+            all_labels.extend(test_labels_arr.tolist())
 
         # Overall metrics (all test predictions concatenated across folds)
         all_probs_arr = np.array(all_probs)
@@ -516,14 +555,15 @@ if __name__ == "__main__":
     parser.add_argument('--require_demographics', action='store_true',
                         help='Drop repertoires with missing demographic data '
                              '(age, sex, ancestry) to match demographic baseline subset')
-    parser.add_argument('--adjust_demographics', action='store_true',
-                        help='Apply per-disease demographic adjustment for '
-                             'fair comparison. HIV: filter both cohorts to '
-                             'African ancestry. Lupus/T1D/Influenza: keep the '
-                             'disease cohort unchanged and subsample '
-                             'Healthy/Background so its age distribution '
-                             '(10y bins) matches the disease cohort. '
-                             'Covid19 is left unadjusted.')
+    parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
+                        help='Apply per-disease cohort distribution adjustment for fair '
+                             'comparison. HIV: filter both cohorts to African ancestry. '
+                             'Lupus/T1D/Influenza: keep the disease cohort unchanged and '
+                             'subsample Healthy/Background so its age distribution (10y bins) '
+                             'matches the disease cohort. Covid19 is left unadjusted.')
+    parser.add_argument('--covariate_adjust', action='store_true',
+                        help='Residualize model scores against demographics (age, sex, ancestry) '
+                             'and train an L1 logistic regression head (requires complete demographics)')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
@@ -539,7 +579,8 @@ if __name__ == "__main__":
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         require_demographics=args.require_demographics,
-        adjust_demographics=args.adjust_demographics,
+        adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
+        covariate_adjust=args.covariate_adjust,
     )
 
     if args.output_csv:
