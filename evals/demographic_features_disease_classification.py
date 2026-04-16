@@ -10,7 +10,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
 
 
@@ -107,17 +107,24 @@ class DemographicFeaturesEvaluator:
             val_probs = model.predict_proba(X_val)[:, 1]
             val_auroc = roc_auc_score(y_val, val_probs)
             val_aupr = average_precision_score(y_val, val_probs)
+            val_preds = (val_probs >= 0.5).astype(int)
+            val_balanced_acc = balanced_accuracy_score(y_val, val_preds)
+            val_f1 = f1_score(y_val, val_preds)
             tuning_results.append({
                 'C': C,
                 'val_auroc': val_auroc,
-                'val_aupr': val_aupr
+                'val_aupr': val_aupr,
+                'val_balanced_acc': val_balanced_acc,
+                'val_f1': val_f1,
             })
-            print(f"  C={C}: Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}")
+            print(f"  C={C}: Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}, "
+                  f"Balanced Acc={val_balanced_acc:.4f}, F1={val_f1:.4f}")
 
         best = max(tuning_results, key=lambda x: x['val_auroc'])
         best_C = best['C']
         print(f"\nBest C: {best_C} "
-              f"(Val AUROC={best['val_auroc']:.4f}, Val AUPR={best['val_aupr']:.4f})")
+              f"(Val AUROC={best['val_auroc']:.4f}, Val AUPR={best['val_aupr']:.4f}, "
+              f"Balanced Acc={best['val_balanced_acc']:.4f}, F1={best['val_f1']:.4f})")
 
         # Retrain on train+val with best C
         X_combined = np.vstack([X_train, X_val])
@@ -130,6 +137,8 @@ class DemographicFeaturesEvaluator:
             'best_C': best_C,
             'best_val_auroc': best['val_auroc'],
             'best_val_aupr': best['val_aupr'],
+            'best_val_balanced_acc': best['val_balanced_acc'],
+            'best_val_f1': best['val_f1'],
         }
 
     def run_cross_validation(self, metadata_path, target_disease,
@@ -186,7 +195,11 @@ class DemographicFeaturesEvaluator:
             test_probs = model.predict_proba(X_test)[:, 1]
             test_auroc = roc_auc_score(y_test, test_probs)
             test_aupr = average_precision_score(y_test, test_probs)
-            print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
+            test_preds = (test_probs >= 0.5).astype(int)
+            test_balanced_acc = balanced_accuracy_score(y_test, test_preds)
+            test_f1 = f1_score(y_test, test_preds)
+            print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
+                  f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
 
             # Log model coefficients
             coefs = dict(zip(feature_names, model.coef_[0]))
@@ -215,6 +228,8 @@ class DemographicFeaturesEvaluator:
                 'val_aupr': tuning_result['best_val_aupr'],
                 'test_auroc': test_auroc,
                 'test_aupr': test_aupr,
+                'test_balanced_acc': test_balanced_acc,
+                'test_f1': test_f1,
                 'coefficients': coefs,
             })
             all_probs.extend(test_probs.tolist())
@@ -225,16 +240,25 @@ class DemographicFeaturesEvaluator:
         all_labels_arr = np.array(all_labels)
         overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
         overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
+        overall_preds = (all_probs_arr >= 0.5).astype(int)
+        overall_balanced_acc = balanced_accuracy_score(all_labels_arr, overall_preds)
+        overall_f1 = f1_score(all_labels_arr, overall_preds)
 
         print(f"\n{'='*60}")
         print(f"OVERALL CROSS-VALIDATION RESULTS: {target_disease} vs Healthy")
         print(f"{'='*60}")
         fold_aurocs = [r['test_auroc'] for r in fold_results]
         fold_auprs = [r['test_aupr'] for r in fold_results]
-        print(f"Mean Test AUROC: {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
-        print(f"Mean Test AUPR:  {np.mean(fold_auprs):.4f} ± {np.std(fold_auprs):.4f}")
-        print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
-        print(f"Overall AUPR  (all folds combined): {overall_aupr:.4f}")
+        fold_balanced_accs = [r['test_balanced_acc'] for r in fold_results]
+        fold_f1s = [r['test_f1'] for r in fold_results]
+        print(f"Mean Test AUROC:        {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
+        print(f"Mean Test AUPR:         {np.mean(fold_auprs):.4f} ± {np.std(fold_auprs):.4f}")
+        print(f"Mean Test Balanced Acc: {np.mean(fold_balanced_accs):.4f} ± {np.std(fold_balanced_accs):.4f}")
+        print(f"Mean Test F1:           {np.mean(fold_f1s):.4f} ± {np.std(fold_f1s):.4f}")
+        print(f"Overall AUROC (all folds combined):        {overall_auroc:.4f}")
+        print(f"Overall AUPR  (all folds combined):        {overall_aupr:.4f}")
+        print(f"Overall Balanced Acc (all folds combined): {overall_balanced_acc:.4f}")
+        print(f"Overall F1 (all folds combined):           {overall_f1:.4f}")
 
         print(f"\nBest C per fold:")
         for r in fold_results:

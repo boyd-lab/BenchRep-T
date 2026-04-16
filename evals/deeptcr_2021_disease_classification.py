@@ -12,7 +12,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 
 # All DeepTCR sources live in a flat models/DeepTCR/ directory.
 _DEEPTCR_DIR = os.path.join(
@@ -526,12 +526,18 @@ class DeepTCREvaluator:
 
             fold_auroc = roc_auc_score(fold_labels, fold_probs)
             fold_aupr = average_precision_score(fold_labels, fold_probs)
-            print(f"Test AUROC: {fold_auroc:.4f}, Test AUPR: {fold_aupr:.4f}")
+            fold_preds = (np.array(fold_probs) >= 0.5).astype(int)
+            fold_balanced_acc = balanced_accuracy_score(fold_labels, fold_preds)
+            fold_f1 = f1_score(fold_labels, fold_preds)
+            print(f"Test AUROC: {fold_auroc:.4f}, Test AUPR: {fold_aupr:.4f}, "
+                  f"Balanced Acc: {fold_balanced_acc:.4f}, F1: {fold_f1:.4f}")
 
             fold_results.append({
                 'fold': test_fold,
                 'test_auroc': fold_auroc,
                 'test_aupr': fold_aupr,
+                'test_balanced_acc': fold_balanced_acc,
+                'test_f1': fold_f1,
             })
             all_probs.extend(fold_probs)
             all_labels.extend(fold_labels)
@@ -541,6 +547,9 @@ class DeepTCREvaluator:
             all_labels_arr = np.array(all_labels)
             overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
             overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
+            overall_preds = (all_probs_arr >= 0.5).astype(int)
+            overall_balanced_acc = balanced_accuracy_score(all_labels_arr, overall_preds)
+            overall_f1 = f1_score(all_labels_arr, overall_preds)
 
             print(f"\n{'='*60}")
             print(f"OVERALL RESULTS: {target_disease} vs Healthy")
@@ -548,10 +557,16 @@ class DeepTCREvaluator:
             if fold_results:
                 fold_aurocs = [r['test_auroc'] for r in fold_results]
                 fold_auprs = [r['test_aupr'] for r in fold_results]
-                print(f"Mean Test AUROC: {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
-                print(f"Mean Test AUPR:  {np.mean(fold_auprs):.4f}  ± {np.std(fold_auprs):.4f}")
-            print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
-            print(f"Overall AUPR  (all folds combined): {overall_aupr:.4f}")
+                fold_balanced_accs = [r['test_balanced_acc'] for r in fold_results]
+                fold_f1s = [r['test_f1'] for r in fold_results]
+                print(f"Mean Test AUROC:        {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
+                print(f"Mean Test AUPR:         {np.mean(fold_auprs):.4f} ± {np.std(fold_auprs):.4f}")
+                print(f"Mean Test Balanced Acc: {np.mean(fold_balanced_accs):.4f} ± {np.std(fold_balanced_accs):.4f}")
+                print(f"Mean Test F1:           {np.mean(fold_f1s):.4f} ± {np.std(fold_f1s):.4f}")
+            print(f"Overall AUROC (all folds combined):        {overall_auroc:.4f}")
+            print(f"Overall AUPR  (all folds combined):        {overall_aupr:.4f}")
+            print(f"Overall Balanced Acc (all folds combined): {overall_balanced_acc:.4f}")
+            print(f"Overall F1 (all folds combined):           {overall_f1:.4f}")
 
         return pd.DataFrame(all_test_rows)
 

@@ -24,7 +24,7 @@ import os
 import time
 import numpy as np
 import pandas as pd
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 
 
 def create_evaluator(model_name, indices_map=None):
@@ -209,11 +209,16 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
 
             overall_auroc = roc_auc_score(scores_df['disease_label'], scores_df['model_score'])
             overall_aupr = average_precision_score(scores_df['disease_label'], scores_df['model_score'])
+            overall_preds = (scores_df['model_score'].values >= 0.5).astype(int)
+            overall_balanced_acc = balanced_accuracy_score(scores_df['disease_label'].values, overall_preds)
+            overall_f1 = f1_score(scores_df['disease_label'].values, overall_preds)
             all_results.append({
                 'depth': depth,
                 'repeat': repeat_idx,
                 'auroc': overall_auroc,
                 'aupr': overall_aupr,
+                'balanced_acc': overall_balanced_acc,
+                'f1': overall_f1,
                 'n_samples': len(scores_df),
                 'elapsed_seconds': round(elapsed, 2),
             })
@@ -244,18 +249,20 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
 
 def print_summary(results):
     """
-    Print a summary table of mean +/- stderr AUROC/AUPR per depth.
+    Print a summary table of mean +/- stderr AUROC/AUPR/Balanced Acc/F1 per depth.
 
     Args:
-        results: List of result dicts with 'depth', 'auroc', 'aupr' keys
+        results: List of result dicts with 'depth', 'auroc', 'aupr',
+                 'balanced_acc', 'f1' keys
     """
     results_df = pd.DataFrame(results)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'='*80}")
     print("SEQUENCING DEPTH EXPERIMENT SUMMARY")
-    print(f"{'='*60}")
-    print(f"{'Depth':>10s} | {'N':>3s} | {'AUROC':>18s} | {'AUPR':>18s}")
-    print(f"{'-'*10}-+-{'-'*3}-+-{'-'*18}-+-{'-'*18}")
+    print(f"{'='*80}")
+    print(f"{'Depth':>10s} | {'N':>3s} | {'AUROC':>18s} | {'AUPR':>18s} | "
+          f"{'Balanced Acc':>18s} | {'F1':>18s}")
+    print(f"{'-'*10}-+-{'-'*3}-+-{'-'*18}-+-{'-'*18}-+-{'-'*18}-+-{'-'*18}")
 
     for depth in sorted(results_df['depth'].unique()):
         subset = results_df[results_df['depth'] == depth]
@@ -267,11 +274,19 @@ def print_summary(results):
         aupr_mean = subset['aupr'].mean()
         aupr_se = subset['aupr'].std() / np.sqrt(n) if n > 1 else 0.0
 
+        bal_acc_mean = subset['balanced_acc'].mean()
+        bal_acc_se = subset['balanced_acc'].std() / np.sqrt(n) if n > 1 else 0.0
+
+        f1_mean = subset['f1'].mean()
+        f1_se = subset['f1'].std() / np.sqrt(n) if n > 1 else 0.0
+
         print(f"{int(depth):>10,} | {n:>3d} | "
               f"{auroc_mean:.4f} +/- {auroc_se:.4f} | "
-              f"{aupr_mean:.4f} +/- {aupr_se:.4f}")
+              f"{aupr_mean:.4f} +/- {aupr_se:.4f} | "
+              f"{bal_acc_mean:.4f} +/- {bal_acc_se:.4f} | "
+              f"{f1_mean:.4f} +/- {f1_se:.4f}")
 
-    print(f"{'='*60}")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":

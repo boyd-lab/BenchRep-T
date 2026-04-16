@@ -9,7 +9,7 @@ import os
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from tqdm import tqdm
 
 from models.ostmeyer_2019 import MIL_TCR_Classifier
@@ -266,24 +266,33 @@ class Ostmeyer2019Evaluator:
             try:
                 val_auroc = roc_auc_score(val_labels_arr, val_probs)
                 val_aupr = average_precision_score(val_labels_arr, val_probs)
+                val_preds = (val_probs >= 0.5).astype(int)
+                val_balanced_acc = balanced_accuracy_score(val_labels_arr, val_preds)
+                val_f1 = f1_score(val_labels_arr, val_preds)
             except Exception:
                 val_auroc = 0.5
                 val_aupr = 0.5
+                val_balanced_acc = 0.5
+                val_f1 = 0.0
 
             tuning_results.append({
                 'abundance_method': method,
                 'val_auroc': val_auroc,
                 'val_aupr': val_aupr,
-                'best_loss': train_result['best_loss']
+                'val_balanced_acc': val_balanced_acc,
+                'val_f1': val_f1,
+                'best_loss': train_result['best_loss'],
             })
 
-            print(f"  method={method}: Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}")
+            print(f"  method={method}: Val AUROC={val_auroc:.4f}, Val AUPR={val_aupr:.4f}, "
+                  f"Balanced Acc={val_balanced_acc:.4f}, F1={val_f1:.4f}")
 
         best_result = max(tuning_results, key=lambda x: x['val_auroc'])
         best_method = best_result['abundance_method']
 
         print(f"\nBest abundance method: {best_method} "
-              f"(Val AUROC={best_result['val_auroc']:.4f}, Val AUPR={best_result['val_aupr']:.4f})")
+              f"(Val AUROC={best_result['val_auroc']:.4f}, Val AUPR={best_result['val_aupr']:.4f}, "
+              f"Balanced Acc={best_result['val_balanced_acc']:.4f}, F1={best_result['val_f1']:.4f})")
 
         # Final model with best method
         self.model = MIL_TCR_Classifier(
@@ -305,7 +314,9 @@ class Ostmeyer2019Evaluator:
             'tuning_results': tuning_results,
             'best_abundance_method': best_method,
             'best_val_auroc': best_result['val_auroc'],
-            'best_val_aupr': best_result['val_aupr']
+            'best_val_aupr': best_result['val_aupr'],
+            'best_val_balanced_acc': best_result['val_balanced_acc'],
+            'best_val_f1': best_result['val_f1'],
         }
     
     def run_cross_validation(self, metadata_path, target_disease, data_dir,
@@ -407,6 +418,8 @@ class Ostmeyer2019Evaluator:
                 best_method = tuning_result['best_abundance_method']
                 val_auroc = tuning_result['best_val_auroc']
                 val_aupr = tuning_result['best_val_aupr']
+                val_balanced_acc = tuning_result['best_val_balanced_acc']
+                val_f1 = tuning_result['best_val_f1']
             else:
                 # Train without tuning (use self.abundance_method directly)
                 self.model = MIL_TCR_Classifier(
@@ -429,10 +442,14 @@ class Ostmeyer2019Evaluator:
                 val_labels_arr = np.array(val_labels)
                 val_auroc = roc_auc_score(val_labels_arr, val_probs)
                 val_aupr = average_precision_score(val_labels_arr, val_probs)
+                val_preds = (val_probs >= 0.5).astype(int)
+                val_balanced_acc = balanced_accuracy_score(val_labels_arr, val_preds)
+                val_f1 = f1_score(val_labels_arr, val_preds)
                 best_method = self.abundance_method
                 tuning_result = None
 
-            print(f"\nFinal Validation AUROC: {val_auroc:.4f}, AUPR: {val_aupr:.4f}")
+            print(f"\nFinal Validation AUROC: {val_auroc:.4f}, AUPR: {val_aupr:.4f}, "
+                  f"Balanced Acc: {val_balanced_acc:.4f}, F1: {val_f1:.4f}")
 
             # Evaluate on test set
             test_probs = []
@@ -443,10 +460,14 @@ class Ostmeyer2019Evaluator:
             test_probs = np.array(test_probs)
             test_labels_arr = np.array(test_labels)
 
-            # Compute AUROC and AUPR for test set
+            # Compute AUROC, AUPR, Balanced Accuracy, and F1 for test set
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
-            print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
+            test_preds = (test_probs >= 0.5).astype(int)
+            test_balanced_acc = balanced_accuracy_score(test_labels_arr, test_preds)
+            test_f1 = f1_score(test_labels_arr, test_preds)
+            print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
+                  f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
 
             # Build per-sample rows for output DataFrame
             for (_, row), score in zip(test_data.iterrows(), test_probs):
@@ -468,6 +489,8 @@ class Ostmeyer2019Evaluator:
                 'val_aupr': val_aupr,
                 'test_auroc': test_auroc,
                 'test_aupr': test_aupr,
+                'test_balanced_acc': test_balanced_acc,
+                'test_f1': test_f1,
             })
 
             all_probs.extend(test_probs.tolist())
@@ -481,16 +504,25 @@ class Ostmeyer2019Evaluator:
         all_labels_arr = np.array(all_labels)
         overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
         overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
+        overall_preds = (all_probs_arr >= 0.5).astype(int)
+        overall_balanced_acc = balanced_accuracy_score(all_labels_arr, overall_preds)
+        overall_f1 = f1_score(all_labels_arr, overall_preds)
 
         print(f"\n{'='*60}")
         print(f"OVERALL CROSS-VALIDATION RESULTS: {target_disease} vs Healthy")
         print(f"{'='*60}")
-        print(f"Mean Test AUROC: {np.mean([r['test_auroc'] for r in fold_results]):.4f} "
-              f"± {np.std([r['test_auroc'] for r in fold_results]):.4f}")
-        print(f"Mean Test AUPR:  {np.mean([r['test_aupr'] for r in fold_results]):.4f} "
-              f"± {np.std([r['test_aupr'] for r in fold_results]):.4f}")
-        print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
-        print(f"Overall AUPR (all folds combined):  {overall_aupr:.4f}")
+        fold_aurocs = [r['test_auroc'] for r in fold_results]
+        fold_auprs = [r['test_aupr'] for r in fold_results]
+        fold_balanced_accs = [r['test_balanced_acc'] for r in fold_results]
+        fold_f1s = [r['test_f1'] for r in fold_results]
+        print(f"Mean Test AUROC:        {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
+        print(f"Mean Test AUPR:         {np.mean(fold_auprs):.4f} ± {np.std(fold_auprs):.4f}")
+        print(f"Mean Test Balanced Acc: {np.mean(fold_balanced_accs):.4f} ± {np.std(fold_balanced_accs):.4f}")
+        print(f"Mean Test F1:           {np.mean(fold_f1s):.4f} ± {np.std(fold_f1s):.4f}")
+        print(f"Overall AUROC (all folds combined):        {overall_auroc:.4f}")
+        print(f"Overall AUPR (all folds combined):         {overall_aupr:.4f}")
+        print(f"Overall Balanced Acc (all folds combined): {overall_balanced_acc:.4f}")
+        print(f"Overall F1 (all folds combined):           {overall_f1:.4f}")
 
         if tune_parameters:
             print(f"\nBest abundance method per fold:")

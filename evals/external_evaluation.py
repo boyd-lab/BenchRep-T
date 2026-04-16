@@ -23,7 +23,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
@@ -369,6 +369,9 @@ class ExternalEvaluator:
         # --- Compute metrics ---
         auroc = roc_auc_score(ext_labels, ext_probs)
         aupr = average_precision_score(ext_labels, ext_probs)
+        ext_preds = (ext_probs >= 0.5).astype(int)
+        balanced_acc = balanced_accuracy_score(ext_labels, ext_preds)
+        f1 = f1_score(ext_labels, ext_preds)
 
         print(f"\n{'='*60}")
         print(f"EXTERNAL EVALUATION RESULTS: {method_name} on {target_disease}")
@@ -386,8 +389,10 @@ class ExternalEvaluator:
             print(f"  Val AUROC:          {train_result['val_auroc']:.4f}")
 
         print(f"Evaluation: {len(ext_files)} samples (external)")
-        print(f"  AUROC: {auroc:.4f}")
-        print(f"  AUPR:  {aupr:.4f}")
+        print(f"  AUROC:        {auroc:.4f}")
+        print(f"  AUPR:         {aupr:.4f}")
+        print(f"  Balanced Acc: {balanced_acc:.4f}")
+        print(f"  F1:           {f1:.4f}")
 
         # --- Build per-sample output ---
         scores_df = pd.DataFrame({
@@ -406,6 +411,8 @@ class ExternalEvaluator:
         return scores_df, {
             'auroc': auroc,
             'aupr': aupr,
+            'balanced_acc': balanced_acc,
+            'f1': f1,
             'train_result': train_result,
             'n_train': len(train_files),
             'n_external': len(ext_files),
@@ -539,7 +546,11 @@ class ExternalEvaluator:
             test_labels_arr = np.array(test_labels)
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
-            print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}")
+            test_preds = (test_probs >= 0.5).astype(int)
+            test_balanced_acc = balanced_accuracy_score(test_labels_arr, test_preds)
+            test_f1 = f1_score(test_labels_arr, test_preds)
+            print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
+                  f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
 
             for (_, row), score in zip(test_data.iterrows(), test_probs):
                 all_rows.append({
@@ -556,6 +567,8 @@ class ExternalEvaluator:
                 'fold': test_fold,
                 'test_auroc': test_auroc,
                 'test_aupr': test_aupr,
+                'test_balanced_acc': test_balanced_acc,
+                'test_f1': test_f1,
                 'train_result': train_result,
             })
             all_probs.extend(test_probs.tolist())
@@ -565,20 +578,27 @@ class ExternalEvaluator:
         all_labels_arr = np.array(all_labels)
         overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
         overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
+        overall_preds = (all_probs_arr >= 0.5).astype(int)
+        overall_balanced_acc = balanced_accuracy_score(all_labels_arr, overall_preds)
+        overall_f1 = f1_score(all_labels_arr, overall_preds)
 
         fold_aurocs = [r['test_auroc'] for r in fold_results]
         fold_auprs = [r['test_aupr'] for r in fold_results]
+        fold_balanced_accs = [r['test_balanced_acc'] for r in fold_results]
+        fold_f1s = [r['test_f1'] for r in fold_results]
 
         print(f"\n{'='*60}")
         print(f"OVERALL CV RESULTS: {method_name} on "
               f"{ext_disease_label} vs {ext_healthy_label}")
         print(f"{'='*60}")
-        print(f"Mean Test AUROC: {np.mean(fold_aurocs):.4f} "
-              f"± {np.std(fold_aurocs):.4f}")
-        print(f"Mean Test AUPR:  {np.mean(fold_auprs):.4f} "
-              f"± {np.std(fold_auprs):.4f}")
-        print(f"Overall AUROC (all folds combined): {overall_auroc:.4f}")
-        print(f"Overall AUPR  (all folds combined): {overall_aupr:.4f}")
+        print(f"Mean Test AUROC:        {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
+        print(f"Mean Test AUPR:         {np.mean(fold_auprs):.4f} ± {np.std(fold_auprs):.4f}")
+        print(f"Mean Test Balanced Acc: {np.mean(fold_balanced_accs):.4f} ± {np.std(fold_balanced_accs):.4f}")
+        print(f"Mean Test F1:           {np.mean(fold_f1s):.4f} ± {np.std(fold_f1s):.4f}")
+        print(f"Overall AUROC (all folds combined):        {overall_auroc:.4f}")
+        print(f"Overall AUPR  (all folds combined):        {overall_aupr:.4f}")
+        print(f"Overall Balanced Acc (all folds combined): {overall_balanced_acc:.4f}")
+        print(f"Overall F1 (all folds combined):           {overall_f1:.4f}")
 
         scores_df = pd.DataFrame(all_rows)
         if output_csv:
@@ -589,8 +609,12 @@ class ExternalEvaluator:
             'fold_results': fold_results,
             'overall_auroc': overall_auroc,
             'overall_aupr': overall_aupr,
+            'overall_balanced_acc': overall_balanced_acc,
+            'overall_f1': overall_f1,
             'mean_test_auroc': float(np.mean(fold_aurocs)),
             'mean_test_aupr': float(np.mean(fold_auprs)),
+            'mean_test_balanced_acc': float(np.mean(fold_balanced_accs)),
+            'mean_test_f1': float(np.mean(fold_f1s)),
         }
 
 

@@ -19,7 +19,7 @@ import argparse
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from tqdm import tqdm
 
@@ -320,9 +320,13 @@ class MetaModelEvaluator:
 
             meta_auroc = roc_auc_score(y_test, test_meta_probs)
             meta_aupr = average_precision_score(y_test, test_meta_probs)
+            meta_preds = (test_meta_probs >= 0.5).astype(int)
+            meta_balanced_acc = balanced_accuracy_score(y_test, meta_preds)
+            meta_f1 = f1_score(y_test, meta_preds)
 
             print(f"\n--- Fold {test_fold} Test Results ---")
-            print(f"  Meta (combined): AUROC={meta_auroc:.4f}  AUPR={meta_aupr:.4f}")
+            print(f"  Meta (combined): AUROC={meta_auroc:.4f}  AUPR={meta_aupr:.4f}  "
+                  f"Balanced Acc={meta_balanced_acc:.4f}  F1={meta_f1:.4f}")
 
             # Log meta-model coefficients
             meta_coefs = dict(zip(all_feature_names, meta_model.coef_[0]))
@@ -348,6 +352,7 @@ class MetaModelEvaluator:
             fold_results.append({
                 'fold': test_fold,
                 'meta_auroc': meta_auroc, 'meta_aupr': meta_aupr,
+                'meta_balanced_acc': meta_balanced_acc, 'meta_f1': meta_f1,
                 'best_meta_c': best_meta_c,
                 'meta_coefficients': meta_coefs,
                 'ml_train_result': ml_train_result,
@@ -368,21 +373,29 @@ class MetaModelEvaluator:
                                        scores_df['model_score'])
         overall_aupr = average_precision_score(scores_df['disease_label'],
                                                 scores_df['model_score'])
-        print(f"  Meta (ML + Demo)  AUROC={overall_auroc:.4f}  "
-              f"AUPR={overall_aupr:.4f}")
+        overall_preds = (scores_df['model_score'].values >= 0.5).astype(int)
+        overall_balanced_acc = balanced_accuracy_score(
+            scores_df['disease_label'].values, overall_preds)
+        overall_f1 = f1_score(scores_df['disease_label'].values, overall_preds)
+        print(f"  Meta (ML + Demo)  AUROC={overall_auroc:.4f}  AUPR={overall_aupr:.4f}  "
+              f"Balanced Acc={overall_balanced_acc:.4f}  F1={overall_f1:.4f}")
 
         print(f"\nPer-fold results:")
-        print(f"  {'Fold':<6} {'AUROC':<12} {'AUPR':<12}")
+        print(f"  {'Fold':<6} {'AUROC':<12} {'AUPR':<12} {'Bal Acc':<12} {'F1':<12}")
         for r in fold_results:
-            print(f"  {r['fold']:<6} {r['meta_auroc']:<12.4f} "
-                  f"{r['meta_aupr']:<12.4f}")
+            print(f"  {r['fold']:<6} {r['meta_auroc']:<12.4f} {r['meta_aupr']:<12.4f} "
+                  f"{r['meta_balanced_acc']:<12.4f} {r['meta_f1']:<12.4f}")
 
         aurocs = [r['meta_auroc'] for r in fold_results]
         auprs = [r['meta_aupr'] for r in fold_results]
+        balanced_accs = [r['meta_balanced_acc'] for r in fold_results]
+        f1s = [r['meta_f1'] for r in fold_results]
         print(f"\nMean ± Std:")
         print(f"  Meta (combined): "
               f"AUROC={np.mean(aurocs):.4f}±{np.std(aurocs):.4f}  "
-              f"AUPR={np.mean(auprs):.4f}±{np.std(auprs):.4f}")
+              f"AUPR={np.mean(auprs):.4f}±{np.std(auprs):.4f}  "
+              f"Balanced Acc={np.mean(balanced_accs):.4f}±{np.std(balanced_accs):.4f}  "
+              f"F1={np.mean(f1s):.4f}±{np.std(f1s):.4f}")
 
         return scores_df
 
