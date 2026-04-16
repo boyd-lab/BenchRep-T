@@ -682,6 +682,10 @@ if __name__ == '__main__':
                         help='Debug mode: load only a small number of repertoires per class')
     parser.add_argument('--debug_repertoires', type=int, default=10,
                         help='Repertoires per class to load in debug mode (default: 10)')
+    parser.add_argument('--covariate_adjust', action='store_true',
+                        help='Residualize sample-level embeddings against demographics '
+                             '(age, sex, ancestry) and train an L1 logistic regression head '
+                             '(requires complete demographics; saves model checkpoint)')
     args = parser.parse_args()
 
     evaluator = DeepTCREvaluator(
@@ -704,6 +708,7 @@ if __name__ == '__main__':
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
+        covariate_adjust=args.covariate_adjust,
     )
 
     if args.output_csv:

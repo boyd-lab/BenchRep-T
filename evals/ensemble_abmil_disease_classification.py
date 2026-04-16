@@ -454,6 +454,9 @@ if __name__ == "__main__":
     parser.add_argument('--require_demographics', action='store_true',
                         help='Drop repertoires with missing demographic data '
                              '(age, sex, ancestry) to match demographic baseline subset')
+    parser.add_argument('--covariate_adjust', action='store_true',
+                        help='Residualize bag embeddings against demographics (age, sex, ancestry) '
+                             'and train an L1 logistic regression head (requires complete demographics)')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     args = parser.parse_args()
@@ -482,6 +485,7 @@ if __name__ == "__main__":
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         require_demographics=args.require_demographics,
+        covariate_adjust=args.covariate_adjust,
     )
 
     if args.output_csv:

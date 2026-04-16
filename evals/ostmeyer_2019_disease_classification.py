@@ -589,6 +589,9 @@ if __name__ == "__main__":
                         help='Path to save per-sample scores CSV')
     parser.add_argument('--n_restarts', type=int, default=200,
                         help='Number of L-BFGS-B random restarts (default: 200)')
+    parser.add_argument('--covariate_adjust', action='store_true',
+                        help='Residualize model scores against demographics (age, sex, ancestry) '
+                             'and train an L1 logistic regression head (requires complete demographics)')
     args = parser.parse_args()
 
     print("Ostmeyer 2019 Disease Classification Evaluation")
@@ -632,7 +635,8 @@ if __name__ == "__main__":
         n_folds=3,
         random_state=RANDOM_SEED,
         tune_parameters=True,
-        abundance_method_candidates=['A', 'B']
+        abundance_method_candidates=['A', 'B'],
+        covariate_adjust=args.covariate_adjust,
     )
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)

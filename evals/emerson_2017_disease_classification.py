@@ -642,8 +642,11 @@ if __name__ == "__main__":
                         help='Target disease to classify (e.g., Lupus, T1D, HIV)')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV')
+    parser.add_argument('--covariate_adjust', action='store_true',
+                        help='Residualize model scores against demographics (age, sex, ancestry) '
+                             'and train an L1 logistic regression head (requires complete demographics)')
     args = parser.parse_args()
-    
+
     print("Emerson 2017 Disease Classification Evaluation")
     print("=" * 60)
     print("\nTo run evaluation, ensure you have:")
@@ -680,7 +683,8 @@ if __name__ == "__main__":
         n_folds=3,
         random_state=RANDOM_SEED,
         tune_parameters=True,
-        p_value_candidates=[1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
+        p_value_candidates=[1e-2, 1e-3, 1e-4, 1e-5, 1e-6],
+        covariate_adjust=args.covariate_adjust,
     )
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)

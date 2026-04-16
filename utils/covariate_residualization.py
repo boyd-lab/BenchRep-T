@@ -35,7 +35,7 @@ def encode_covariates(metadata, ancestry_categories=None):
       - ancestry: one-hot over sorted unique categories seen in training
 
     An intercept column (all ones) is prepended so the linear regression
-    absorbs the per-feature mean, ensuring residuals are centred.
+    absorbs the per-feature mean, ensuring residuals are centered.
 
     Args:
         metadata: DataFrame with 'age', 'sex', 'ancestry' columns.

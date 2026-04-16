@@ -474,6 +474,9 @@ if __name__ == '__main__':
                         help='Sequences sampled per repertoire during training (default: 10000)')
     parser.add_argument('--max_seq_len', type=int, default=50,
                         help='Maximum CDR3 sequence length; must be >= longest sequence in data (default: 50)')
+    parser.add_argument('--covariate_adjust', action='store_true',
+                        help='Residualize bag embeddings against demographics (age, sex, ancestry) '
+                             'and train an L1 logistic regression head (requires complete demographics)')
     args = parser.parse_args()
 
     evaluator = DeepRC2020Evaluator(
@@ -491,6 +494,7 @@ if __name__ == '__main__':
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         raw_file_cache={},
+        covariate_adjust=args.covariate_adjust,
     )
 
     if args.output_csv:
