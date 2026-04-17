@@ -3,8 +3,14 @@ Covariate residualization utility.
 
 Fits an OLS regression predicting each feature from demographic covariates
 (age, sex, ancestry) on the training fold, then returns the residuals as
-de-confounded features.  Covariate encoding matches the one in
-DemographicFeaturesEvaluator.featurize() exactly.
+de-confounded features.  Missing demographic values are encoded explicitly
+rather than dropped:
+
+  - age:      continuous; NaN imputed with training-set median.
+  - sex:      two indicator columns (sex_M, sex_unknown); F-known is (0, 0).
+  - ancestry: one-hot with a "Missing" category for NaN/blank values.
+
+This means no samples are dropped due to incomplete demographics.
 
 Typical usage (inside a CV loop):
 
@@ -24,48 +30,71 @@ import scipy.sparse as sp
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+_ANCESTRY_MISSING = "Missing"
 
-def encode_covariates(metadata, ancestry_categories=None):
+
+def encode_covariates(metadata, ancestry_categories=None, age_median=None):
     """
     Encode demographic columns into a numeric matrix.
 
-    Mirrors DemographicFeaturesEvaluator.featurize():
-      - age:      raw float
-      - sex:      binary (M=1, F=0)
-      - ancestry: one-hot over sorted unique categories seen in training
+    Missing values are encoded explicitly rather than dropped:
+      - age:      imputed with training mean + age_missing indicator column.
+      - sex:      two columns — sex_M (1 if known-male) and sex_unknown
+                  (1 if sex is NaN).  F-known → (0, 0).
+      - ancestry: one-hot; NaN/blank values map to the "Missing" category.
 
     An intercept column (all ones) is prepended so the linear regression
-    absorbs the per-feature mean, ensuring residuals are centered.
+    absorbs the per-feature mean, ensuring residuals are centred.
 
     Args:
-        metadata: DataFrame with 'age', 'sex', 'ancestry' columns.
-            Rows must already be filtered to those with complete demographics.
-        ancestry_categories: Sorted list of ancestry strings.  Pass the list
-            returned by a previous call on training data so that test data
-            uses the same encoding.  If None, derived from *metadata*.
+        metadata: DataFrame with 'age', 'sex', and optionally 'ancestry'.
+        ancestry_categories: Sorted list of ancestry strings including
+            "Missing".  Pass the list from a training-data call so that test
+            data uses the same column layout.  If None, derived from metadata.
+        age_median: Mean age computed on training data, used to impute NaN
+            ages.  If None, computed from metadata (use on training data only).
 
     Returns:
-        X_cov (ndarray, shape [n, 1 + 2 + n_ancestry]):
-            Dense covariate matrix with intercept prepended.
+        X_cov (ndarray, shape [n, 1 + 2 + 2 + n_ancestry]):
+            Dense covariate matrix: [intercept, age, age_missing, sex_M,
+            sex_unknown, ancestry dummies...].
         ancestry_categories (list[str]):
-            The ancestry categories used (pass to subsequent calls for
-            consistent encoding).
+            Ancestry category labels used (always includes "Missing").
+        age_median (float):
+            Mean used for age imputation (pass to subsequent calls).
     """
+    # --- age: impute NaN with training mean + missing indicator ---
+    age_raw = metadata['age'].values.astype(float)
+    if age_median is None:
+        age_median = float(np.nanmean(age_raw))
+    age_missing = np.isnan(age_raw).astype(float)
+    age = np.where(age_missing.astype(bool), age_median, age_raw)
+
+    # --- sex: known-male + unknown indicators ---
+    sex_vals = metadata['sex']
+    sex_M = (sex_vals == 'M').astype(float).values
+    sex_unknown = sex_vals.isna().astype(float).values
+
+    # --- ancestry: one-hot with explicit "Missing" category ---
+    ancestry_raw = metadata['ancestry'].fillna(_ANCESTRY_MISSING)
+    if 'ancestry' in metadata.columns:
+        ancestry_raw = ancestry_raw.str.strip().replace('', _ANCESTRY_MISSING)
+    else:
+        ancestry_raw = ancestry_raw.map(lambda _: _ANCESTRY_MISSING)
+
     if ancestry_categories is None:
-        ancestry_categories = sorted(metadata['ancestry'].dropna().unique().tolist())
+        ancestry_categories = sorted(ancestry_raw.unique().tolist())
+        # Ensure "Missing" is always present for consistent column layout
+        if _ANCESTRY_MISSING not in ancestry_categories:
+            ancestry_categories = sorted(ancestry_categories + [_ANCESTRY_MISSING])
 
-    age = metadata['age'].values.astype(float)
-    sex = (metadata['sex'] == 'M').astype(float).values
-
-    n_ancestry = len(ancestry_categories)
-    ancestry_dummies = np.zeros((len(metadata), n_ancestry), dtype=float)
+    ancestry_dummies = np.zeros((len(metadata), len(ancestry_categories)), dtype=float)
     for i, cat in enumerate(ancestry_categories):
-        ancestry_dummies[:, i] = (metadata['ancestry'].values == cat).astype(float)
+        ancestry_dummies[:, i] = (ancestry_raw.values == cat).astype(float)
 
-    # Intercept first, then age, sex, ancestry dummies
     intercept = np.ones(len(metadata), dtype=float)
-    X_cov = np.column_stack([intercept, age, sex, ancestry_dummies])
-    return X_cov, ancestry_categories
+    X_cov = np.column_stack([intercept, age, age_missing, sex_M, sex_unknown, ancestry_dummies])
+    return X_cov, ancestry_categories, age_median
 
 
 class CovariateResidualizer:
@@ -85,13 +114,17 @@ class CovariateResidualizer:
     where B = lstsq(X_cov_train, Y_train).  Because an intercept column is
     included in X_cov, the training residuals are centred.
 
+    Missing demographics are handled via indicator encoding (see
+    encode_covariates), so no rows are dropped.
+
     Sparse input feature matrices are supported and converted to dense
     internally; the returned residuals are always dense ndarrays.
     """
 
     def __init__(self):
         self._ancestry_categories = None
-        self._B = None                  # (n_cov, n_features) OLS coefficients
+        self._age_median = None
+        self._B = None          # (n_cov, n_features) OLS coefficients
 
     # ------------------------------------------------------------------
     # Public API
@@ -102,8 +135,8 @@ class CovariateResidualizer:
         Fit OLS regression coefficients on training data.
 
         Args:
-            covariate_df: DataFrame with 'age', 'sex', 'ancestry' columns
-                (one row per training sample).
+            covariate_df: DataFrame with 'age', 'sex', and optionally
+                'ancestry' columns (one row per training sample).
             feature_matrix: ndarray or scipy sparse matrix of shape
                 (n_train, n_features).  Each column is treated as an
                 independent regression target.
@@ -111,9 +144,10 @@ class CovariateResidualizer:
         Returns:
             self
         """
-        X_cov, self._ancestry_categories = encode_covariates(covariate_df)
+        X_cov, self._ancestry_categories, self._age_median = encode_covariates(
+            covariate_df
+        )
         Y = self._to_dense(feature_matrix)
-        # B: (n_cov, n_features)  via least-squares
         self._B, _, _, _ = np.linalg.lstsq(X_cov, Y, rcond=None)
         return self
 
@@ -133,7 +167,9 @@ class CovariateResidualizer:
         """
         if self._B is None:
             raise RuntimeError("Call fit() before transform().")
-        X_cov, _ = encode_covariates(covariate_df, self._ancestry_categories)
+        X_cov, _, _ = encode_covariates(
+            covariate_df, self._ancestry_categories, self._age_median
+        )
         Y = self._to_dense(feature_matrix)
         return Y - X_cov @ self._B
 
@@ -158,9 +194,13 @@ class CovariateResidualizer:
 # ---------------------------------------------------------------------------
 
 def filter_complete_demographics(df):
-    """Drop rows with missing or blank age, sex, or ancestry."""
-    df = df.dropna(subset=['age', 'sex', 'ancestry'])
-    return df[df['ancestry'].str.strip() != '']
+    """Keep rows that have at least age or sex available.
+
+    With missing-indicator encoding, no samples need to be dropped due to
+    incomplete demographics.  Only rows where age AND sex are both absent
+    (truly no usable demographic info) are excluded.
+    """
+    return df[df['age'].notna() | df['sex'].notna()]
 
 
 def covariate_adjusted_predict(X_train, train_meta, y_train, X_test, test_meta):
@@ -168,7 +208,8 @@ def covariate_adjusted_predict(X_train, train_meta, y_train, X_test, test_meta):
     Residualize features against demographics, then classify with L1 logistic regression.
 
     Fits OLS residualization and StandardScaler on training data only; applies
-    both to test data using the same coefficients.
+    both to test data using the same coefficients.  Missing demographic values
+    are handled via indicator encoding — no samples are dropped.
 
     Args:
         X_train: ndarray or sparse matrix of shape (n_train, n_features).
@@ -188,6 +229,9 @@ def covariate_adjusted_predict(X_train, train_meta, y_train, X_test, test_meta):
     X_train_sc = scaler.fit_transform(X_train_res)
     X_test_sc = scaler.transform(X_test_res)
 
-    clf = LogisticRegression(C=1.0, penalty='l1', solver='liblinear', max_iter=1000)
+    # saga + elasticnet + l1_ratio=1.0 is pure L1 in sklearn 1.8+.
+    # liblinear + penalty='l1' triggers a deprecation/internal-check failure in 1.8.
+    clf = LogisticRegression(C=1.0, solver='saga', penalty='elasticnet',
+                             l1_ratio=1.0, max_iter=1000)
     clf.fit(X_train_sc, y_train)
     return clf.predict_proba(X_test_sc)[:, 1]
