@@ -21,7 +21,7 @@ from sklearn.metrics import (roc_auc_score, average_precision_score,
                              balanced_accuracy_score, f1_score)
 from tqdm import tqdm
 
-from models.motifboost import MotifBoost
+from models.MotifBoost.motifboost import MotifBoost
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 
 
