@@ -61,7 +61,7 @@ class EnsembleRegressionEvaluator:
     def __init__(self, val_split=0.2, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7,
-                 indices_map=None, submodel='ensemble'):
+                 indices_map=None, submodel='ensemble', debug=False):
         """
         Args:
             val_split: Internal val fraction used by the model for alpha tuning.
@@ -84,7 +84,7 @@ class EnsembleRegressionEvaluator:
         self.indices_map = indices_map
         self.submodel = submodel
         self.model = None
-
+        self.debug = debug
     # ------------------------------------------------------------------
     # Metadata helpers (shared pattern across evaluators)
     # ------------------------------------------------------------------
@@ -336,7 +336,8 @@ class EnsembleRegressionEvaluator:
                               allowed_participants=None,
                               require_demographics=False,
                               adjust_distribution_by_demographics=False,
-                              covariate_adjust=False):
+                              covariate_adjust=False,
+                              debug_repertoires=0):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -377,6 +378,12 @@ class EnsembleRegressionEvaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        if debug_repertoires > 0:
+            disease_rows = metadata[metadata['label'] == 1].head(debug_repertoires)
+            healthy_rows = metadata[metadata['label'] == 0].head(debug_repertoires)
+            metadata = pd.concat([disease_rows, healthy_rows])
+            print(f"Debug: subsampled to {len(disease_rows)} disease + {len(healthy_rows)} healthy repertoires")
 
         # Filter to allowed participants if specified (e.g., for depth experiments)
         if allowed_participants is not None:
@@ -566,12 +573,17 @@ if __name__ == "__main__":
                              'and train an L1 logistic regression head (requires complete demographics)')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Enable debug mode with more verbose output and no file existence filtering')
+    parser.add_argument('--debug_repertoires', type=int, default=0,
+                        help='Subsample to N disease + N healthy repertoires for fast debug runs (0 = disabled)')
     args = parser.parse_args()
 
     evaluator = EnsembleRegressionEvaluator(
         val_split=args.val_split,
         n_cv_folds=args.n_cv_folds,
         submodel=args.submodel,
+        debug=args.debug,
     )
 
     scores_df = evaluator.run_cross_validation(
@@ -581,6 +593,7 @@ if __name__ == "__main__":
         require_demographics=args.require_demographics,
         adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
         covariate_adjust=args.covariate_adjust,
+        debug_repertoires=args.debug_repertoires,
     )
 
     if args.output_csv:
