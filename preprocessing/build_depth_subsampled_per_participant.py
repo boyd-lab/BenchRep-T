@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """
+
+****For Mal-ID's use****
+
 Build depth-subsampled per-participant repertoire files from per-specimen
 repertoires and a precomputed depth-indices file.
 
