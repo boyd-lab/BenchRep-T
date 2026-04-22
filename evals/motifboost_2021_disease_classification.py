@@ -421,6 +421,27 @@ if __name__ == '__main__':
             )
             seed_dfs.append(seed_df)
         scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
+
+        # Aggregate across seeds: one (AUROC, AUPR) per seed, then mean ± std.
+        per_seed = []
+        for seed, seed_df in scores_df.groupby('random_baseline_seed'):
+            y = seed_df['disease_label'].values
+            p = seed_df['model_score'].values
+            per_seed.append({
+                'random_baseline_seed': int(seed),
+                'overall_auroc': roc_auc_score(y, p),
+                'overall_aupr': average_precision_score(y, p),
+            })
+        summary_df = pd.DataFrame(per_seed)
+        print(f"\n{'#' * 60}")
+        print(f"# RANDOM BASELINE SUMMARY — across {len(summary_df)} seeds")
+        print(f"{'#' * 60}")
+        print(summary_df.to_string(index=False))
+        print(f"Mean overall AUROC: {summary_df['overall_auroc'].mean():.4f} "
+              f"± {summary_df['overall_auroc'].std(ddof=0):.4f}")
+        print(f"Mean overall AUPR:  {summary_df['overall_aupr'].mean():.4f} "
+              f"± {summary_df['overall_aupr'].std(ddof=0):.4f}")
+
         if args.output_csv and len(scores_df) > 0:
             scores_df.to_csv(args.output_csv, index=False)
             print(f"\nAll-seed scores saved to: {args.output_csv}")
