@@ -21,23 +21,20 @@ from tqdm import tqdm
 from utils.repertoire_io import load_raw_repertoire
 
 
-def _extract_gapped_4mers(sequence):
+def _extract_kmers(sequence, k, use_gaps=True):
     """
-    Extract 4-mers and their single-gap variants from a sequence.
+    Extract k-mers (and optionally their single-gap variants) from a sequence.
 
-    For each 4-residue window, yields:
-      - the original 4-mer
-      - 4 gapped variants (one position replaced by '_' per variant)
-
-    Returns a list of k-mer strings.
+    For each k-residue window, yields the k-mer and, when use_gaps=True,
+    k additional variants with one position replaced by '_'.
     """
-    k = 4
     kmers = []
     for i in range(len(sequence) - k + 1):
         window = sequence[i:i + k]
         kmers.append(window)
-        for j in range(k):
-            kmers.append(window[:j] + '_' + window[j + 1:])
+        if use_gaps:
+            for j in range(k):
+                kmers.append(window[:j] + '_' + window[j + 1:])
     return kmers
 
 
@@ -62,7 +59,9 @@ class Gapped_4mer_VJgene:
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
                  indices_map=None,
                  ignore_allele=False,
-                 submodel='ensemble'):
+                 submodel='ensemble',
+                 kmer_size=4,
+                 use_gaps=True):
         """
         Args:
             val_split: Fraction of training data held out internally for alpha tuning.
@@ -79,11 +78,16 @@ class Gapped_4mer_VJgene:
             submodel: Which sub-model(s) to use: 'ensemble' (default, both
                       combined), 'kmer_only' (gapped 4-mer only), or 'vj_only'
                       (V/J gene count only).
+            kmer_size: Length of k-mers to extract (default: 4).
+            use_gaps: If True, include single-position gapped variants of each
+                      k-mer. If False, extract plain k-mers only (default: True).
         """
         if submodel not in self.VALID_SUBMODELS:
             raise ValueError(f"Invalid submodel '{submodel}'. "
                              f"Choose from: {self.VALID_SUBMODELS}")
         self.submodel = submodel
+        self.kmer_size = kmer_size
+        self.use_gaps = use_gaps
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
         self.sequence_col = sequence_col
@@ -156,7 +160,7 @@ class Gapped_4mer_VJgene:
         df = self.load_repertoire(file_path)
         counts = {}
         for seq in df[self.sequence_col].dropna():
-            for kmer in _extract_gapped_4mers(str(seq)):
+            for kmer in _extract_kmers(str(seq), self.kmer_size, self.use_gaps):
                 counts[kmer] = counts.get(kmer, 0) + 1
 
         self._kmer_features_cache[file_path] = counts

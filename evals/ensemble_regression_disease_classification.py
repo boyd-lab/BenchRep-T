@@ -16,10 +16,10 @@ from models.ensemble_regression import Gapped_4mer_VJgene
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 
 
-SUBMODEL_METHOD_NAMES = {
-    'ensemble': 'Ensemble_Regression',
-    'kmer_only': 'Ensemble_Regression_Kmer',
-    'vj_only': 'Ensemble_Regression_VJ',
+SUBMODEL_SUFFIXES = {
+    'ensemble': '',
+    'kmer_only': '_Kmer',
+    'vj_only': '_VJ',
 }
 
 
@@ -61,7 +61,8 @@ class EnsembleRegressionEvaluator:
     def __init__(self, val_split=0.2, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7,
-                 indices_map=None, submodel='ensemble', debug=False):
+                 indices_map=None, submodel='ensemble', debug=False,
+                 kmer_size=4, use_gaps=True):
         """
         Args:
             val_split: Internal val fraction used by the model for alpha tuning.
@@ -73,6 +74,8 @@ class EnsembleRegressionEvaluator:
             subsample_seed: Random seed for reproducibility.
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
             submodel: 'ensemble' (default), 'kmer_only', or 'vj_only'.
+            kmer_size: Length of k-mers to extract (default: 4).
+            use_gaps: If True, include single-position gapped variants (default: True).
         """
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
@@ -83,8 +86,18 @@ class EnsembleRegressionEvaluator:
         self.subsample_seed = subsample_seed
         self.indices_map = indices_map
         self.submodel = submodel
+        self.kmer_size = kmer_size
+        self.use_gaps = use_gaps
         self.model = None
         self.debug = debug
+
+    def _method_name(self):
+        """Build a result-CSV method label encoding submodel, k-mer size, and gap setting."""
+        name = f'Ensemble_Regression_{self.kmer_size}mer'
+        if self.use_gaps:
+            name += '_gapped'
+        name += SUBMODEL_SUFFIXES[self.submodel]
+        return name
     # ------------------------------------------------------------------
     # Metadata helpers (shared pattern across evaluators)
     # ------------------------------------------------------------------
@@ -424,6 +437,8 @@ class EnsembleRegressionEvaluator:
                 subsample_seed=self.subsample_seed,
                 indices_map=self.indices_map,
                 submodel=self.submodel,
+                kmer_size=self.kmer_size,
+                use_gaps=self.use_gaps,
             )
 
             train_result = self.model.train(train_files, train_labels)
@@ -453,7 +468,7 @@ class EnsembleRegressionEvaluator:
                 )
                 test_labels_arr = test_cov['label'].values
 
-                method_name = SUBMODEL_METHOD_NAMES[self.submodel] + '_CovAdj'
+                method_name = self._method_name() + '_CovAdj'
                 for (_, row), score in zip(test_cov.iterrows(), test_probs):
                     all_test_rows.append({
                         'participant_label': row[participant_col],
@@ -481,7 +496,7 @@ class EnsembleRegressionEvaluator:
                         'specimen_label': row['specimen_label'],
                         'disease_label': int(row['label']),
                         'disease_label_str': row[disease_col],
-                        'method': SUBMODEL_METHOD_NAMES[self.submodel],
+                        'method': self._method_name(),
                         'disease_model': target_disease,
                         'model_score': float(score),
                         'malid_cross_validation_fold_id_when_in_test_set': test_fold,
@@ -577,6 +592,11 @@ if __name__ == "__main__":
                         help='Enable debug mode with more verbose output and no file existence filtering')
     parser.add_argument('--debug_repertoires', type=int, default=0,
                         help='Subsample to N disease + N healthy repertoires for fast debug runs (0 = disabled)')
+    parser.add_argument('--kmer_size', type=int, default=4,
+                        help='Length of k-mers to extract from CDR3 sequences (default: 4)')
+    parser.add_argument('--no_gaps', action='store_true',
+                        help='Disable single-position gapped k-mer variants; '
+                             'extract plain k-mers only')
     args = parser.parse_args()
 
     evaluator = EnsembleRegressionEvaluator(
@@ -584,6 +604,8 @@ if __name__ == "__main__":
         n_cv_folds=args.n_cv_folds,
         submodel=args.submodel,
         debug=args.debug,
+        kmer_size=args.kmer_size,
+        use_gaps=not args.no_gaps,
     )
 
     scores_df = evaluator.run_cross_validation(
