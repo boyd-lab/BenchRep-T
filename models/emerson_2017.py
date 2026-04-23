@@ -62,6 +62,8 @@ class CMV_Immunosequencing_Model:
         self.indices_map = indices_map
         self.ignore_allele = ignore_allele
         self.diagnostic_tcrs = set()
+        self.diagnostic_tcr_list = []  # Sorted list, deterministic column order
+        self._diagnostic_tcr_to_idx = None  # Lazy-built reverse index
         self.model_params = {}  # Will store alphas, betas, and priors
         self._repertoire_cache = {}  # Cache for loaded repertoire data
         self._tcr_stats_cache = None  # Cache for TCR p-values
@@ -293,8 +295,34 @@ class CMV_Immunosequencing_Model:
                 diagnostic_candidates.append(tcr)
 
         self.diagnostic_tcrs = set(diagnostic_candidates)
+        self.diagnostic_tcr_list = sorted(self.diagnostic_tcrs)
+        self._diagnostic_tcr_to_idx = None  # invalidate lazy index
         print(f"Identified {len(self.diagnostic_tcrs)} diagnostic TCRs (P < {self.p_value_threshold}).")
         return self.diagnostic_tcrs
+
+    def get_diagnostic_tcr_presence(self, file_path):
+        """
+        Return a per-subject binary indicator vector over the diagnostic TCRs.
+
+        Column j corresponds to ``self.diagnostic_tcr_list[j]``; the value is 1
+        if that TCR is present in the subject's repertoire and 0 otherwise.
+        Used for covariate-adjusted classification, where the resulting
+        (n_samples, n_diagnostic_tcrs) matrix is residualized against
+        demographics before fitting an L1 logistic regression.
+        """
+        if not self.diagnostic_tcr_list:
+            return np.zeros(0, dtype=np.uint8)
+        if self._diagnostic_tcr_to_idx is None:
+            self._diagnostic_tcr_to_idx = {
+                tcr: i for i, tcr in enumerate(self.diagnostic_tcr_list)
+            }
+        unique_seqs = self.load_repertoire(file_path)
+        presence = np.zeros(len(self.diagnostic_tcr_list), dtype=np.uint8)
+        for seq in unique_seqs:
+            idx = self._diagnostic_tcr_to_idx.get(seq)
+            if idx is not None:
+                presence[idx] = 1
+        return presence
 
     def _neg_log_likelihood(self, params, n_values, k_values):
         """

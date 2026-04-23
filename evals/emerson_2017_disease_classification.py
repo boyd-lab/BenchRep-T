@@ -513,7 +513,7 @@ class Emerson2017Evaluator:
 
             if covariate_adjust:
                 # ----------------------------------------------------------
-                # Score-level covariate adjustment
+                # Diagnostic-TCR-presence covariate adjustment
                 # ----------------------------------------------------------
                 train_val_combined = pd.concat([train_data, val_data], ignore_index=True)
                 tv_cov = filter_complete_demographics(train_val_combined)
@@ -521,16 +521,35 @@ class Emerson2017Evaluator:
                 print(f"  Covariate adjust: {len(tv_cov)} train/val, "
                       f"{len(test_cov)} test samples with complete demographics.")
 
-                tv_scores = [
-                    self.model.predict_diagnosis(fp)['probability_positive']
-                    for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train/val")
-                ]
-                test_scores = [
-                    self.model.predict_diagnosis(fp)['probability_positive']
-                    for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test")
-                ]
-                X_tv = np.array(tv_scores).reshape(-1, 1)
-                X_test_emb = np.array(test_scores).reshape(-1, 1)
+                n_diag = len(self.model.diagnostic_tcr_list)
+                if n_diag == 0:
+                    # Fisher's test produced no diagnostic TCRs; fall back to
+                    # the (n, 1) score-level adjustment so the fold doesn't crash.
+                    print("  WARNING: 0 diagnostic TCRs; falling back to score-level adjustment.")
+                    tv_scores = [
+                        self.model.predict_diagnosis(fp)['probability_positive']
+                        for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train/val")
+                    ]
+                    test_scores = [
+                        self.model.predict_diagnosis(fp)['probability_positive']
+                        for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test")
+                    ]
+                    X_tv = np.array(tv_scores).reshape(-1, 1)
+                    X_test_emb = np.array(test_scores).reshape(-1, 1)
+                else:
+                    tv_presence = [
+                        self.model.get_diagnostic_tcr_presence(fp)
+                        for fp in tqdm(tv_cov['file_path'].tolist(),
+                                       desc="Building train/val presence matrix")
+                    ]
+                    test_presence = [
+                        self.model.get_diagnostic_tcr_presence(fp)
+                        for fp in tqdm(test_cov['file_path'].tolist(),
+                                       desc="Building test presence matrix")
+                    ]
+                    X_tv = np.vstack(tv_presence).astype(np.float32)
+                    X_test_emb = np.vstack(test_presence).astype(np.float32)
+                    print(f"  Presence matrix: train/val {X_tv.shape}, test {X_test_emb.shape}")
 
                 test_probs = covariate_adjusted_predict(
                     X_tv, tv_cov, tv_cov['label'].values, X_test_emb, test_cov
@@ -643,8 +662,9 @@ if __name__ == "__main__":
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV')
     parser.add_argument('--covariate_adjust', action='store_true',
-                        help='Residualize model scores against demographics (age, sex, ancestry) '
-                             'and train an L1 logistic regression head (requires complete demographics)')
+                        help='Residualize per-sample diagnostic-TCR presence features against '
+                             'demographics (age, sex, ancestry) and refit with L1 logistic regression. '
+                             'Falls back to score-level adjustment if no diagnostic TCRs are found.')
     args = parser.parse_args()
 
     print("Emerson 2017 Disease Classification Evaluation")
