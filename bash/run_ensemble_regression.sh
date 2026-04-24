@@ -8,7 +8,7 @@ DEBUG_REPERTOIRES=10
 SUBMODEL="ensemble"
 COVARIATE_ADJUST=false
 ADJUST_DISTRIBUTION=false
-N_JOBS=5
+N_JOBS=20
 
 # K-mer settings: sizes to evaluate and whether to include gapped variants.
 # Set USE_GAPS=true to re-enable single-position gapped k-mer variants.
@@ -42,7 +42,7 @@ cd "${REPO_ROOT}"
 base_suffix="${SUBMODEL}"
 $COVARIATE_ADJUST    && base_suffix+="_covadj"
 $ADJUST_DISTRIBUTION && base_suffix+="_distadj"
-$USE_GAPS            || base_suffix+="_nogaps"
+if $USE_GAPS; then base_suffix+="_gaps"; else base_suffix+="_nogaps"; fi
 
 for kmer_size in "${KMER_SIZES[@]}"; do
   for disease in "${DISEASES[@]}"; do

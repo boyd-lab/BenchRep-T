@@ -330,7 +330,7 @@ class EnsembleRegressionEvaluator:
                 ])
                 test_labels_arr = np.array(test_labels)
 
-                method_name = SUBMODEL_METHOD_NAMES[self.submodel]
+                method_name = self._method_name()
                 if random_baseline:
                     method_name += '_RandomBaseline'
                 for (_, row), score in zip(test_data.iterrows(), test_probs):
@@ -339,7 +339,7 @@ class EnsembleRegressionEvaluator:
                         'specimen_label': row['specimen_label'],
                         'disease_label': int(row['label']),
                         'disease_label_str': row[disease_col],
-                        'method': self._method_name(),
+                        'method': method_name,
                         'disease_model': target_disease,
                         'model_score': float(score),
                         'malid_cross_validation_fold_id_when_in_test_set': test_fold,
