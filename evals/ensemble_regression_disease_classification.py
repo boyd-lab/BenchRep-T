@@ -280,23 +280,44 @@ class EnsembleRegressionEvaluator:
 
             if covariate_adjust:
                 # ----------------------------------------------------------
-                # Score-level covariate adjustment
+                # L1-selected-feature covariate adjustment
                 # ----------------------------------------------------------
                 tv_cov = filter_complete_demographics(train_data)
                 test_cov = filter_complete_demographics(test_data)
                 print(f"  Covariate adjust: {len(tv_cov)} train, "
                       f"{len(test_cov)} test samples with complete demographics.")
 
-                tv_scores = [
-                    self.model.predict_diagnosis(fp)['probability_positive']
-                    for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train")
-                ]
-                test_scores = [
-                    self.model.predict_diagnosis(fp)['probability_positive']
-                    for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test")
-                ]
-                X_tv = np.array(tv_scores).reshape(-1, 1)
-                X_test_emb = np.array(test_scores).reshape(-1, 1)
+                n_sel = self.model.n_selected_features
+                if n_sel == 0:
+                    # No features were retained by L1; fall back to the (n, 1)
+                    # score-level adjustment so the fold doesn't crash.
+                    print("  WARNING: 0 L1-selected features; falling back to score-level adjustment.")
+                    tv_scores = [
+                        self.model.predict_diagnosis(fp)['probability_positive']
+                        for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train")
+                    ]
+                    test_scores = [
+                        self.model.predict_diagnosis(fp)['probability_positive']
+                        for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test")
+                    ]
+                    X_tv = np.array(tv_scores).reshape(-1, 1)
+                    X_test_emb = np.array(test_scores).reshape(-1, 1)
+                else:
+                    tv_feats = [
+                        self.model.get_selected_features(fp)
+                        for fp in tqdm(tv_cov['file_path'].tolist(),
+                                       desc="Building train selected-feature matrix")
+                    ]
+                    test_feats = [
+                        self.model.get_selected_features(fp)
+                        for fp in tqdm(test_cov['file_path'].tolist(),
+                                       desc="Building test selected-feature matrix")
+                    ]
+                    X_tv = np.vstack(tv_feats).astype(np.float32)
+                    X_test_emb = np.vstack(test_feats).astype(np.float32)
+                    print(f"  Selected-feature matrix: train {X_tv.shape}, test {X_test_emb.shape} "
+                          f"(kmer={len(self.model.kmer_selected_names)}, "
+                          f"vj={len(self.model.vj_selected_names)})")
 
                 test_probs = covariate_adjusted_predict(
                     X_tv, tv_cov, tv_cov['label'].values, X_test_emb, test_cov
@@ -438,8 +459,10 @@ if __name__ == "__main__":
                              'are concatenated into one output, with a '
                              '`random_baseline_seed` column. Example: 7 14 21 28 35.')
     parser.add_argument('--covariate_adjust', action='store_true',
-                        help='Residualize model scores against demographics (age, sex, ancestry) '
-                             'and train an L1 logistic regression head (requires complete demographics)')
+                        help='Residualize per-sample L1-selected k-mer / V-J feature counts '
+                             'against demographics (age, sex, ancestry) and refit with L1 '
+                             'logistic regression. Falls back to score-level adjustment if '
+                             'no features were retained.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     parser.add_argument('--debug', action='store_true',
