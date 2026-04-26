@@ -59,6 +59,7 @@ class Gapped_4mer_VJgene:
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
                  indices_map=None,
                  ignore_allele=False,
+                 canonicalize_genes=False,
                  submodel='ensemble',
                  kmer_size=4,
                  use_gaps=True):
@@ -75,6 +76,10 @@ class Gapped_4mer_VJgene:
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
             ignore_allele: If True, strip allele designations (*XX) from V/J gene
                            names, enabling gene-level feature matching across datasets.
+            canonicalize_genes: If True, additionally collapse Adaptive-style "-1"
+                           suffixes on IMGT singleton TRBV families (e.g.
+                           TRBV13-1 → TRBV13). Required when mixing internal IMGT
+                           and external Adaptive-derived repertoires in one model.
             submodel: Which sub-model(s) to use: 'ensemble' (default, both
                       combined), 'kmer_only' (gapped 4-mer only), or 'vj_only'
                       (V/J gene count only).
@@ -98,6 +103,7 @@ class Gapped_4mer_VJgene:
         self.subsample_n = subsample_n
         self.indices_map = indices_map
         self.ignore_allele = ignore_allele
+        self.canonicalize_genes = canonicalize_genes
 
         # Caches
         self._repertoire_cache = {}
@@ -112,6 +118,12 @@ class Gapped_4mer_VJgene:
         self.vj_scaler = None
         self.vj_model = None
         self.best_alpha = 0.5  # weight for kmer model in ensemble
+
+        # Selected feature names (set after train()); used for covariate-adjusted
+        # classification, which residualizes the per-sample values at these
+        # L1-selected columns and refits with logistic regression.
+        self.kmer_selected_names = []
+        self.vj_selected_names = []
 
     # ------------------------------------------------------------------
     # Repertoire loading and caching
@@ -167,9 +179,14 @@ class Gapped_4mer_VJgene:
         return counts
 
     def _normalize_gene(self, gene):
-        """Apply optional allele stripping to a gene name."""
-        if self.ignore_allele and isinstance(gene, str):
-            gene = gene.split('*')[0]
+        """Apply optional allele stripping (and IMGT-singleton collapse) to a gene."""
+        if not isinstance(gene, str):
+            return gene
+        if self.canonicalize_genes:
+            from utils.gene_harmonization import canonicalize_gene
+            return canonicalize_gene(gene)
+        if self.ignore_allele:
+            return gene.split('*')[0]
         return gene
 
     def _get_vj_feature_dict(self, file_path):
@@ -304,6 +321,9 @@ class Gapped_4mer_VJgene:
             self.kmer_model = LogisticRegression(C=best_c_kmer, penalty='l1',
                                                   solver='liblinear', max_iter=1000)
             self.kmer_model.fit(X_kmer_base_sc, y_base)
+            kmer_nonzero = np.flatnonzero(self.kmer_model.coef_.ravel())
+            kmer_feature_names = self.kmer_vectorizer.get_feature_names_out()
+            self.kmer_selected_names = [str(kmer_feature_names[i]) for i in kmer_nonzero]
 
         # --- Tune and train V/J model ---
         if use_vj:
@@ -319,6 +339,9 @@ class Gapped_4mer_VJgene:
             self.vj_model = LogisticRegression(C=best_c_vj, penalty='l1',
                                                 solver='liblinear', max_iter=1000)
             self.vj_model.fit(X_vj_base_sc, y_base)
+            vj_nonzero = np.flatnonzero(self.vj_model.coef_.ravel())
+            vj_feature_names = self.vj_vectorizer.get_feature_names_out()
+            self.vj_selected_names = [str(vj_feature_names[i]) for i in vj_nonzero]
 
         # --- Alpha sweep (ensemble only) ---
         best_alpha = 0.5
@@ -369,6 +392,47 @@ class Gapped_4mer_VJgene:
             'n_kmer_features': n_kmer_features,
             'n_vj_features': n_vj_features,
         }
+
+    def get_selected_features(self, file_path):
+        """
+        Return a per-sample dense vector of L1-selected feature values.
+
+        Concatenates the raw counts at the columns where the trained k-mer and
+        V/J L1 logistic regressions retained non-zero coefficients (subject to
+        ``self.submodel``). Used for covariate-adjusted classification, where
+        the resulting (n_samples, n_selected) matrix is residualized against
+        demographics before refitting an L1 logistic regression.
+
+        Returns:
+            np.ndarray of shape (n_selected_kmer + n_selected_vj,) with dtype
+            float32. Empty array if no features were selected.
+        """
+        vecs = []
+        if self.submodel in ('ensemble', 'kmer_only') and self.kmer_selected_names:
+            kmer_dict = self._get_kmer_feature_dict(file_path)
+            vecs.append(np.array(
+                [kmer_dict.get(name, 0) for name in self.kmer_selected_names],
+                dtype=np.float32,
+            ))
+        if self.submodel in ('ensemble', 'vj_only') and self.vj_selected_names:
+            vj_dict = self._get_vj_feature_dict(file_path)
+            vecs.append(np.array(
+                [vj_dict.get(name, 0) for name in self.vj_selected_names],
+                dtype=np.float32,
+            ))
+        if not vecs:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(vecs)
+
+    @property
+    def n_selected_features(self):
+        """Total number of L1-selected features across active sub-models."""
+        n = 0
+        if self.submodel in ('ensemble', 'kmer_only'):
+            n += len(self.kmer_selected_names)
+        if self.submodel in ('ensemble', 'vj_only'):
+            n += len(self.vj_selected_names)
+        return n
 
     def predict_diagnosis(self, file_path):
         """

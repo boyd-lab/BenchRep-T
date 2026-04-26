@@ -66,3 +66,37 @@ def strip_allele(gene_name):
     if not isinstance(gene_name, str):
         return gene_name
     return gene_name.split('*')[0]
+
+
+# IMGT TRBV families with a single functional member. The Adaptive convention
+# names these as "TRBV<N>-1"; IMGT canonical drops the "-1". Required when
+# merging cohorts processed under each convention (e.g. internal MAL-ID vs
+# external Adaptive-derived T1D files).
+_IMGT_SINGLETON_TRBV = {
+    'TRBV2', 'TRBV9', 'TRBV13', 'TRBV14', 'TRBV15',
+    'TRBV18', 'TRBV19', 'TRBV27', 'TRBV28', 'TRBV30',
+}
+
+
+def collapse_imgt_singleton(gene_name):
+    """Collapse Adaptive-style "-1" suffix on IMGT singleton TRBV families.
+
+    Examples:
+        TRBV13-1 → TRBV13
+        TRBV2-1  → TRBV2
+        TRBV7-9  → TRBV7-9   (multi-member family, untouched)
+        TRBV13   → TRBV13    (no-op)
+    """
+    if not isinstance(gene_name, str) or not gene_name.endswith('-1'):
+        return gene_name
+    base = gene_name[:-2]
+    return base if base in _IMGT_SINGLETON_TRBV else gene_name
+
+
+def canonicalize_gene(gene_name):
+    """Strip allele and collapse Adaptive singletons to IMGT canonical form.
+
+    Use this to align V/J gene labels across cohorts that mix IMGT (no "-1"
+    on singleton families) and Adaptive ("-1" on every gene) conventions.
+    """
+    return collapse_imgt_singleton(strip_allele(gene_name))
