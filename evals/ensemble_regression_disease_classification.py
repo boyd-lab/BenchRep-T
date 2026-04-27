@@ -392,9 +392,9 @@ if __name__ == "__main__":
     parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
                         help='Apply per-disease cohort distribution adjustment for fair '
                              'comparison. HIV: filter both cohorts to African ancestry. '
-                             'Lupus/T1D/Influenza: keep the disease cohort unchanged and '
-                             'subsample Healthy/Background so its age distribution (10y bins) '
-                             'matches the disease cohort. Covid19 is left unadjusted.')
+                             'Lupus/T1D/Influenza/Covid19: keep the disease cohort unchanged '
+                             'and subsample Healthy/Background so its age distribution (10y '
+                             'bins) matches the disease cohort.')
     parser.add_argument('--random_baseline_seeds', type=int, nargs='+', default=None,
                         help='Run the random-sampling healthy baseline for each seed '
                              '(implies --adjust_distribution_by_demographics). For each '

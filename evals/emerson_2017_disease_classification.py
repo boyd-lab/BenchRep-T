@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from models.emerson_2017 import CMV_Immunosequencing_Model
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
+from utils.cohort_adjustments import apply_cohort_adjustment
 
 
 class Emerson2017Evaluator:
@@ -74,37 +75,53 @@ class Emerson2017Evaluator:
         metadata = pd.read_csv(metadata_path, sep='\t')
         return metadata
     
-    def prepare_disease_data(self, metadata, target_disease, disease_col='disease'):
+    def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
+                             adjust_distribution_by_demographics=False,
+                             random_baseline=False,
+                             random_baseline_seed=7):
         """
         Prepare binary classification data for a specific disease.
-        
+
         Filters the metadata to include only:
         - Samples with the target disease (label = 1)
         - Healthy/Background samples (label = 0)
-        
+
         Args:
             metadata: DataFrame with metadata
             target_disease: Name of the disease to classify (e.g., 'Lupus', 'T1D', 'HIV')
             disease_col: Column name containing disease labels (default: 'disease')
-        
+            adjust_distribution_by_demographics: If True, apply the per-disease
+                demographic cohort adjustment from ``DEMOGRAPHIC_ADJUSTMENTS``.
+            random_baseline: If True (with ``adjust_distribution_by_demographics``),
+                keep the disease side identical to the demographic-matched run
+                but resample healthy uniformly at random to the same target N.
+            random_baseline_seed: RNG seed for the random-baseline draw.
+
         Returns:
             DataFrame with filtered data and a new 'label' column (1 for disease, 0 for healthy)
         """
         # Filter to include only target disease and healthy samples
         mask = metadata[disease_col].isin([target_disease, self.HEALTHY_LABEL])
         filtered_data = metadata[mask].copy()
-        
+
         # Create binary labels: 1 for disease, 0 for healthy
         filtered_data['label'] = (filtered_data[disease_col] == target_disease).astype(int)
-        
+
+        if adjust_distribution_by_demographics:
+            filtered_data = apply_cohort_adjustment(
+                filtered_data, target_disease,
+                seed=random_baseline_seed if random_baseline else self.subsample_seed,
+                random_baseline=random_baseline,
+            )
+
         n_disease = (filtered_data['label'] == 1).sum()
         n_healthy = (filtered_data['label'] == 0).sum()
-        
+
         print(f"Prepared data for '{target_disease}' classification:")
         print(f"  Disease ({target_disease}): {n_disease} samples")
         print(f"  Healthy ({self.HEALTHY_LABEL}): {n_healthy} samples")
         print(f"  Total: {len(filtered_data)} samples")
-        
+
         return filtered_data
     
     def get_available_diseases(self, metadata_path, disease_col='disease'):
@@ -353,6 +370,9 @@ class Emerson2017Evaluator:
                               n_folds=3, random_state=7,
                               tune_parameters=True, p_value_candidates=None,
                               allowed_participants=None,
+                              adjust_distribution_by_demographics=False,
+                              random_baseline=False,
+                              random_baseline_seed=7,
                               covariate_adjust=False,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
@@ -380,8 +400,13 @@ class Emerson2017Evaluator:
         """
         # Load and prepare data with binary labels
         raw_metadata = self.load_metadata(metadata_path)
-        metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col)
-        
+        metadata = self.prepare_disease_data(
+            raw_metadata, target_disease, disease_col,
+            adjust_distribution_by_demographics=adjust_distribution_by_demographics,
+            random_baseline=random_baseline,
+            random_baseline_seed=random_baseline_seed,
+        )
+
         # Add file paths
         metadata = self.add_file_paths(
             metadata, data_dir, participant_col, file_prefix, file_suffix
@@ -473,17 +498,23 @@ class Emerson2017Evaluator:
                     print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
                           f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
 
+                    method_name = 'Emerson_2017'
+                    if random_baseline:
+                        method_name += '_RandomBaseline'
                     for (_, row), score in zip(test_data.iterrows(), test_probs):
-                        all_test_rows.append({
+                        entry = {
                             'participant_label': row[participant_col],
                             'specimen_label': row['specimen_label'],
                             'disease_label': int(row['label']),
                             'disease_label_str': row[disease_col],
-                            'method': 'Emerson_2017',
+                            'method': method_name,
                             'disease_model': target_disease,
                             'model_score': float(score),
                             'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                        })
+                        }
+                        if random_baseline:
+                            entry['random_baseline_seed'] = int(random_baseline_seed)
+                        all_test_rows.append(entry)
 
                     fold_results.append({
                         'fold': test_fold,
@@ -574,17 +605,23 @@ class Emerson2017Evaluator:
                 )
                 test_labels_arr = test_cov['label'].values
 
+                method_name = 'Emerson_2017_CovAdj'
+                if random_baseline:
+                    method_name += '_RandomBaseline'
                 for (_, row), score in zip(test_cov.iterrows(), test_probs):
-                    all_test_rows.append({
+                    entry = {
                         'participant_label': row[participant_col],
                         'specimen_label': row['specimen_label'],
                         'disease_label': int(row['label']),
                         'disease_label_str': row[disease_col],
-                        'method': 'Emerson_2017_CovAdj',
+                        'method': method_name,
                         'disease_model': target_disease,
                         'model_score': float(score),
                         'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    })
+                    }
+                    if random_baseline:
+                        entry['random_baseline_seed'] = int(random_baseline_seed)
+                    all_test_rows.append(entry)
             else:
                 # ----------------------------------------------------------
                 # Standard Emerson 2017 prediction
@@ -597,17 +634,23 @@ class Emerson2017Evaluator:
                 test_probs = np.array(test_probs)
                 test_labels_arr = np.array(test_labels)
 
+                method_name = 'Emerson_2017'
+                if random_baseline:
+                    method_name += '_RandomBaseline'
                 for (_, row), score in zip(test_data.iterrows(), test_probs):
-                    all_test_rows.append({
+                    entry = {
                         'participant_label': row[participant_col],
                         'specimen_label': row['specimen_label'],
                         'disease_label': int(row['label']),
                         'disease_label_str': row[disease_col],
-                        'method': 'Emerson_2017',
+                        'method': method_name,
                         'disease_model': target_disease,
                         'model_score': float(score),
                         'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    })
+                    }
+                    if random_baseline:
+                        entry['random_baseline_seed'] = int(random_baseline_seed)
+                    all_test_rows.append(entry)
 
             # Compute AUROC, AUPR, Balanced Accuracy, and F1 for test set
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
@@ -683,6 +726,20 @@ if __name__ == "__main__":
                         help='Residualize per-sample diagnostic-TCR presence features against '
                              'demographics (age, sex, ancestry) and refit with L1 logistic regression. '
                              'Falls back to score-level adjustment if no diagnostic TCRs are found.')
+    parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
+                        help='Apply per-disease cohort distribution adjustment for fair '
+                             'comparison. HIV: filter both cohorts to African ancestry. '
+                             'Lupus/T1D/Influenza/Covid19: keep the disease cohort unchanged '
+                             'and subsample Healthy/Background so its age distribution (10y '
+                             'bins) matches the disease cohort.')
+    parser.add_argument('--random_baseline_seeds', type=int, nargs='+', default=None,
+                        help='Run the random-sampling healthy baseline for each seed '
+                             '(implies --adjust_distribution_by_demographics). For each '
+                             'seed, healthy is resampled uniformly at random to the same '
+                             'target N as the demographic-matched cohort; disease side '
+                             'mirrors the demographic-matched run. Results from all seeds '
+                             'are concatenated into one output, with a '
+                             '`random_baseline_seed` column. Example: 7 14 21 28 35.')
     parser.add_argument('--ext_metadata_path', type=str, default=None,
                         help='Optional external-cohort metadata TSV (MAL-ID column style). '
                              'When set, external samples are merged into the same fold-based '
@@ -719,7 +776,7 @@ if __name__ == "__main__":
     print(f"Available diseases: {diseases}")
     
     # Run 3-fold cross-validation for a specific disease WITH parameter tuning
-    scores_df = evaluator.run_cross_validation(
+    cv_kwargs = dict(
         metadata_path=metadata_path,
         target_disease=args.target_disease,
         data_dir=repertoire_data_dir,  # Root directory with data files
@@ -737,6 +794,46 @@ if __name__ == "__main__":
         ext_data_dir=args.ext_data_dir,
         ext_file_template=args.ext_file_template,
     )
+
+    if args.random_baseline_seeds:
+        seed_dfs = []
+        for seed in args.random_baseline_seeds:
+            print(f"\n{'#'*60}")
+            print(f"# RANDOM BASELINE RUN — seed={seed}")
+            print(f"{'#'*60}")
+            seed_df = evaluator.run_cross_validation(
+                **cv_kwargs,
+                adjust_distribution_by_demographics=True,
+                random_baseline=True,
+                random_baseline_seed=seed,
+            )
+            seed_dfs.append(seed_df)
+        scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
+
+        per_seed = []
+        for seed, seed_df in scores_df.groupby('random_baseline_seed'):
+            y = seed_df['disease_label'].values
+            p = seed_df['model_score'].values
+            per_seed.append({
+                'random_baseline_seed': int(seed),
+                'overall_auroc': roc_auc_score(y, p),
+                'overall_aupr': average_precision_score(y, p),
+            })
+        summary_df = pd.DataFrame(per_seed)
+        print(f"\n{'#'*60}")
+        print(f"# RANDOM BASELINE SUMMARY — across {len(summary_df)} seeds")
+        print(f"{'#'*60}")
+        print(summary_df.to_string(index=False))
+        print(f"Mean overall AUROC: {summary_df['overall_auroc'].mean():.4f} "
+              f"± {summary_df['overall_auroc'].std(ddof=0):.4f}")
+        print(f"Mean overall AUPR:  {summary_df['overall_aupr'].mean():.4f} "
+              f"± {summary_df['overall_aupr'].std(ddof=0):.4f}")
+    else:
+        scores_df = evaluator.run_cross_validation(
+            **cv_kwargs,
+            adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
+        )
+
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)
         print(f"\nScores saved to: {args.output_csv}")
