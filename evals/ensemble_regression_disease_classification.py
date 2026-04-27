@@ -13,7 +13,6 @@ from sklearn.metrics import roc_auc_score, average_precision_score, balanced_acc
 from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
-from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 from utils.cohort_adjustments import apply_cohort_adjustment
 
 
@@ -183,7 +182,6 @@ class EnsembleRegressionEvaluator:
                               adjust_distribution_by_demographics=False,
                               random_baseline=False,
                               random_baseline_seed=7,
-                              covariate_adjust=False,
                               debug_repertoires=0,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
@@ -292,96 +290,29 @@ class EnsembleRegressionEvaluator:
 
             train_result = self.model.train(train_files, train_labels)
 
-            if covariate_adjust:
-                # ----------------------------------------------------------
-                # L1-selected-feature covariate adjustment
-                # ----------------------------------------------------------
-                tv_cov = filter_complete_demographics(train_data)
-                test_cov = filter_complete_demographics(test_data)
-                print(f"  Covariate adjust: {len(tv_cov)} train, "
-                      f"{len(test_cov)} test samples with complete demographics.")
+            test_probs = np.array([
+                self.model.predict_diagnosis(fp)['probability_positive']
+                for fp in tqdm(test_files, desc="Testing")
+            ])
+            test_labels_arr = np.array(test_labels)
 
-                n_sel = self.model.n_selected_features
-                if n_sel == 0:
-                    # No features were retained by L1; fall back to the (n, 1)
-                    # score-level adjustment so the fold doesn't crash.
-                    print("  WARNING: 0 L1-selected features; falling back to score-level adjustment.")
-                    tv_scores = [
-                        self.model.predict_diagnosis(fp)['probability_positive']
-                        for fp in tqdm(tv_cov['file_path'].tolist(), desc="Scoring train")
-                    ]
-                    test_scores = [
-                        self.model.predict_diagnosis(fp)['probability_positive']
-                        for fp in tqdm(test_cov['file_path'].tolist(), desc="Scoring test")
-                    ]
-                    X_tv = np.array(tv_scores).reshape(-1, 1)
-                    X_test_emb = np.array(test_scores).reshape(-1, 1)
-                else:
-                    tv_feats = [
-                        self.model.get_selected_features(fp)
-                        for fp in tqdm(tv_cov['file_path'].tolist(),
-                                       desc="Building train selected-feature matrix")
-                    ]
-                    test_feats = [
-                        self.model.get_selected_features(fp)
-                        for fp in tqdm(test_cov['file_path'].tolist(),
-                                       desc="Building test selected-feature matrix")
-                    ]
-                    X_tv = np.vstack(tv_feats).astype(np.float32)
-                    X_test_emb = np.vstack(test_feats).astype(np.float32)
-                    print(f"  Selected-feature matrix: train {X_tv.shape}, test {X_test_emb.shape} "
-                          f"(kmer={len(self.model.kmer_selected_names)}, "
-                          f"vj={len(self.model.vj_selected_names)})")
-
-                test_probs = covariate_adjusted_predict(
-                    X_tv, tv_cov, tv_cov['label'].values, X_test_emb, test_cov
-                )
-                test_labels_arr = test_cov['label'].values
-
-                method_name = self._method_name() + '_CovAdj'
+            method_name = self._method_name()
+            if random_baseline:
+                method_name += '_RandomBaseline'
+            for (_, row), score in zip(test_data.iterrows(), test_probs):
+                entry = {
+                    'participant_label': row[participant_col],
+                    'specimen_label': row['specimen_label'],
+                    'disease_label': int(row['label']),
+                    'disease_label_str': row[disease_col],
+                    'method': method_name,
+                    'disease_model': target_disease,
+                    'model_score': float(score),
+                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                }
                 if random_baseline:
-                    method_name += '_RandomBaseline'
-                for (_, row), score in zip(test_cov.iterrows(), test_probs):
-                    entry = {
-                        'participant_label': row[participant_col],
-                        'specimen_label': row['specimen_label'],
-                        'disease_label': int(row['label']),
-                        'disease_label_str': row[disease_col],
-                        'method': method_name,
-                        'disease_model': target_disease,
-                        'model_score': float(score),
-                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    }
-                    if random_baseline:
-                        entry['random_baseline_seed'] = int(random_baseline_seed)
-                    all_test_rows.append(entry)
-            else:
-                # ----------------------------------------------------------
-                # Standard prediction
-                # ----------------------------------------------------------
-                test_probs = np.array([
-                    self.model.predict_diagnosis(fp)['probability_positive']
-                    for fp in tqdm(test_files, desc="Testing")
-                ])
-                test_labels_arr = np.array(test_labels)
-
-                method_name = self._method_name()
-                if random_baseline:
-                    method_name += '_RandomBaseline'
-                for (_, row), score in zip(test_data.iterrows(), test_probs):
-                    entry = {
-                        'participant_label': row[participant_col],
-                        'specimen_label': row['specimen_label'],
-                        'disease_label': int(row['label']),
-                        'disease_label_str': row[disease_col],
-                        'method': method_name,
-                        'disease_model': target_disease,
-                        'model_score': float(score),
-                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    }
-                    if random_baseline:
-                        entry['random_baseline_seed'] = int(random_baseline_seed)
-                    all_test_rows.append(entry)
+                    entry['random_baseline_seed'] = int(random_baseline_seed)
+                all_test_rows.append(entry)
 
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
@@ -472,11 +403,6 @@ if __name__ == "__main__":
                              'mirrors the demographic-matched run. Results from all seeds '
                              'are concatenated into one output, with a '
                              '`random_baseline_seed` column. Example: 7 14 21 28 35.')
-    parser.add_argument('--covariate_adjust', action='store_true',
-                        help='Residualize per-sample L1-selected k-mer / V-J feature counts '
-                             'against demographics (age, sex, ancestry) and refit with L1 '
-                             'logistic regression. Falls back to score-level adjustment if '
-                             'no features were retained.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     parser.add_argument('--debug', action='store_true',
@@ -523,7 +449,6 @@ if __name__ == "__main__":
                 adjust_distribution_by_demographics=True,
                 random_baseline=True,
                 random_baseline_seed=seed,
-                covariate_adjust=args.covariate_adjust,
                 debug_repertoires=args.debug_repertoires,
                 ext_metadata_path=args.ext_metadata_path,
                 ext_data_dir=args.ext_data_dir,
@@ -558,7 +483,6 @@ if __name__ == "__main__":
             data_dir=args.repertoire_data_dir,
             require_demographics=args.require_demographics,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
-            covariate_adjust=args.covariate_adjust,
             debug_repertoires=args.debug_repertoires,
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,
