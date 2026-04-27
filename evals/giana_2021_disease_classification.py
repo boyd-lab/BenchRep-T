@@ -152,6 +152,7 @@ class GIANAEvaluator:
                  max_seqs_per_specimen=None,
                  indices_map=None,
                  results_dir='results/giana',
+                 canonicalize_genes=False,
                  debug=False,
                  debug_repertoires=10):
         """
@@ -190,6 +191,7 @@ class GIANAEvaluator:
         self.max_seqs_per_specimen = max_seqs_per_specimen
         self.indices_map = indices_map
         self.results_dir = results_dir
+        self.canonicalize_genes = canonicalize_genes
         self.debug = debug
         self.debug_repertoires = debug_repertoires
 
@@ -247,14 +249,24 @@ class GIANAEvaluator:
     # Sequence loading and GIANA input preparation
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _normalize_v_gene(v_gene_str):
-        """Normalize V-gene call to IMGT format (e.g., TRBV10-3*01)."""
+    def _normalize_v_gene(self, v_gene_str):
+        """Normalize V-gene call to IMGT format (e.g., TRBV10-3*01).
+
+        When ``canonicalize_genes`` is True, also collapse Adaptive-style
+        ``-1`` suffixes on IMGT singleton TRBV families before re-attaching
+        the placeholder allele, so internal and external cohort V-gene
+        vocabularies align.
+        """
         if pd.isna(v_gene_str) or str(v_gene_str).strip() == '':
             return None
         v = str(v_gene_str).strip().split(',')[0].strip()
         if not v:
             return None
+        if self.canonicalize_genes:
+            from utils.gene_harmonization import canonicalize_gene
+            v = canonicalize_gene(v)
+            if not v:
+                return None
         if '*' not in v:
             v = v + '*01'
         return v
@@ -636,7 +648,9 @@ class GIANAEvaluator:
                               tune_parameters=True,
                               p_value_candidates=None,
                               allowed_participants=None,
-                              covariate_adjust=False):
+                              covariate_adjust=False,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -674,6 +688,16 @@ class GIANAEvaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+            self.canonicalize_genes = True
 
         if self.debug:
             disease_rows = metadata[metadata['label'] == 1].head(self.debug_repertoires)
@@ -1024,6 +1048,16 @@ if __name__ == '__main__':
                         help='Residualize GIANA scores against demographics using cross-fold OLS '
                              '(other folds\' test scores used as training data to avoid circularity; '
                              'requires complete demographics)')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style). '
+                             'When set, external samples are merged into the same fold-based '
+                             'CV split as the internal cohort and V/J genes are canonicalized.')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory containing the external cohort repertoire files '
+                             '(required when --ext_metadata_path is provided).')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     evaluator = GIANAEvaluator(
@@ -1045,6 +1079,9 @@ if __name__ == '__main__':
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         covariate_adjust=args.covariate_adjust,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
 
     if args.output_csv:

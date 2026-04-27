@@ -108,6 +108,7 @@ class ABMILEvaluator:
         self.kernel = kernel
         self.conv_units = tuple(conv_units)
         self.features = features
+        self.canonicalize_genes = False
         self.model = None
 
     # ------------------------------------------------------------------
@@ -199,7 +200,9 @@ class ABMILEvaluator:
                               n_folds=3, random_state=7,
                               allowed_participants=None,
                               require_demographics=False,
-                              covariate_adjust=False):
+                              covariate_adjust=False,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -237,6 +240,16 @@ class ABMILEvaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+            self.canonicalize_genes = True
 
         if allowed_participants is not None:
             before = len(metadata)
@@ -282,6 +295,7 @@ class ABMILEvaluator:
                 subsample_fraction=self.subsample_fraction,
                 subsample_seed=self.subsample_seed,
                 indices_map=self.indices_map,
+                canonicalize_genes=self.canonicalize_genes,
                 use_gpu=self.use_gpu,
                 dropout=self.dropout,
                 max_length=self.max_length,
@@ -459,6 +473,14 @@ if __name__ == "__main__":
                              'and train an L1 logistic regression head (requires complete demographics)')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style). '
+                             'Merges external samples by fold; auto-canonicalizes V/J.')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory containing the external cohort repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     evaluator = ABMILEvaluator(
@@ -486,6 +508,9 @@ if __name__ == "__main__":
         data_dir=args.repertoire_data_dir,
         require_demographics=args.require_demographics,
         covariate_adjust=args.covariate_adjust,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
 
     if args.output_csv:

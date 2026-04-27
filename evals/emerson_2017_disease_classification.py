@@ -57,6 +57,7 @@ class Emerson2017Evaluator:
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
         self.indices_map = indices_map
+        self.canonicalize_genes = False
         self.model = None
     
     def load_metadata(self, metadata_path):
@@ -224,7 +225,8 @@ class Emerson2017Evaluator:
             p_value_threshold=p_value_candidates[0], sequence_col=self.sequence_col,
             v_col=self.v_col, j_col=self.j_col,
             subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
-            subsample_n=self.subsample_n, indices_map=self.indices_map
+            subsample_n=self.subsample_n, indices_map=self.indices_map,
+            canonicalize_genes=self.canonicalize_genes,
         )
         
         # Step 1: Preload all repertoire files once (train + val)
@@ -244,7 +246,8 @@ class Emerson2017Evaluator:
                 p_value_threshold=p_val, sequence_col=self.sequence_col,
                 v_col=self.v_col, j_col=self.j_col,
                 subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
-                indices_map=self.indices_map
+                indices_map=self.indices_map,
+                canonicalize_genes=self.canonicalize_genes,
             )
             model._repertoire_cache = base_model._repertoire_cache
             model._tcr_stats_cache = base_model._tcr_stats_cache
@@ -323,7 +326,8 @@ class Emerson2017Evaluator:
             p_value_threshold=best_p_value, sequence_col=self.sequence_col,
             v_col=self.v_col, j_col=self.j_col,
             subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
-            subsample_n=self.subsample_n, indices_map=self.indices_map
+            subsample_n=self.subsample_n, indices_map=self.indices_map,
+            canonicalize_genes=self.canonicalize_genes,
         )
         self.model._repertoire_cache = base_model._repertoire_cache
         self.model._tcr_stats_cache = base_model._tcr_stats_cache
@@ -349,7 +353,9 @@ class Emerson2017Evaluator:
                               n_folds=3, random_state=7,
                               tune_parameters=True, p_value_candidates=None,
                               allowed_participants=None,
-                              covariate_adjust=False):
+                              covariate_adjust=False,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
         
@@ -383,6 +389,17 @@ class Emerson2017Evaluator:
         
         # Filter to only include files that exist
         metadata = self.filter_existing_files(metadata)
+
+        # Optional: merge an external cohort by fold (canonicalizes V/J calls).
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+            self.canonicalize_genes = True
 
         # Filter to allowed participants if specified (e.g., for min-sequence-count filtering)
         if allowed_participants is not None:
@@ -488,7 +505,8 @@ class Emerson2017Evaluator:
                     p_value_threshold=self.p_value_threshold, sequence_col=self.sequence_col,
                     v_col=self.v_col, j_col=self.j_col,
                     subsample_fraction=self.subsample_fraction, subsample_seed=self.subsample_seed,
-                    indices_map=self.indices_map
+                    indices_map=self.indices_map,
+                    canonicalize_genes=self.canonicalize_genes,
                 )
                 self.model.identify_diagnostic_tcrs(train_files, train_labels)
                 self.model.train_beta_binomial_model(train_files, train_labels)
@@ -665,6 +683,16 @@ if __name__ == "__main__":
                         help='Residualize per-sample diagnostic-TCR presence features against '
                              'demographics (age, sex, ancestry) and refit with L1 logistic regression. '
                              'Falls back to score-level adjustment if no diagnostic TCRs are found.')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style). '
+                             'When set, external samples are merged into the same fold-based '
+                             'CV split as the internal cohort and V/J genes are canonicalized.')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory containing the external cohort repertoire files '
+                             '(required when --ext_metadata_path is provided).')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     print("Emerson 2017 Disease Classification Evaluation")
@@ -705,6 +733,9 @@ if __name__ == "__main__":
         tune_parameters=True,
         p_value_candidates=[1e-2, 1e-3, 1e-4, 1e-5, 1e-6],
         covariate_adjust=args.covariate_adjust,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)

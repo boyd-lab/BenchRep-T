@@ -30,6 +30,7 @@ DEMOGRAPHIC_ADJUSTMENTS = {
     'Lupus': {'mode': 'age_match_healthy', 'bin_width': 10},
     'T1D': {'mode': 'age_match_healthy', 'bin_width': 10},
     'Influenza': {'mode': 'age_match_healthy', 'bin_width': 10},
+    'Covid19': {'mode': 'age_match_healthy', 'bin_width': 10},
 }
 
 

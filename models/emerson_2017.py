@@ -33,7 +33,8 @@ class CMV_Immunosequencing_Model:
                  v_col='v_call', j_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
                  indices_map=None,
-                 ignore_allele=False):
+                 ignore_allele=False,
+                 canonicalize_genes=False):
         """
         Initialize the model with a p-value threshold for feature selection.
         Paper uses 1e-4 as optimized via cross-validation[cite: 52].
@@ -51,6 +52,10 @@ class CMV_Immunosequencing_Model:
             ignore_allele: If True, strip allele designations (*XX) from V/J gene
                            names when building TCR tuples, enabling gene-level matching
                            across datasets with different allele conventions.
+            canonicalize_genes: If True, additionally collapse Adaptive-style "-1"
+                           suffixes on IMGT singleton TRBV families (e.g.
+                           TRBV13-1 → TRBV13). Required when mixing internal IMGT
+                           and external Adaptive-derived repertoires in one model.
         """
         self.p_value_threshold = p_value_threshold
         self.sequence_col = sequence_col
@@ -61,6 +66,7 @@ class CMV_Immunosequencing_Model:
         self.subsample_n = subsample_n
         self.indices_map = indices_map
         self.ignore_allele = ignore_allele
+        self.canonicalize_genes = canonicalize_genes
         self.diagnostic_tcrs = set()
         self.diagnostic_tcr_list = []  # Sorted list, deterministic column order
         self._diagnostic_tcr_to_idx = None  # Lazy-built reverse index
@@ -101,8 +107,13 @@ class CMV_Immunosequencing_Model:
         # of a unique TCRβ as a combination of V gene, CDR3 amino acid sequence, and J gene.
         df = df[[self.v_col, self.sequence_col, self.j_col]].dropna()
 
-        # Strip allele designations for gene-level matching across datasets
-        if self.ignore_allele:
+        # Strip allele designations for gene-level matching across datasets;
+        # optionally also collapse IMGT singleton -1 suffixes for cross-cohort merges.
+        if self.canonicalize_genes:
+            from utils.gene_harmonization import canonicalize_gene
+            df[self.v_col] = df[self.v_col].map(canonicalize_gene)
+            df[self.j_col] = df[self.j_col].map(canonicalize_gene)
+        elif self.ignore_allele:
             from utils.gene_harmonization import strip_allele
             df[self.v_col] = df[self.v_col].map(strip_allele)
             df[self.j_col] = df[self.j_col].map(strip_allele)

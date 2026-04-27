@@ -329,7 +329,9 @@ class Ostmeyer2019Evaluator:
                               tune_parameters=True,
                               abundance_method_candidates=None,
                               allowed_participants=None,
-                              covariate_adjust=False):
+                              covariate_adjust=False,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -364,6 +366,17 @@ class Ostmeyer2019Evaluator:
         
         # Filter to only include files that exist
         metadata = self.filter_existing_files(metadata)
+
+        # Optional: merge an external cohort by fold (Ostmeyer is CDR3-only,
+        # so V/J canonicalization is not needed but the cohort merge still applies).
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
 
         # Filter to allowed participants if specified (e.g., for min-sequence-count filtering)
         if allowed_participants is not None:
@@ -592,6 +605,14 @@ if __name__ == "__main__":
     parser.add_argument('--covariate_adjust', action='store_true',
                         help='Residualize model scores against demographics (age, sex, ancestry) '
                              'and train an L1 logistic regression head (requires complete demographics)')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style). '
+                             'Merges external samples by fold.')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory containing the external cohort repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     print("Ostmeyer 2019 Disease Classification Evaluation")
@@ -637,6 +658,9 @@ if __name__ == "__main__":
         tune_parameters=True,
         abundance_method_candidates=['A', 'B'],
         covariate_adjust=args.covariate_adjust,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)

@@ -16,6 +16,7 @@ j_call) before use.  See external_data_process/preprocess_repertoires.py.
 Supported models:
   - ensemble_regression: Gapped 4-mer + V/J gene logistic regression ensemble
   - emerson_2017: Fisher's exact test + Beta-Binomial generative model
+  - ostmeyer_2019: MIL + 4-mer Atchley-factor logistic regression
 """
 
 import os
@@ -28,10 +29,11 @@ from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
 from models.emerson_2017 import CMV_Immunosequencing_Model
+from models.ostmeyer_2019 import MIL_TCR_Classifier
 
 
 SUPPORTED_MODELS = ['ensemble_regression', 'ensemble_regression_kmer',
-                    'ensemble_regression_vj', 'emerson_2017']
+                    'ensemble_regression_vj', 'emerson_2017', 'ostmeyer_2019']
 
 # Model name → display name for output
 MODEL_DISPLAY_NAMES = {
@@ -39,6 +41,7 @@ MODEL_DISPLAY_NAMES = {
     'ensemble_regression_kmer': 'Ensemble_Regression_Kmer',
     'ensemble_regression_vj': 'Ensemble_Regression_VJ',
     'emerson_2017': 'Emerson_2017',
+    'ostmeyer_2019': 'Ostmeyer_2019',
 }
 
 # Map model names to ensemble regression submodel parameter
@@ -77,7 +80,10 @@ class ExternalEvaluator:
                  val_split=0.2, n_cv_folds=5,
                  # Emerson 2017 hyperparameters
                  train_val_ratio=0.9,
-                 p_value_candidates=None):
+                 p_value_candidates=None,
+                 # Ostmeyer 2019 hyperparameters
+                 ostmeyer_n_restarts=200,
+                 canonicalize_genes=False):
         if model_name not in SUPPORTED_MODELS:
             raise ValueError(f"Unknown model '{model_name}'. "
                              f"Supported: {SUPPORTED_MODELS}")
@@ -86,6 +92,8 @@ class ExternalEvaluator:
         self.n_cv_folds = n_cv_folds
         self.train_val_ratio = train_val_ratio
         self.p_value_candidates = p_value_candidates or [1e-2, 1e-3, 1e-4, 1e-5, 1e-6]
+        self.ostmeyer_n_restarts = ostmeyer_n_restarts
+        self.canonicalize_genes = canonicalize_genes
         self.model = None
 
     # ------------------------------------------------------------------
@@ -171,6 +179,7 @@ class ExternalEvaluator:
             v_gene_col=self.V_GENE_COL,
             j_gene_col=self.J_GENE_COL,
             ignore_allele=True,
+            canonicalize_genes=self.canonicalize_genes,
             submodel=submodel,
         )
 
@@ -182,6 +191,14 @@ class ExternalEvaluator:
             v_col=self.V_GENE_COL,
             j_col=self.J_GENE_COL,
             ignore_allele=True,
+            canonicalize_genes=self.canonicalize_genes,
+        )
+
+    def _make_ostmeyer_2019(self):
+        """Create an Ostmeyer 2019 model with standard AIRR settings."""
+        return MIL_TCR_Classifier(
+            n_restarts=self.ostmeyer_n_restarts,
+            sequence_col=self.SEQUENCE_COL,
         )
 
     # ------------------------------------------------------------------
@@ -192,6 +209,11 @@ class ExternalEvaluator:
         """Train the Ensemble Regression model (handles internal 80/20 split)."""
         submodel = _ENSEMBLE_SUBMODEL_MAP.get(self.model_name, 'ensemble')
         self.model = self._make_ensemble_regression(submodel)
+        return self.model.train(train_files, train_labels)
+
+    def _train_ostmeyer_2019(self, train_files, train_labels):
+        """Train the Ostmeyer 2019 model (handles its own random restarts)."""
+        self.model = self._make_ostmeyer_2019()
         return self.model.train(train_files, train_labels)
 
     def _train_emerson_2017(self, train_files, train_labels, random_state=7):
@@ -340,6 +362,8 @@ class ExternalEvaluator:
             if train_result.get('no_diagnostic_tcrs', False):
                 print("Cannot evaluate: no diagnostic TCRs found.")
                 return pd.DataFrame(), train_result
+        elif self.model_name == 'ostmeyer_2019':
+            train_result = self._train_ostmeyer_2019(train_files, train_labels)
 
         # --- Prepare external data ---
         ext_data = self._prepare_external_data(
@@ -387,6 +411,10 @@ class ExternalEvaluator:
             print(f"  Best p-value:       {train_result['best_p_value']:.0e}")
             print(f"  Diagnostic TCRs:    {train_result['n_diagnostic_tcrs']}")
             print(f"  Val AUROC:          {train_result['val_auroc']:.4f}")
+        elif self.model_name == 'ostmeyer_2019':
+            print(f"  Best loss:          {train_result['best_loss']:.4f}")
+            print(f"  Train accuracy:     {train_result['train_accuracy']:.4f}")
+            print(f"  Restarts:           {train_result['n_restarts']}")
 
         print(f"Evaluation: {len(ext_files)} samples (external)")
         print(f"  AUROC:        {auroc:.4f}")
@@ -430,6 +458,8 @@ class ExternalEvaluator:
             return self._train_emerson_2017(
                 train_files, train_labels, random_state=random_state
             )
+        if self.model_name == 'ostmeyer_2019':
+            return self._train_ostmeyer_2019(train_files, train_labels)
         raise ValueError(f"Unknown model '{self.model_name}'")
 
     def run_cross_validation(self,
@@ -633,7 +663,7 @@ if __name__ == "__main__":
                         choices=['hold_out', 'cv'],
                         help='Evaluation mode: hold_out (default) trains on '
                              'internal data and evaluates on external; cv runs '
-                             'k-fold cross-validation on the external dataset.')
+                             'k-fold CV on the external dataset.')
 
     # Model selection
     parser.add_argument('--model', type=str, default='ensemble_regression',
@@ -650,7 +680,7 @@ if __name__ == "__main__":
                              'in hold_out mode (must exist in internal metadata); '
                              'optional in cv mode (defaults to --ext_disease_label).')
 
-    # External dataset — assumes preprocessed files with AIRR column names
+    # External dataset — assumes preprocessed files with AIRR column names.
     parser.add_argument('--ext_metadata_path', type=str, required=True,
                         help='Path to external metadata file')
     parser.add_argument('--ext_data_dir', type=str, required=True,
@@ -677,6 +707,12 @@ if __name__ == "__main__":
     parser.add_argument('--n_folds', type=int, default=3,
                         help='Number of folds to iterate over (cv mode, default: 3)')
 
+    parser.add_argument('--canonicalize_genes', action='store_true',
+                        help='Collapse Adaptive-style "-1" suffixes on IMGT '
+                             'singleton TRBV families (TRBV13-1 → TRBV13). '
+                             'Required when the external cohort uses Adaptive '
+                             'V-gene naming alongside IMGT-named internal data.')
+
     # Model hyperparameters
     parser.add_argument('--val_split', type=float, default=0.2,
                         help='Internal val fraction for Ensemble Regression alpha tuning')
@@ -684,6 +720,8 @@ if __name__ == "__main__":
                         help='CV folds for Ensemble Regression C tuning')
     parser.add_argument('--train_val_ratio', type=float, default=0.9,
                         help='Train/val ratio for Emerson 2017 tuning')
+    parser.add_argument('--ostmeyer_n_restarts', type=int, default=200,
+                        help='L-BFGS-B random restarts for Ostmeyer 2019 (default: 200)')
     parser.add_argument('--random_state', type=int, default=7,
                         help='Random seed')
 
@@ -704,6 +742,8 @@ if __name__ == "__main__":
         val_split=args.val_split,
         n_cv_folds=args.n_cv_folds,
         train_val_ratio=args.train_val_ratio,
+        ostmeyer_n_restarts=args.ostmeyer_n_restarts,
+        canonicalize_genes=args.canonicalize_genes,
     )
 
     if args.mode == 'hold_out':
@@ -721,7 +761,7 @@ if __name__ == "__main__":
             random_state=args.random_state,
             output_csv=args.output_csv,
         )
-    else:
+    else:  # cv
         scores_df, metrics = evaluator.run_cross_validation(
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,

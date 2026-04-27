@@ -1,70 +1,56 @@
 """
-Meta-model evaluator combining ensemble regression predictions with demographic features.
+V/J gene + demographics disease classification.
 
-Tests whether TCR repertoire features (gapped 4-mer + V/J gene model predictions)
-and demographic features (age, sex, ancestry) are orthogonal for disease
-classification by training a stacking meta-model.
+Single-stage classifier that concatenates per-sample V/J gene count features
+(as used by the V/J sub-model of `Gapped_4mer_VJgene`) with demographic
+features (age, sex, ancestry), then fits one L1-regularized logistic
+regression to predict disease status.
 
-Architecture per CV fold:
-  1. Split non-test data into base_train (80%) and meta_train (20%)
-  2. Train ensemble regression on base_train
-  3. Obtain out-of-sample ensemble regression predictions on meta_train and test
-  4. Extract demographic features for meta_train and test
-  5. Train logistic regression meta-model on combined features
-  6. Evaluate meta-model on test set
+Tests whether V/J gene usage and demographics carry jointly predictive
+signal, without the two-stage stacking architecture.
 """
 
 import os
 import argparse
 import numpy as np
 import pandas as pd
+from scipy.sparse import hstack as sparse_hstack, csr_matrix
+from sklearn.feature_extraction import DictVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
-from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
 
 
-class MetaModelEvaluator:
+class VJDemographicsEvaluator:
     """
-    Stacking meta-model: ML baseline (gapped 4-mer + V/J gene) predictions
-    combined with demographic features (age, sex, ancestry).
-
-    Meta-features per sample: [ml_prob, kmer_prob, vj_prob, age, sex, ancestry...]
-
-    All samples are required to have complete demographic data (age, sex,
-    ancestry), so the comparison between methods is on the same subset.
+    Concatenate V/J gene counts with demographic features (age, sex, ancestry)
+    and train a single L1 logistic regression per CV fold.
     """
 
     HEALTHY_LABEL = "Healthy/Background"
-    META_C_CANDIDATES = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+    C_CANDIDATES = [1.0, 0.2, 0.1, 0.05, 0.03]
 
-    def __init__(self, base_train_fraction=0.8, ml_val_split=0.2,
-                 ml_n_cv_folds=5, sequence_col='cdr3_aa',
+    def __init__(self, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
-                 subsample_fraction=1.0, subsample_seed=7, indices_map=None,
-                 submodel='ensemble'):
+                 subsample_fraction=1.0, subsample_seed=7, indices_map=None):
         """
         Args:
-            base_train_fraction: Fraction of non-test data used to train the
-                ML baseline. Remaining fraction trains the meta-model.
-            ml_val_split: Internal val fraction used by ML baseline for alpha tuning.
-            ml_n_cv_folds: CV folds used by ML baseline for C tuning.
+            n_cv_folds: CV folds used for C tuning.
             sequence_col/v_gene_col/j_gene_col: Column names for repertoire data.
             subsample_fraction/subsample_seed/indices_map: For depth experiments.
-            submodel: 'ensemble' (default), 'kmer_only', or 'vj_only'.
         """
-        self.base_train_fraction = base_train_fraction
-        self.ml_val_split = ml_val_split
-        self.ml_n_cv_folds = ml_n_cv_folds
+        self.n_cv_folds = n_cv_folds
         self.sequence_col = sequence_col
         self.v_gene_col = v_gene_col
         self.j_gene_col = j_gene_col
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.indices_map = indices_map
-        self.submodel = submodel
+        self.canonicalize_genes = False
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -125,12 +111,7 @@ class MetaModelEvaluator:
     # ------------------------------------------------------------------
 
     def featurize_demographics(self, data, ancestry_categories=None):
-        """
-        Convert demographic columns into a numeric feature matrix.
-
-        Returns:
-            (feature_matrix, ancestry_categories, feature_names)
-        """
+        """Convert demographics into a numeric feature matrix."""
         age = data['age'].values.astype(float)
         sex = (data['sex'] == 'M').astype(int).values
 
@@ -147,26 +128,18 @@ class MetaModelEvaluator:
                          + [f'ancestry_{cat}' for cat in ancestry_categories])
         return features, ancestry_categories, feature_names
 
-    def _get_ml_predictions(self, ml_model, file_paths):
-        """Get ML baseline predictions for each file.
-
-        Returns an (N, k) array where k depends on the submodel:
-          - ensemble: [ml_prob, kmer_prob, vj_prob]
-          - kmer_only: [kmer_prob]
-          - vj_only: [vj_prob]
-        """
-        preds = []
-        for fp in tqdm(file_paths, desc="ML predictions", leave=False):
-            result = ml_model.predict_diagnosis(fp)
-            if self.submodel == 'ensemble':
-                preds.append([
-                    result['probability_positive'],
-                    result['kmer_probability'],
-                    result['vj_probability'],
-                ])
-            else:
-                preds.append([result['probability_positive']])
-        return np.array(preds)
+    def _build_vj_feature_extractor(self):
+        """Reuse Gapped_4mer_VJgene only for its V/J feature dict extraction."""
+        return Gapped_4mer_VJgene(
+            sequence_col=self.sequence_col,
+            v_gene_col=self.v_gene_col,
+            j_gene_col=self.j_gene_col,
+            subsample_fraction=self.subsample_fraction,
+            subsample_seed=self.subsample_seed,
+            indices_map=self.indices_map,
+            canonicalize_genes=self.canonicalize_genes,
+            submodel='vj_only',
+        )
 
     def _tune_c_cv(self, X, y, c_candidates, n_folds=5):
         """Tune C via stratified CV. Falls back to C=1.0 if too few samples."""
@@ -185,7 +158,8 @@ class MetaModelEvaluator:
             for tr_idx, vl_idx in skf.split(X, y):
                 if len(np.unique(y[vl_idx])) < 2:
                     continue
-                clf = LogisticRegression(C=c, max_iter=1000, solver='lbfgs')
+                clf = LogisticRegression(C=c, penalty='l1', solver='liblinear',
+                                         max_iter=1000)
                 clf.fit(X[tr_idx], y[tr_idx])
                 probs = clf.predict_proba(X[vl_idx])[:, 1]
                 fold_aurocs.append(roc_auc_score(y[vl_idx], probs))
@@ -207,18 +181,13 @@ class MetaModelEvaluator:
                               file_prefix='part_table_', file_suffix='.tsv.gz',
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
-                              n_folds=3, random_state=7):
+                              n_folds=3,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
-        Run 3-fold CV for the stacking meta-model.
-
-        For each fold, non-test data is split into base_train
-        (``base_train_fraction``, default 80 %) used to train the ML baseline,
-        and meta_train (remaining 20 %) used to train the meta logistic
-        regression on combined features.  The meta-model is evaluated on
-        the held-out test fold.
-
-        Returns:
-            DataFrame with per-sample test predictions for ``Meta_ML_Demo``.
+        Run 3-fold CV. Per fold: fit DictVectorizer + StandardScaler on the
+        non-test V/J counts, hstack with demographic features, train one L1
+        logistic regression, evaluate on the held-out test fold.
         """
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(raw_metadata, target_disease,
@@ -227,116 +196,112 @@ class MetaModelEvaluator:
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
 
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+            self.canonicalize_genes = True
+
         all_test_rows = []
         fold_results = []
 
         for test_fold in range(n_folds):
             print(f"\n{'='*60}")
-            print(f"META-MODEL FOLD {test_fold}")
+            print(f"V/J + DEMO FOLD {test_fold}")
             print(f"{'='*60}")
 
             test_mask = metadata[fold_col] == test_fold
             test_data = metadata[test_mask]
-            nontest_data = metadata[~test_mask]
+            train_data = metadata[~test_mask]
 
-            # Split non-test into base_train (ML baseline) and meta_train
-            base_train, meta_train = train_test_split(
-                nontest_data,
-                train_size=self.base_train_fraction,
-                random_state=random_state,
-                stratify=nontest_data['label']
-            )
+            print(f"Train: {len(train_data)}    Test: {len(test_data)}")
 
-            print(f"Base train (ML baseline): {len(base_train)}")
-            print(f"Meta train (meta-model):  {len(meta_train)}")
-            print(f"Test:                     {len(test_data)}")
+            # --- V/J gene count features ---
+            vj_extractor = self._build_vj_feature_extractor()
+            print("\nExtracting V/J counts (train)...")
+            train_vj_dicts = [vj_extractor._get_vj_feature_dict(fp)
+                              for fp in tqdm(train_data['file_path'].tolist(),
+                                             leave=False)]
+            print("Extracting V/J counts (test)...")
+            test_vj_dicts = [vj_extractor._get_vj_feature_dict(fp)
+                             for fp in tqdm(test_data['file_path'].tolist(),
+                                            leave=False)]
 
-            # --- Train ML baseline on base_train ---
-            print("\n--- Training ML Baseline on base_train ---")
-            ml_model = Gapped_4mer_VJgene(
-                val_split=self.ml_val_split,
-                n_cv_folds=self.ml_n_cv_folds,
-                sequence_col=self.sequence_col,
-                v_gene_col=self.v_gene_col,
-                j_gene_col=self.j_gene_col,
-                subsample_fraction=self.subsample_fraction,
-                subsample_seed=self.subsample_seed,
-                indices_map=self.indices_map,
-                submodel=self.submodel,
-            )
-            ml_train_result = ml_model.train(
-                base_train['file_path'].tolist(),
-                base_train['label'].tolist()
-            )
+            vectorizer = DictVectorizer(sparse=True)
+            X_train_vj = vectorizer.fit_transform(train_vj_dicts)
+            X_test_vj = vectorizer.transform(test_vj_dicts)
 
-            # --- ML predictions on meta_train and test (out-of-sample) ---
-            print("\nML baseline predictions on meta_train...")
-            meta_ml_preds = self._get_ml_predictions(
-                ml_model, meta_train['file_path'].tolist())
+            vj_scaler = StandardScaler(with_mean=False)
+            X_train_vj = vj_scaler.fit_transform(X_train_vj)
+            X_test_vj = vj_scaler.transform(X_test_vj)
 
-            print("ML baseline predictions on test...")
-            test_ml_preds = self._get_ml_predictions(
-                ml_model, test_data['file_path'].tolist())
+            vj_feature_names = list(vectorizer.get_feature_names_out())
+            n_vj = len(vj_feature_names)
 
-            # --- Demographic features ---
-            # Derive ancestry categories from all non-test data for consistency
-            ancestry_cats = sorted(nontest_data['ancestry'].unique().tolist())
-
-            X_meta_demo, _, demo_feature_names = self.featurize_demographics(
-                meta_train, ancestry_categories=ancestry_cats)
+            # --- Demographic features (ancestry cats from training data) ---
+            ancestry_cats = sorted(train_data['ancestry'].unique().tolist())
+            X_train_demo, _, demo_feature_names = self.featurize_demographics(
+                train_data, ancestry_categories=ancestry_cats)
             X_test_demo, _, _ = self.featurize_demographics(
                 test_data, ancestry_categories=ancestry_cats)
 
-            y_meta = meta_train['label'].values
+            demo_scaler = StandardScaler()
+            X_train_demo = demo_scaler.fit_transform(X_train_demo)
+            X_test_demo = demo_scaler.transform(X_test_demo)
+
+            # --- Concatenate V/J + demographics ---
+            X_train = sparse_hstack([X_train_vj, csr_matrix(X_train_demo)],
+                                    format='csr')
+            X_test = sparse_hstack([X_test_vj, csr_matrix(X_test_demo)],
+                                   format='csr')
+
+            y_train = train_data['label'].values
             y_test = test_data['label'].values
 
-            # --- Build meta-features ---
-            if self.submodel == 'ensemble':
-                ml_feature_names = ['ml_prob', 'kmer_prob', 'vj_prob']
-            elif self.submodel == 'kmer_only':
-                ml_feature_names = ['kmer_prob']
-            else:
-                ml_feature_names = ['vj_prob']
-            all_feature_names = ml_feature_names + demo_feature_names
+            all_feature_names = vj_feature_names + demo_feature_names
+            print(f"\nFeatures: {n_vj} V/J + {len(demo_feature_names)} demo "
+                  f"= {len(all_feature_names)} total")
 
-            X_meta_combined = np.hstack([meta_ml_preds, X_meta_demo])
-            X_test_combined = np.hstack([test_ml_preds, X_test_demo])
+            # --- Tune C and fit ---
+            print("\nTuning C via stratified CV...")
+            best_c = self._tune_c_cv(X_train, y_train, self.C_CANDIDATES,
+                                     n_folds=self.n_cv_folds)
+            print(f"  Best C: {best_c}")
 
-            print(f"\nMeta-features ({len(all_feature_names)}): "
-                  f"{all_feature_names}")
+            model = LogisticRegression(C=best_c, penalty='l1',
+                                       solver='liblinear', max_iter=1000)
+            model.fit(X_train, y_train)
 
-            # --- Train meta-model (combined) ---
-            print("\n--- Training Meta-Model (ML + Demographics) ---")
-            best_meta_c = self._tune_c_cv(
-                X_meta_combined, y_meta, self.META_C_CANDIDATES)
-            print(f"  Best C (meta): {best_meta_c}")
+            n_nonzero = int(np.sum(model.coef_.ravel() != 0))
+            print(f"  Non-zero coefficients: {n_nonzero} / {len(all_feature_names)}")
 
-            meta_model = LogisticRegression(
-                C=best_meta_c, max_iter=1000, solver='lbfgs')
-            meta_model.fit(X_meta_combined, y_meta)
-
-            # --- Evaluate meta-model on test ---
-            test_meta_probs = meta_model.predict_proba(X_test_combined)[:, 1]
-
-            meta_auroc = roc_auc_score(y_test, test_meta_probs)
-            meta_aupr = average_precision_score(y_test, test_meta_probs)
-            meta_preds = (test_meta_probs >= 0.5).astype(int)
-            meta_balanced_acc = balanced_accuracy_score(y_test, meta_preds)
-            meta_f1 = f1_score(y_test, meta_preds)
+            # --- Evaluate ---
+            test_probs = model.predict_proba(X_test)[:, 1]
+            auroc = roc_auc_score(y_test, test_probs)
+            aupr = average_precision_score(y_test, test_probs)
+            preds = (test_probs >= 0.5).astype(int)
+            balanced_acc = balanced_accuracy_score(y_test, preds)
+            f1 = f1_score(y_test, preds)
 
             print(f"\n--- Fold {test_fold} Test Results ---")
-            print(f"  Meta (combined): AUROC={meta_auroc:.4f}  AUPR={meta_aupr:.4f}  "
-                  f"Balanced Acc={meta_balanced_acc:.4f}  F1={meta_f1:.4f}")
+            print(f"  AUROC={auroc:.4f}  AUPR={aupr:.4f}  "
+                  f"Balanced Acc={balanced_acc:.4f}  F1={f1:.4f}")
 
-            # Log meta-model coefficients
-            meta_coefs = dict(zip(all_feature_names, meta_model.coef_[0]))
-            print(f"\n  Meta-model coefficients:")
-            for name, coef in meta_coefs.items():
+            # Log demographic coefficients (always interesting; V/J coefs
+            # are sparse and there are many, so summarize counts only)
+            coefs = model.coef_.ravel()
+            demo_coefs = dict(zip(demo_feature_names, coefs[n_vj:]))
+            vj_nonzero = int(np.sum(coefs[:n_vj] != 0))
+            print(f"\n  Non-zero V/J features: {vj_nonzero} / {n_vj}")
+            print(f"  Demographic coefficients:")
+            for name, coef in demo_coefs.items():
                 print(f"    {name}: {coef:+.4f}")
 
-            # Store per-sample predictions for meta-model
-            for (_, row), meta_s in zip(
-                    test_data.iterrows(), test_meta_probs):
+            for (_, row), s in zip(test_data.iterrows(), test_probs):
                 all_test_rows.append({
                     'participant_label': row[participant_col],
                     'specimen_label': row['specimen_label'],
@@ -345,20 +310,21 @@ class MetaModelEvaluator:
                     'disease_model': target_disease,
                     'malid_cross_validation_fold_id_when_in_test_set':
                         test_fold,
-                    'method': 'Meta_ML_Demo',
-                    'model_score': float(meta_s),
+                    'method': 'VJ_Demo',
+                    'model_score': float(s),
                 })
 
             fold_results.append({
                 'fold': test_fold,
-                'meta_auroc': meta_auroc, 'meta_aupr': meta_aupr,
-                'meta_balanced_acc': meta_balanced_acc, 'meta_f1': meta_f1,
-                'best_meta_c': best_meta_c,
-                'meta_coefficients': meta_coefs,
-                'ml_train_result': ml_train_result,
+                'auroc': auroc, 'aupr': aupr,
+                'balanced_acc': balanced_acc, 'f1': f1,
+                'best_c': best_c,
+                'n_vj_features': n_vj,
+                'n_vj_nonzero': vj_nonzero,
+                'demo_coefficients': demo_coefs,
             })
 
-            ml_model.clear_cache()
+            vj_extractor.clear_cache()
 
         # ------------------------------------------------------------------
         # Overall summary
@@ -377,22 +343,21 @@ class MetaModelEvaluator:
         overall_balanced_acc = balanced_accuracy_score(
             scores_df['disease_label'].values, overall_preds)
         overall_f1 = f1_score(scores_df['disease_label'].values, overall_preds)
-        print(f"  Meta (ML + Demo)  AUROC={overall_auroc:.4f}  AUPR={overall_aupr:.4f}  "
+        print(f"  V/J + Demo  AUROC={overall_auroc:.4f}  AUPR={overall_aupr:.4f}  "
               f"Balanced Acc={overall_balanced_acc:.4f}  F1={overall_f1:.4f}")
 
         print(f"\nPer-fold results:")
         print(f"  {'Fold':<6} {'AUROC':<12} {'AUPR':<12} {'Bal Acc':<12} {'F1':<12}")
         for r in fold_results:
-            print(f"  {r['fold']:<6} {r['meta_auroc']:<12.4f} {r['meta_aupr']:<12.4f} "
-                  f"{r['meta_balanced_acc']:<12.4f} {r['meta_f1']:<12.4f}")
+            print(f"  {r['fold']:<6} {r['auroc']:<12.4f} {r['aupr']:<12.4f} "
+                  f"{r['balanced_acc']:<12.4f} {r['f1']:<12.4f}")
 
-        aurocs = [r['meta_auroc'] for r in fold_results]
-        auprs = [r['meta_aupr'] for r in fold_results]
-        balanced_accs = [r['meta_balanced_acc'] for r in fold_results]
-        f1s = [r['meta_f1'] for r in fold_results]
+        aurocs = [r['auroc'] for r in fold_results]
+        auprs = [r['aupr'] for r in fold_results]
+        balanced_accs = [r['balanced_acc'] for r in fold_results]
+        f1s = [r['f1'] for r in fold_results]
         print(f"\nMean ± Std:")
-        print(f"  Meta (combined): "
-              f"AUROC={np.mean(aurocs):.4f}±{np.std(aurocs):.4f}  "
+        print(f"  AUROC={np.mean(aurocs):.4f}±{np.std(aurocs):.4f}  "
               f"AUPR={np.mean(auprs):.4f}±{np.std(auprs):.4f}  "
               f"Balanced Acc={np.mean(balanced_accs):.4f}±{np.std(balanced_accs):.4f}  "
               f"F1={np.mean(f1s):.4f}±{np.std(f1s):.4f}")
@@ -406,7 +371,7 @@ class MetaModelEvaluator:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Meta-Model: ML Baseline + Demographics Disease Classification"
+        description="V/J gene counts + Demographics disease classification"
     )
     parser.add_argument('--metadata_path', type=str, required=True,
                         help='Path to metadata.tsv')
@@ -414,26 +379,26 @@ if __name__ == "__main__":
                         help='Directory containing repertoire .tsv.gz files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Disease to classify (e.g. Lupus, T1D, HIV)')
-    parser.add_argument('--base_train_fraction', type=float, default=0.8,
-                        help='Fraction of non-test data for ML baseline '
-                             '(default: 0.8, remaining 0.2 for meta-model)')
-    parser.add_argument('--submodel', type=str, default='ensemble',
-                        choices=['ensemble', 'kmer_only', 'vj_only'],
-                        help='Ensemble regression sub-model to use as base: '
-                             'ensemble (default), kmer_only, or vj_only')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style).')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory of external repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
-    evaluator = MetaModelEvaluator(
-        base_train_fraction=args.base_train_fraction,
-        submodel=args.submodel,
-    )
+    evaluator = VJDemographicsEvaluator()
 
     scores_df = evaluator.run_cross_validation(
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
 
     if args.output_csv:

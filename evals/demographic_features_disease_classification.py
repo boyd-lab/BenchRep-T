@@ -146,9 +146,19 @@ class DemographicFeaturesEvaluator:
                               participant_col='participant_label',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7,
-                              C_candidates=None):
+                              C_candidates=None,
+                              ext_metadata_path=None):
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col)
+
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir=None,
+                target_disease=target_disease,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
 
         all_test_rows = []
         all_probs = []
@@ -277,6 +287,9 @@ if __name__ == "__main__":
                         help='Target disease to classify (e.g., Lupus, T1D, HIV)')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style). '
+                             'Merges external samples by fold (no repertoire files needed).')
     args = parser.parse_args()
 
     print("Demographic Features Disease Classification Evaluation")
@@ -289,7 +302,8 @@ if __name__ == "__main__":
         target_disease=args.target_disease,
         n_folds=3,
         random_state=7,
-        C_candidates=[0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+        C_candidates=[0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
+        ext_metadata_path=args.ext_metadata_path,
     )
 
     if args.output_csv:

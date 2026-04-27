@@ -68,6 +68,7 @@ class EnsembleRegressionEvaluator:
         self.kmer_size = kmer_size
         self.use_gaps = use_gaps
         self.model = None
+        self.canonicalize_genes = False
         self.debug = debug
 
     def _method_name(self):
@@ -181,7 +182,9 @@ class EnsembleRegressionEvaluator:
                               adjust_distribution_by_demographics=False,
                               random_baseline=False,
                               random_baseline_seed=7,
-                              debug_repertoires=0):
+                              debug_repertoires=0,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -224,6 +227,16 @@ class EnsembleRegressionEvaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+            self.canonicalize_genes = True
 
         if debug_repertoires > 0:
             disease_rows = metadata[metadata['label'] == 1].head(debug_repertoires)
@@ -269,6 +282,7 @@ class EnsembleRegressionEvaluator:
                 subsample_fraction=self.subsample_fraction,
                 subsample_seed=self.subsample_seed,
                 indices_map=self.indices_map,
+                canonicalize_genes=self.canonicalize_genes,
                 submodel=self.submodel,
                 kmer_size=self.kmer_size,
                 use_gaps=self.use_gaps,
@@ -400,6 +414,16 @@ if __name__ == "__main__":
     parser.add_argument('--no_gaps', action='store_true',
                         help='Disable single-position gapped k-mer variants; '
                              'extract plain k-mers only')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style). '
+                             'When set, external samples are merged into the same fold-based '
+                             'CV split as the internal cohort and V/J genes are canonicalized.')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory containing the external cohort repertoire files '
+                             '(required when --ext_metadata_path is provided).')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     evaluator = EnsembleRegressionEvaluator(
@@ -426,6 +450,9 @@ if __name__ == "__main__":
                 random_baseline=True,
                 random_baseline_seed=seed,
                 debug_repertoires=args.debug_repertoires,
+                ext_metadata_path=args.ext_metadata_path,
+                ext_data_dir=args.ext_data_dir,
+                ext_file_template=args.ext_file_template,
             )
             seed_dfs.append(seed_df)
         scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
@@ -457,6 +484,9 @@ if __name__ == "__main__":
             require_demographics=args.require_demographics,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             debug_repertoires=args.debug_repertoires,
+            ext_metadata_path=args.ext_metadata_path,
+            ext_data_dir=args.ext_data_dir,
+            ext_file_template=args.ext_file_template,
         )
 
     if args.output_csv:

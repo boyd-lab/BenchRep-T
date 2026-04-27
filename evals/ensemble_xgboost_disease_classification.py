@@ -43,6 +43,7 @@ class EnsembleXGBoostEvaluator:
         self.use_gaps = use_gaps
         self.submodel = submodel
         self.n_jobs = n_jobs
+        self.canonicalize_genes = False
 
     def _method_name(self):
         name = f'EnsembleXGBoost_{self.kmer_size}mer'
@@ -105,6 +106,7 @@ class EnsembleXGBoostEvaluator:
             j_gene_col=self.j_gene_col,
             subsample_fraction=self.subsample_fraction,
             subsample_seed=self.subsample_seed,
+            canonicalize_genes=self.canonicalize_genes,
             kmer_size=self.kmer_size,
             use_gaps=self.use_gaps,
             submodel=self.submodel,
@@ -120,7 +122,9 @@ class EnsembleXGBoostEvaluator:
                              adjust_distribution_by_demographics=False,
                              random_baseline=False, random_baseline_seed=7,
                              covariate_adjust=False,
-                             debug_repertoires=0, output_csv=None):
+                             debug_repertoires=0, output_csv=None,
+                             ext_metadata_path=None, ext_data_dir=None,
+                             ext_file_template='{participant_label}_TCRB.tsv'):
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(
             raw_metadata, target_disease, disease_col,
@@ -131,6 +135,16 @@ class EnsembleXGBoostEvaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+            self.canonicalize_genes = True
 
         if debug_repertoires > 0:
             disease_rows = metadata[metadata['label'] == 1].head(debug_repertoires)
@@ -296,6 +310,13 @@ if __name__ == '__main__':
     parser.add_argument('--covariate_adjust', action='store_true')
     parser.add_argument('--output_csv', type=str, default=None)
     parser.add_argument('--debug_repertoires', type=int, default=0)
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style).')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory of external repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     evaluator = EnsembleXGBoostEvaluator(
@@ -315,4 +336,7 @@ if __name__ == '__main__':
         covariate_adjust=args.covariate_adjust,
         debug_repertoires=args.debug_repertoires,
         output_csv=args.output_csv,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
