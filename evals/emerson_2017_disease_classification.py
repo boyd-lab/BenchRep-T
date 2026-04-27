@@ -279,7 +279,9 @@ class Emerson2017Evaluator:
                     'p_value_threshold': p_val,
                     'n_diagnostic_tcrs': 0,
                     'val_auroc': 0.0,
-                    'val_aupr': 0.0
+                    'val_aupr': 0.0,
+                    'val_balanced_acc': 0.0,
+                    'val_f1': 0.0,
                 })
                 continue
             
