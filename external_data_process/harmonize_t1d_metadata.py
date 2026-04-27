@@ -63,7 +63,10 @@ def harmonize(df: pd.DataFrame) -> pd.DataFrame:
     )
     out['age'] = df['age_at_diagnosis']
     out['sex'] = df['sex'].map(SEX_MAP).fillna('')
-    out['ancestry'] = ''
+    # External T1D cohort is treated as a single-ancestry group ("White") for
+    # downstream demographic-adjusted analyses, regardless of the heterogeneous
+    # race / ethnicity values in the source file.
+    out['ancestry'] = 'White'
     out['malid_cross_validation_fold_id_when_in_test_set'] = df['fold']
 
     return out[MALID_COLUMNS]
