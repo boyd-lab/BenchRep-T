@@ -38,6 +38,7 @@ class XGBoostKmer:
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
                  indices_map=None, ignore_allele=False,
+                 canonicalize_genes=False,
                  early_stopping_rounds=20, n_jobs=None,
                  kmer_size=4, use_gaps=True, submodel='ensemble'):
         if submodel not in self.VALID_SUBMODELS:
@@ -52,6 +53,7 @@ class XGBoostKmer:
         self.subsample_n = subsample_n
         self.indices_map = indices_map
         self.ignore_allele = ignore_allele
+        self.canonicalize_genes = canonicalize_genes
         self.early_stopping_rounds = early_stopping_rounds
         self.n_jobs = n_jobs
         self.kmer_size = kmer_size
@@ -90,8 +92,13 @@ class XGBoostKmer:
             self.load_repertoire(fp, use_cache=True)
 
     def _normalize_gene(self, gene):
-        if self.ignore_allele and isinstance(gene, str):
-            gene = gene.split('*')[0]
+        if not isinstance(gene, str):
+            return gene
+        if self.canonicalize_genes:
+            from utils.gene_harmonization import canonicalize_gene
+            return canonicalize_gene(gene)
+        if self.ignore_allele:
+            return gene.split('*')[0]
         return gene
 
     def _get_kmer_feature_dict(self, file_path):

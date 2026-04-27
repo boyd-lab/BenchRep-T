@@ -135,7 +135,9 @@ def build_indices_map(repertoires, repeat, depth):
 
 
 def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_data_dir,
-                         depth_indices_path, random_seed=7, output_json=None):
+                         depth_indices_path, random_seed=7, output_json=None,
+                         ext_metadata_path=None, ext_data_dir=None,
+                         ext_file_template='{participant_label}_TCRB.tsv'):
     """
     Run the sequencing depth experiment using pre-generated indices.
 
@@ -203,6 +205,10 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
             # Only DeepRC supports raw_file_cache
             if model_name == 'deeprc_2020':
                 cv_kwargs['raw_file_cache'] = raw_file_cache
+            if ext_metadata_path is not None:
+                cv_kwargs['ext_metadata_path'] = ext_metadata_path
+                cv_kwargs['ext_data_dir'] = ext_data_dir
+                cv_kwargs['ext_file_template'] = ext_file_template
             scores_df = evaluator.run_cross_validation(**cv_kwargs)
 
             elapsed = time.time() - start_time
@@ -313,6 +319,13 @@ if __name__ == "__main__":
                         help='Random seed for train/val split (default: 7)')
     parser.add_argument('--output_json', type=str, default=None,
                         help='Path to save results JSON')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style).')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory of external repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
 
     args = parser.parse_args()
 
@@ -324,4 +337,7 @@ if __name__ == "__main__":
         depth_indices_path=args.depth_indices,
         random_seed=args.random_seed,
         output_json=args.output_json,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )

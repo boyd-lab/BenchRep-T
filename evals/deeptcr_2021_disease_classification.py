@@ -63,6 +63,7 @@ class DeepTCREvaluator:
                  device=0,
                  results_dir='results/deeptcr',
                  indices_map=None,
+                 canonicalize_genes=False,
                  debug=False,
                  debug_repertoires=10):
         """
@@ -117,6 +118,7 @@ class DeepTCREvaluator:
         self.device = device
         self.results_dir = results_dir
         self.indices_map = indices_map
+        self.canonicalize_genes = canonicalize_genes
         self.debug = debug
         self.debug_repertoires = debug_repertoires
 
@@ -271,10 +273,18 @@ class DeepTCREvaluator:
             if all_v_beta is not None:
                 col = self.v_beta_col
                 vals = df[col].tolist() if col in df.columns else [None] * n
+                if self.canonicalize_genes:
+                    from utils.gene_harmonization import canonicalize_gene
+                    vals = [canonicalize_gene(v) if isinstance(v, str) else v
+                            for v in vals]
                 all_v_beta.extend(vals)
             if all_j_beta is not None:
                 col = self.j_beta_col
                 vals = df[col].tolist() if col in df.columns else [None] * n
+                if self.canonicalize_genes:
+                    from utils.gene_harmonization import canonicalize_gene
+                    vals = [canonicalize_gene(v) if isinstance(v, str) else v
+                            for v in vals]
                 all_j_beta.extend(vals)
             written.add(specimen)
 
@@ -305,7 +315,9 @@ class DeepTCREvaluator:
                               tune_parameters=True,
                               p_value_candidates=None,
                               allowed_participants=None,
-                              covariate_adjust=False):
+                              covariate_adjust=False,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -338,6 +350,16 @@ class DeepTCREvaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+            self.canonicalize_genes = True
 
         if self.debug:
             disease_rows = metadata[metadata['label'] == 1].head(self.debug_repertoires)
@@ -686,6 +708,14 @@ if __name__ == '__main__':
                         help='Residualize sample-level embeddings against demographics '
                              '(age, sex, ancestry) and train an L1 logistic regression head '
                              '(requires complete demographics; saves model checkpoint)')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style). '
+                             'Merges external samples by fold; auto-canonicalizes V/J.')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory of external repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     evaluator = DeepTCREvaluator(
@@ -709,6 +739,9 @@ if __name__ == '__main__':
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         covariate_adjust=args.covariate_adjust,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
 
     if args.output_csv:

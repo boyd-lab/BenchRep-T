@@ -36,6 +36,7 @@ class _RepertoireBase:
         subsample_n,
         indices_map,
         ignore_allele,
+        canonicalize_genes=False,
     ):
         self.sequence_col = sequence_col
         self.v_gene_col = v_gene_col
@@ -45,6 +46,7 @@ class _RepertoireBase:
         self.subsample_n = subsample_n
         self.indices_map = indices_map
         self.ignore_allele = ignore_allele
+        self.canonicalize_genes = canonicalize_genes
         self._repertoire_cache = {}
 
     def load_repertoire(self, file_path, use_cache=True, apply_subsampling=True):
@@ -79,8 +81,13 @@ class _RepertoireBase:
         return df
 
     def _normalize_gene(self, gene):
-        if self.ignore_allele and isinstance(gene, str):
-            gene = gene.split("*")[0]
+        if not isinstance(gene, str):
+            return gene
+        if self.canonicalize_genes:
+            from utils.gene_harmonization import canonicalize_gene
+            return canonicalize_gene(gene)
+        if self.ignore_allele:
+            return gene.split("*")[0]
         return gene
 
 
@@ -275,6 +282,7 @@ class ABMIL(_RepertoireBase):
         subsample_n=None,
         indices_map=None,
         ignore_allele=False,
+        canonicalize_genes=False,
         use_gpu=True,
         dropout=0.25,
         max_length=40,
@@ -324,6 +332,7 @@ class ABMIL(_RepertoireBase):
             subsample_n=subsample_n,
             indices_map=indices_map,
             ignore_allele=ignore_allele,
+            canonicalize_genes=canonicalize_genes,
         )
         self.max_instances = max_instances
         self.M = M

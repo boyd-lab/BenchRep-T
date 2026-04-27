@@ -423,171 +423,6 @@ class ExternalEvaluator:
         }
 
     # ------------------------------------------------------------------
-    # Merged-cohort cross-validation
-    # ------------------------------------------------------------------
-
-    def run_merged_cross_validation(self,
-                                    merged_metadata_path,
-                                    file_path_col='file_path',
-                                    sample_col='sample_name',
-                                    disease_col='disease_label',
-                                    fold_col='fold',
-                                    cohort_col='cohort',
-                                    healthy_label='Healthy',
-                                    disease_label='T1D',
-                                    n_folds=3,
-                                    random_state=7,
-                                    target_disease=None,
-                                    output_csv=None):
-        """
-        Run k-fold CV on a metadata file that already encodes per-row
-        ``file_path`` and ``fold`` columns. Used to evaluate jointly on a
-        merged internal + external cohort (see
-        ``external_data_process/build_merged_t1d_metadata.py``).
-
-        For each fold, samples with ``fold_col == k`` form the test set; all
-        other samples train the model (which handles its own internal tuning).
-
-        Returns:
-            Tuple of (per-sample scores DataFrame, metrics dict).
-        """
-        method_name = MODEL_DISPLAY_NAMES[self.model_name]
-        if target_disease is None:
-            target_disease = disease_label
-
-        meta = pd.read_csv(merged_metadata_path, sep='\t')
-        for col in (file_path_col, sample_col, disease_col, fold_col):
-            if col not in meta.columns:
-                raise ValueError(
-                    f"Required column '{col}' not in merged metadata. "
-                    f"Available: {list(meta.columns)}"
-                )
-
-        data = meta[meta[disease_col].isin([disease_label, healthy_label])].copy()
-        data['label'] = (data[disease_col] == disease_label).astype(int)
-        data = data[data[file_path_col].apply(os.path.exists)].copy()
-
-        cohort_breakdown = (
-            data.groupby([cohort_col, disease_col]).size().unstack(fill_value=0)
-            if cohort_col in data.columns else None
-        )
-        print(f"Merged dataset: {len(data)} samples")
-        if cohort_breakdown is not None:
-            print(cohort_breakdown)
-
-        all_rows = []
-        all_probs = []
-        all_labels = []
-        fold_results = []
-
-        for test_fold in range(n_folds):
-            print(f"\n{'='*60}")
-            print(f"FOLD {test_fold}: Test fold = {test_fold}")
-            print(f"{'='*60}")
-
-            test_data = data[data[fold_col] == test_fold]
-            train_data = data[data[fold_col] != test_fold]
-
-            print(f"Train: {len(train_data)}, Test: {len(test_data)}")
-            if cohort_col in data.columns:
-                print("  Train by cohort: "
-                      f"{train_data[cohort_col].value_counts().to_dict()}")
-                print("  Test  by cohort: "
-                      f"{test_data[cohort_col].value_counts().to_dict()}")
-
-            if len(test_data) == 0 or len(train_data) == 0:
-                print(f"Skipping fold {test_fold} (empty split).")
-                continue
-
-            train_files = train_data[file_path_col].tolist()
-            train_labels = train_data['label'].tolist()
-            test_files = test_data[file_path_col].tolist()
-            test_labels = test_data['label'].tolist()
-
-            train_result = self._train_fold(
-                train_files, train_labels, random_state=random_state
-            )
-
-            if (self.model_name == 'emerson_2017'
-                    and train_result.get('no_diagnostic_tcrs', False)):
-                print(f"No diagnostic TCRs in fold {test_fold}; "
-                      f"assigning chance-level predictions (0.5).")
-                test_probs = np.full(len(test_files), 0.5)
-            else:
-                self.model.clear_cache()
-                test_probs = np.array([
-                    self.model.predict_diagnosis(fp)['probability_positive']
-                    for fp in tqdm(test_files, desc="Testing")
-                ])
-
-            test_labels_arr = np.array(test_labels)
-            test_auroc = roc_auc_score(test_labels_arr, test_probs)
-            test_aupr = average_precision_score(test_labels_arr, test_probs)
-            test_preds = (test_probs >= 0.5).astype(int)
-            test_balanced_acc = balanced_accuracy_score(test_labels_arr, test_preds)
-            test_f1 = f1_score(test_labels_arr, test_preds)
-            print(f"Test AUROC: {test_auroc:.4f}, Test AUPR: {test_aupr:.4f}, "
-                  f"Balanced Acc: {test_balanced_acc:.4f}, F1: {test_f1:.4f}")
-
-            for (_, row), score in zip(test_data.iterrows(), test_probs):
-                all_rows.append({
-                    'sample_name': row[sample_col],
-                    'cohort': row[cohort_col] if cohort_col in row else '',
-                    'disease_label': int(row['label']),
-                    'disease_label_str': row[disease_col],
-                    'method': method_name,
-                    'disease_model': target_disease,
-                    'model_score': float(score),
-                    'fold': int(test_fold),
-                })
-
-            fold_results.append({
-                'fold': test_fold,
-                'test_auroc': test_auroc,
-                'test_aupr': test_aupr,
-                'test_balanced_acc': test_balanced_acc,
-                'test_f1': test_f1,
-                'train_result': train_result,
-            })
-            all_probs.extend(test_probs.tolist())
-            all_labels.extend(test_labels)
-
-        all_probs_arr = np.array(all_probs)
-        all_labels_arr = np.array(all_labels)
-        overall_auroc = roc_auc_score(all_labels_arr, all_probs_arr)
-        overall_aupr = average_precision_score(all_labels_arr, all_probs_arr)
-        overall_preds = (all_probs_arr >= 0.5).astype(int)
-        overall_balanced_acc = balanced_accuracy_score(all_labels_arr, overall_preds)
-        overall_f1 = f1_score(all_labels_arr, overall_preds)
-
-        fold_aurocs = [r['test_auroc'] for r in fold_results]
-        fold_auprs = [r['test_aupr'] for r in fold_results]
-
-        print(f"\n{'='*60}")
-        print(f"MERGED CV RESULTS: {method_name} on "
-              f"{disease_label} vs {healthy_label}")
-        print(f"{'='*60}")
-        print(f"Mean Test AUROC: {np.mean(fold_aurocs):.4f} ± {np.std(fold_aurocs):.4f}")
-        print(f"Mean Test AUPR:  {np.mean(fold_auprs):.4f} ± {np.std(fold_auprs):.4f}")
-        print(f"Overall AUROC:   {overall_auroc:.4f}")
-        print(f"Overall AUPR:    {overall_aupr:.4f}")
-
-        scores_df = pd.DataFrame(all_rows)
-        if output_csv:
-            scores_df.to_csv(output_csv, index=False)
-            print(f"\nScores saved to: {output_csv}")
-
-        return scores_df, {
-            'fold_results': fold_results,
-            'overall_auroc': overall_auroc,
-            'overall_aupr': overall_aupr,
-            'overall_balanced_acc': overall_balanced_acc,
-            'overall_f1': overall_f1,
-            'mean_test_auroc': float(np.mean(fold_aurocs)),
-            'mean_test_aupr': float(np.mean(fold_auprs)),
-        }
-
-    # ------------------------------------------------------------------
     # External k-fold cross-validation
     # ------------------------------------------------------------------
 
@@ -799,12 +634,10 @@ if __name__ == "__main__":
 
     # Mode
     parser.add_argument('--mode', type=str, default='hold_out',
-                        choices=['hold_out', 'cv', 'merged_cv'],
+                        choices=['hold_out', 'cv'],
                         help='Evaluation mode: hold_out (default) trains on '
                              'internal data and evaluates on external; cv runs '
-                             'k-fold CV on the external dataset; merged_cv runs '
-                             'k-fold CV on a merged metadata file (with per-row '
-                             'file_path and fold columns) covering both cohorts.')
+                             'k-fold CV on the external dataset.')
 
     # Model selection
     parser.add_argument('--model', type=str, default='ensemble_regression',
@@ -822,12 +655,10 @@ if __name__ == "__main__":
                              'optional in cv mode (defaults to --ext_disease_label).')
 
     # External dataset — assumes preprocessed files with AIRR column names.
-    # Not required in merged_cv mode (use --merged_metadata_path instead).
-    parser.add_argument('--ext_metadata_path', type=str, default=None,
-                        help='Path to external metadata file (hold_out / cv modes)')
-    parser.add_argument('--ext_data_dir', type=str, default=None,
-                        help='Directory containing preprocessed external repertoire '
-                             'files (hold_out / cv modes)')
+    parser.add_argument('--ext_metadata_path', type=str, required=True,
+                        help='Path to external metadata file')
+    parser.add_argument('--ext_data_dir', type=str, required=True,
+                        help='Directory containing preprocessed external repertoire files')
     parser.add_argument('--ext_sample_col', type=str, default='sample_name',
                         help='Column with sample identifiers in external metadata')
     parser.add_argument('--ext_disease_col', type=str, default='disease_label',
@@ -850,15 +681,11 @@ if __name__ == "__main__":
     parser.add_argument('--n_folds', type=int, default=3,
                         help='Number of folds to iterate over (cv mode, default: 3)')
 
-    # merged_cv-mode-only args
-    parser.add_argument('--merged_metadata_path', type=str, default=None,
-                        help='Path to merged-cohort metadata TSV (merged_cv mode). '
-                             'Built by external_data_process/build_merged_t1d_metadata.py.')
     parser.add_argument('--canonicalize_genes', action='store_true',
                         help='Collapse Adaptive-style "-1" suffixes on IMGT '
                              'singleton TRBV families (TRBV13-1 → TRBV13). '
-                             'Required when merging IMGT-named internal '
-                             'repertoires with Adaptive-derived external ones.')
+                             'Required when the external cohort uses Adaptive '
+                             'V-gene naming alongside IMGT-named internal data.')
 
     # Model hyperparameters
     parser.add_argument('--val_split', type=float, default=0.2,
@@ -877,19 +704,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.mode == 'hold_out':
-        missing = [k for k in ('train_metadata_path', 'train_data_dir', 'target_disease',
-                               'ext_metadata_path', 'ext_data_dir')
+        missing = [k for k in ('train_metadata_path', 'train_data_dir', 'target_disease')
                    if getattr(args, k) is None]
         if missing:
             parser.error(f"hold_out mode requires: {', '.join('--' + m for m in missing)}")
-    elif args.mode == 'cv':
-        missing = [k for k in ('ext_metadata_path', 'ext_data_dir')
-                   if getattr(args, k) is None]
-        if missing:
-            parser.error(f"cv mode requires: {', '.join('--' + m for m in missing)}")
-    elif args.mode == 'merged_cv':
-        if args.merged_metadata_path is None:
-            parser.error("merged_cv mode requires: --merged_metadata_path")
 
     evaluator = ExternalEvaluator(
         model_name=args.model,
@@ -914,7 +732,7 @@ if __name__ == "__main__":
             random_state=args.random_state,
             output_csv=args.output_csv,
         )
-    elif args.mode == 'cv':
+    else:  # cv
         scores_df, metrics = evaluator.run_cross_validation(
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,
@@ -924,19 +742,6 @@ if __name__ == "__main__":
             ext_healthy_label=args.ext_healthy_label,
             ext_disease_label=args.ext_disease_label,
             fold_col=args.fold_col,
-            n_folds=args.n_folds,
-            random_state=args.random_state,
-            target_disease=args.target_disease,
-            output_csv=args.output_csv,
-        )
-    else:  # merged_cv
-        scores_df, metrics = evaluator.run_merged_cross_validation(
-            merged_metadata_path=args.merged_metadata_path,
-            sample_col=args.ext_sample_col,
-            disease_col=args.ext_disease_col,
-            fold_col=args.fold_col,
-            healthy_label=args.ext_healthy_label,
-            disease_label=args.ext_disease_label,
             n_folds=args.n_folds,
             random_state=args.random_state,
             target_disease=args.target_disease,

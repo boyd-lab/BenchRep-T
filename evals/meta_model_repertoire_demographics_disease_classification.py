@@ -65,6 +65,7 @@ class MetaModelEvaluator:
         self.subsample_seed = subsample_seed
         self.indices_map = indices_map
         self.submodel = submodel
+        self.canonicalize_genes = False
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -207,7 +208,9 @@ class MetaModelEvaluator:
                               file_prefix='part_table_', file_suffix='.tsv.gz',
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
-                              n_folds=3, random_state=7):
+                              n_folds=3, random_state=7,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
         Run 3-fold CV for the stacking meta-model.
 
@@ -226,6 +229,16 @@ class MetaModelEvaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+            self.canonicalize_genes = True
 
         all_test_rows = []
         fold_results = []
@@ -262,6 +275,7 @@ class MetaModelEvaluator:
                 subsample_fraction=self.subsample_fraction,
                 subsample_seed=self.subsample_seed,
                 indices_map=self.indices_map,
+                canonicalize_genes=self.canonicalize_genes,
                 submodel=self.submodel,
             )
             ml_train_result = ml_model.train(
@@ -423,6 +437,13 @@ if __name__ == "__main__":
                              'ensemble (default), kmer_only, or vj_only')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style).')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory of external repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     evaluator = MetaModelEvaluator(
@@ -434,6 +455,9 @@ if __name__ == "__main__":
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
 
     if args.output_csv:

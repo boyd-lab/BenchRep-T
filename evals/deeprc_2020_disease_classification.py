@@ -226,7 +226,9 @@ class DeepRC2020Evaluator:
                               p_value_candidates=None,
                               allowed_participants=None,
                               raw_file_cache=None,
-                              covariate_adjust=False):
+                              covariate_adjust=False,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         """
         Run k-fold cross-validation using pre-defined fold assignments.
 
@@ -265,6 +267,15 @@ class DeepRC2020Evaluator:
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                         file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
+
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
 
         if allowed_participants is not None:
             before = len(metadata)
@@ -477,6 +488,13 @@ if __name__ == '__main__':
     parser.add_argument('--covariate_adjust', action='store_true',
                         help='Residualize bag embeddings against demographics (age, sex, ancestry) '
                              'and train an L1 logistic regression head (requires complete demographics)')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style).')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory of external repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
 
     evaluator = DeepRC2020Evaluator(
@@ -495,6 +513,9 @@ if __name__ == '__main__':
         data_dir=args.repertoire_data_dir,
         raw_file_cache={},
         covariate_adjust=args.covariate_adjust,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
 
     if args.output_csv:
