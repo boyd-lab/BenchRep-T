@@ -215,6 +215,7 @@ class ABMILDriverIdentificationEvaluator:
                              fold_col='malid_cross_validation_fold_id_when_in_test_set',
                              n_folds=3, random_state=7,
                              allowed_participants=None,
+                             model_save_dir=None,
                              output_csv=None):
         """
         Run k-fold CV for driver sequence identification.
@@ -258,10 +259,16 @@ class ABMILDriverIdentificationEvaluator:
 
             print(f"Train: {len(train_val_data)}, Test: {len(test_data)}")
 
-            model = self._make_model()
-            train_result = model.train(train_files, train_labels)
-            print(f"  Best val loss: {train_result['best_val_loss']:.4f}, "
-                  f"Epochs: {train_result['epochs_trained']}")
+            fold_save_dir = (os.path.join(model_save_dir, target_disease, f'fold{test_fold}')
+                             if model_save_dir else None)
+            if fold_save_dir and os.path.isdir(fold_save_dir):
+                print(f"  Loading model from checkpoint: {fold_save_dir}")
+                model = ABMIL.load(fold_save_dir, use_gpu=self.use_gpu)
+            else:
+                model = self._make_model()
+                train_result = model.train(train_files, train_labels)
+                print(f"  Best val loss: {train_result['best_val_loss']:.4f}, "
+                      f"Epochs: {train_result['epochs_trained']}")
 
             print(f"\n--- Scoring test repertoires (k={k}) ---")
             fold_precisions = []
@@ -371,6 +378,9 @@ if __name__ == "__main__":
     parser.add_argument('--target_disease', type=str, required=True)
     parser.add_argument('--driver_seqs_path', type=str, required=True)
     parser.add_argument('--k', type=int, required=True)
+    parser.add_argument('--model_save_dir', type=str, default=None,
+                        help='Directory written by --model_save_dir in '
+                             'ensemble_abmil_disease_classification.py')
     parser.add_argument('--output_csv', type=str, default=None)
     parser.add_argument('--features', type=str, default='full',
                         choices=['full', 'cdr3_only', 'vj_only'])
@@ -392,5 +402,6 @@ if __name__ == "__main__":
         driver_seqs_path=args.driver_seqs_path,
         k=args.k,
         random_state=args.random_state,
+        model_save_dir=args.model_save_dir,
         output_csv=args.output_csv,
     )

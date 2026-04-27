@@ -201,6 +201,7 @@ class ABMILEvaluator:
                               allowed_participants=None,
                               require_demographics=False,
                               covariate_adjust=False,
+                              model_save_dir=None,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -307,6 +308,10 @@ class ABMILEvaluator:
             )
 
             train_result = self.model.train(train_files, train_labels)
+
+            if model_save_dir is not None:
+                self.model.save(os.path.join(model_save_dir, target_disease,
+                                             f'fold{test_fold}'))
 
             if covariate_adjust:
                 # ----------------------------------------------------------
@@ -471,6 +476,8 @@ if __name__ == "__main__":
     parser.add_argument('--covariate_adjust', action='store_true',
                         help='Residualize bag embeddings against demographics (age, sex, ancestry) '
                              'and train an L1 logistic regression head (requires complete demographics)')
+    parser.add_argument('--model_save_dir', type=str, default=None,
+                        help='Directory to save trained per-fold models for driver evaluation.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     parser.add_argument('--ext_metadata_path', type=str, default=None,
@@ -508,6 +515,7 @@ if __name__ == "__main__":
         data_dir=args.repertoire_data_dir,
         require_demographics=args.require_demographics,
         covariate_adjust=args.covariate_adjust,
+        model_save_dir=args.model_save_dir,
         ext_metadata_path=args.ext_metadata_path,
         ext_data_dir=args.ext_data_dir,
         ext_file_template=args.ext_file_template,

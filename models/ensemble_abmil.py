@@ -9,6 +9,7 @@ Reference architecture: Ilse et al. 2018, "Attention-based Deep Multiple Instanc
 Learning" (https://arxiv.org/abs/1802.04712).
 """
 
+import json
 import os
 import numpy as np
 import torch
@@ -609,6 +610,84 @@ class ABMIL(_RepertoireBase):
             self.model.load_state_dict(best_mil_state)
 
         return {"best_val_loss": best_val_loss, "epochs_trained": epochs_trained}
+
+    # ------------------------------------------------------------------
+    # Save / load
+    # ------------------------------------------------------------------
+
+    def save(self, save_dir):
+        """Persist trained encoder and MIL model to save_dir."""
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(self.encoder.state_dict(), os.path.join(save_dir, 'encoder.pt'))
+        torch.save(self.model.state_dict(), os.path.join(save_dir, 'mil.pt'))
+        with open(os.path.join(save_dir, 'meta.json'), 'w') as f:
+            json.dump({
+                'M': self.M, 'L': self.L, 'dropout': self.dropout,
+                'max_length': self.max_length,
+                'embedding_dim_aa': self.embedding_dim_aa,
+                'embedding_dim_genes': self.embedding_dim_genes,
+                'kernel': self.kernel, 'conv_units': list(self.conv_units),
+                'features': self.features,
+                'sequence_col': self.sequence_col,
+                'v_gene_col': self.v_gene_col, 'j_gene_col': self.j_gene_col,
+                'ignore_allele': self.ignore_allele,
+                'canonicalize_genes': self.canonicalize_genes,
+                'v_vocab': self.v_vocab, 'j_vocab': self.j_vocab,
+            }, f, indent=2)
+        print(f"  Model saved to: {save_dir}")
+
+    @classmethod
+    def load(cls, save_dir, use_gpu=True):
+        """Reconstruct a trained ABMIL from a save_dir written by save()."""
+        with open(os.path.join(save_dir, 'meta.json')) as f:
+            meta = json.load(f)
+
+        obj = cls(
+            M=meta['M'], L=meta['L'], dropout=meta['dropout'],
+            max_length=meta['max_length'],
+            embedding_dim_aa=meta['embedding_dim_aa'],
+            embedding_dim_genes=meta['embedding_dim_genes'],
+            kernel=meta['kernel'], conv_units=tuple(meta['conv_units']),
+            features=meta['features'],
+            sequence_col=meta['sequence_col'],
+            v_gene_col=meta['v_gene_col'], j_gene_col=meta['j_gene_col'],
+            ignore_allele=meta['ignore_allele'],
+            canonicalize_genes=meta.get('canonicalize_genes', False),
+            use_gpu=use_gpu,
+        )
+        obj.v_vocab = meta['v_vocab']
+        obj.j_vocab = meta['j_vocab']
+
+        obj.device = torch.device(
+            'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
+        )
+        n_v = len(obj.v_vocab) + 1
+        n_j = len(obj.j_vocab) + 1
+
+        obj.encoder = TCRSeqEncoder(
+            n_v_genes=n_v, n_j_genes=n_j,
+            embedding_dim_aa=meta['embedding_dim_aa'],
+            embedding_dim_genes=meta['embedding_dim_genes'],
+            kernel=meta['kernel'], dropout=meta['dropout'],
+            conv_units=tuple(meta['conv_units']),
+            features=meta['features'],
+        ).to(obj.device)
+
+        obj.model = TCRGatedAttentionMIL(
+            input_dim=obj.encoder.output_dim,
+            M=meta['M'], L=meta['L'], dropout=meta['dropout'],
+        ).to(obj.device)
+
+        map_loc = obj.device
+        obj.encoder.load_state_dict(
+            torch.load(os.path.join(save_dir, 'encoder.pt'), map_location=map_loc)
+        )
+        obj.model.load_state_dict(
+            torch.load(os.path.join(save_dir, 'mil.pt'), map_location=map_loc)
+        )
+        obj.encoder.eval()
+        obj.model.eval()
+        return obj
 
     def get_bag_embedding(self, file_path):
         """Return the attention-weighted bag embedding (shape: (M,)) before the classifier.

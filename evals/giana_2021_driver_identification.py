@@ -144,6 +144,7 @@ class GIANADriverIdentificationEvaluator(GIANAEvaluator):
         fold_col='malid_cross_validation_fold_id_when_in_test_set',
         n_folds=3,
         allowed_participants=None,
+        cluster_dir=None,
         output_csv=None,
     ):
         """
@@ -193,61 +194,76 @@ class GIANADriverIdentificationEvaluator(GIANAEvaluator):
             os.makedirs(fold_dir, exist_ok=True)
 
             # ----------------------------------------------------------
-            # Phase 1: Build reference clusters from training data
+            # Try to reuse cluster files from disease classification run
             # ----------------------------------------------------------
-            print("\nLoading training sequences...")
-            train_lines = []
-            n_train_loaded = 0
-
-            for _, row in train_data.iterrows():
-                disease_label = (
-                    target_disease if row['label'] == 1 else self._GIANA_HEALTHY
+            reused_merged = None
+            if cluster_dir is not None:
+                candidate = os.path.join(
+                    cluster_dir, f"{target_disease}_fold{test_fold}", "queryFinal.txt"
                 )
-                df = self._load_repertoire(row['file_path'])
-                if df is None or len(df) == 0:
-                    continue
-                train_lines.extend(
-                    self._build_giana_rows(df, 'train', disease_label)
+                if os.path.isfile(candidate):
+                    print(f"  Reusing cluster file from disease classification: {candidate}")
+                    reused_merged = candidate
+
+            if reused_merged is not None:
+                merged_file = reused_merged
+            else:
+                # ----------------------------------------------------------
+                # Phase 1: Build reference clusters from training data
+                # ----------------------------------------------------------
+                print("\nLoading training sequences...")
+                train_lines = []
+                n_train_loaded = 0
+
+                for _, row in train_data.iterrows():
+                    disease_label = (
+                        target_disease if row['label'] == 1 else self._GIANA_HEALTHY
+                    )
+                    df = self._load_repertoire(row['file_path'])
+                    if df is None or len(df) == 0:
+                        continue
+                    train_lines.extend(
+                        self._build_giana_rows(df, 'train', disease_label)
+                    )
+                    n_train_loaded += 1
+
+                print(f"  Loaded {len(train_lines):,} train sequences "
+                      f"from {n_train_loaded} specimens.")
+
+                train_file = os.path.join(fold_dir, f"train_fold{test_fold}.txt")
+                self._write_giana_input(train_lines, train_file)
+
+                print("Clustering training sequences to build reference...")
+                ref_cluster_file = self._run_giana(train_file, fold_dir)
+
+                giana = _load_giana_module()
+                print("Encoding reference sequences for query mode...")
+                rData = giana.CreateReference(train_file, Vgene=self.use_v_gene, ST=3)
+
+                # ----------------------------------------------------------
+                # Phase 2: Assign test sequences to reference clusters
+                # ----------------------------------------------------------
+                print("\nLoading test sequences...")
+                test_lines = []
+                n_test_loaded = 0
+
+                for _, row in test_data.iterrows():
+                    df = self._load_repertoire(row['file_path'])
+                    if df is None or len(df) == 0:
+                        continue
+                    test_lines.extend(
+                        self._build_giana_rows(df, 'test', row['specimen_label'])
+                    )
+                    n_test_loaded += 1
+
+                print(f"  Loaded test sequences from {n_test_loaded} specimens.")
+
+                query_file = os.path.join(fold_dir, f"query_fold{test_fold}.txt")
+                self._write_giana_input(test_lines, query_file)
+
+                merged_file = self._run_query(
+                    query_file, rData, ref_cluster_file, fold_dir
                 )
-                n_train_loaded += 1
-
-            print(f"  Loaded {len(train_lines):,} train sequences "
-                  f"from {n_train_loaded} specimens.")
-
-            train_file = os.path.join(fold_dir, f"train_fold{test_fold}.txt")
-            self._write_giana_input(train_lines, train_file)
-
-            print("Clustering training sequences to build reference...")
-            ref_cluster_file = self._run_giana(train_file, fold_dir)
-
-            giana = _load_giana_module()
-            print("Encoding reference sequences for query mode...")
-            rData = giana.CreateReference(train_file, Vgene=self.use_v_gene, ST=3)
-
-            # ----------------------------------------------------------
-            # Phase 2: Assign test sequences to reference clusters
-            # ----------------------------------------------------------
-            print("\nLoading test sequences...")
-            test_lines = []
-            n_test_loaded = 0
-
-            for _, row in test_data.iterrows():
-                df = self._load_repertoire(row['file_path'])
-                if df is None or len(df) == 0:
-                    continue
-                test_lines.extend(
-                    self._build_giana_rows(df, 'test', row['specimen_label'])
-                )
-                n_test_loaded += 1
-
-            print(f"  Loaded test sequences from {n_test_loaded} specimens.")
-
-            query_file = os.path.join(fold_dir, f"query_fold{test_fold}.txt")
-            self._write_giana_input(test_lines, query_file)
-
-            merged_file = self._run_query(
-                query_file, rData, ref_cluster_file, fold_dir
-            )
 
             # ----------------------------------------------------------
             # Per-CDR3 scoring and evaluation
@@ -374,6 +390,9 @@ if __name__ == '__main__':
     parser.add_argument('--k', type=int, required=True)
     parser.add_argument('--output_csv', type=str, default=None)
     parser.add_argument('--results_dir', type=str, default='results/giana_driver')
+    parser.add_argument('--cluster_dir', type=str, default=None,
+                        help='results_dir from giana_2021_disease_classification.py run; '
+                             'driver eval reuses its queryFinal.txt files instead of rebuilding.')
     parser.add_argument('--exact', action='store_true')
     parser.add_argument('--threshold_score', type=float, default=3.3)
     parser.add_argument('--threshold_iso', type=float, default=5)
@@ -402,5 +421,6 @@ if __name__ == '__main__':
         data_dir=args.repertoire_data_dir,
         driver_seqs_path=args.driver_seqs_path,
         k=args.k,
+        cluster_dir=args.cluster_dir,
         output_csv=args.output_csv,
     )

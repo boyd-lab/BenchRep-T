@@ -55,6 +55,34 @@ class DeepRC2020DriverIdentificationEvaluator:
     # AA vocabulary (same as AIRRRepertoireDataset._AAS)
     _AAS = 'ACDEFGHIKLMNPQRSTVWY'
 
+    @staticmethod
+    def _find_checkpoint(model_save_dir, target_disease, test_fold):
+        """Return path to best_u*.tar.gzip in the fold's checkpoint dir, or None."""
+        import glob
+        pattern = os.path.join(model_save_dir,
+                               f'{target_disease}_fold{test_fold}',
+                               '*', 'checkpoint', 'best_u*.tar.gzip')
+        files = glob.glob(pattern)
+        if not files:
+            return None
+        return max(files, key=os.path.getmtime)
+
+    def _load_model_from_checkpoint(self, checkpoint_path, task_definition):
+        """Load a DeepRC model from a SaverLoader checkpoint without retraining."""
+        import tempfile
+        from widis_lstm_tools.utils.collection import SaverLoader
+        model = self._build_model(task_definition)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        state = dict(model=model, optimizer=optimizer, update=0,
+                     best_validation_loss=np.inf)
+        tmp_dir = tempfile.mkdtemp()
+        saver_loader = SaverLoader(save_dict=state, device=self.device,
+                                   save_dir=tmp_dir, n_savefiles=1, n_inmem=1)
+        state.update(saver_loader.load_from_file(loadname=checkpoint_path, verbose=True))
+        model.to(self.device)
+        model.eval()
+        return model
+
     def __init__(self, n_updates=int(1e4), evaluate_at=int(1e3),
                  sequence_col='cdr3_aa', count_col='duplicate_count',
                  train_val_ratio=0.9, random_state=7,
@@ -309,6 +337,7 @@ class DeepRC2020DriverIdentificationEvaluator:
                              fold_col='malid_cross_validation_fold_id_when_in_test_set',
                              n_folds=3, random_state=None,
                              allowed_participants=None,
+                             model_save_dir=None,
                              raw_file_cache=None,
                              output_csv=None):
         """
@@ -382,21 +411,27 @@ class DeepRC2020DriverIdentificationEvaluator:
                     verbose=True,
                 )
 
-            model = self._build_model(task_definition)
-            fold_results_dir = os.path.join(self.results_dir,
-                                             f'{target_disease}_fold{test_fold}')
-            train(
-                model=model,
-                task_definition=task_definition,
-                trainingset_dataloader=trainingset,
-                trainingset_eval_dataloader=trainingset_eval,
-                early_stopping_target_id='label',
-                validationset_eval_dataloader=validationset_eval,
-                n_updates=self.n_updates,
-                evaluate_at=self.evaluate_at,
-                device=self.device,
-                results_directory=fold_results_dir,
-            )
+            checkpoint_path = (self._find_checkpoint(model_save_dir, target_disease, test_fold)
+                               if model_save_dir else None)
+            if checkpoint_path is not None:
+                print(f"  Loading model from checkpoint: {checkpoint_path}")
+                model = self._load_model_from_checkpoint(checkpoint_path, task_definition)
+            else:
+                model = self._build_model(task_definition)
+                fold_results_dir = os.path.join(self.results_dir,
+                                                 f'{target_disease}_fold{test_fold}')
+                train(
+                    model=model,
+                    task_definition=task_definition,
+                    trainingset_dataloader=trainingset,
+                    trainingset_eval_dataloader=trainingset_eval,
+                    early_stopping_target_id='label',
+                    validationset_eval_dataloader=validationset_eval,
+                    n_updates=self.n_updates,
+                    evaluate_at=self.evaluate_at,
+                    device=self.device,
+                    results_directory=fold_results_dir,
+                )
 
             print(f"\n--- Scoring test repertoires (k={k}) ---")
             fold_precisions = []
@@ -529,6 +564,9 @@ if __name__ == '__main__':
     parser.add_argument('--evaluate_at', type=int, default=int(1e3))
     parser.add_argument('--device', type=str, default=None)
     parser.add_argument('--results_dir', type=str, default='results/deeprc')
+    parser.add_argument('--model_save_dir', type=str, default=None,
+                        help='results_dir from disease classification run; '
+                             'driver eval loads from its checkpoints instead of retraining.')
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--sample_n_sequences', type=int, default=int(1e4))
     parser.add_argument('--max_seq_len', type=int, default=50)
@@ -550,6 +588,7 @@ if __name__ == '__main__':
         data_dir=args.repertoire_data_dir,
         driver_seqs_path=args.driver_seqs_path,
         k=args.k,
+        model_save_dir=args.model_save_dir,
         raw_file_cache={},
         output_csv=args.output_csv,
     )
