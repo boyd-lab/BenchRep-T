@@ -7,11 +7,15 @@ Mirrors the ensemble structure of Gapped_4mer_VJgene (ensemble_regression.py):
 - Linear weighted ensemble: alpha * kmer_prob + (1-alpha) * vj_prob
   (alpha tuned via sweep on an internal 80/20 validation split)
 
-Hyperparameters for each sub-model tuned via a small CV grid over
-max_depth × learning_rate with early stopping — no Optuna.
+Hyperparameters tuned via deterministic two-stage grid search with early stopping:
+  Stage 1: max_depth × learning_rate (16 combos), regularization fixed at defaults.
+  Stage 2: subsample × colsample_bytree × min_child_weight (27 combos), best
+           max_depth/learning_rate fixed. n_estimators handled by early stopping.
 """
 
+import json
 import os
+import pickle
 import numpy as np
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.model_selection import StratifiedKFold, train_test_split
@@ -30,8 +34,11 @@ class XGBoostKmer:
     Supports 'ensemble', 'kmer_only', and 'vj_only' submodels.
     """
 
-    MAX_DEPTH_CANDIDATES = [3, 5, 7]
-    LEARNING_RATE_CANDIDATES = [0.05, 0.1, 0.2]
+    MAX_DEPTH_CANDIDATES = [3, 4, 5, 6]
+    LEARNING_RATE_CANDIDATES = [0.01, 0.03, 0.05, 0.1]
+    SUBSAMPLE_CANDIDATES = [0.7, 0.8, 1.0]
+    COLSAMPLE_CANDIDATES = [0.7, 0.8, 1.0]
+    MIN_CHILD_WEIGHT_CANDIDATES = [1, 3, 5]
     VALID_SUBMODELS = ('ensemble', 'kmer_only', 'vj_only')
 
     def __init__(self, val_split=0.2, n_cv_folds=3, sequence_col='cdr3_aa',
@@ -133,46 +140,76 @@ class XGBoostKmer:
     # ------------------------------------------------------------------
 
     def _tune_xgb_params(self, X, y, label):
-        """Grid search over max_depth × learning_rate via stratified k-fold CV."""
+        """
+        Two-stage deterministic grid search via stratified k-fold CV.
+
+        Stage 1 (16 combos): sweep max_depth × learning_rate with regularization
+                              params fixed at mid-range defaults.
+        Stage 2 (27 combos): fix best max_depth/learning_rate; sweep
+                              subsample × colsample_bytree × min_child_weight.
+        n_estimators is handled by early stopping throughout.
+        """
         skf = StratifiedKFold(n_splits=self.n_cv_folds, shuffle=True,
                               random_state=self.subsample_seed)
-        best_params = {'max_depth': 5, 'learning_rate': 0.1}
+
+        def _cv_auroc(params):
+            fold_aurocs = []
+            for tr_idx, vl_idx in skf.split(X, y):
+                if len(np.unique(y[vl_idx])) < 2:
+                    continue
+                dtrain = xgb.DMatrix(X[tr_idx], label=y[tr_idx])
+                dval = xgb.DMatrix(X[vl_idx], label=y[vl_idx])
+                bst = xgb.train(
+                    params, dtrain,
+                    num_boost_round=1000,
+                    evals=[(dval, 'val')],
+                    early_stopping_rounds=self.early_stopping_rounds,
+                    verbose_eval=False,
+                )
+                fold_aurocs.append(roc_auc_score(y[vl_idx], bst.predict(
+                    dval, iteration_range=(0, bst.best_iteration + 1)
+                )))
+            return float(np.mean(fold_aurocs)) if fold_aurocs else -1.0
+
+        # Stage 1: max_depth × learning_rate
+        best_depth, best_lr = 5, 0.05
         best_auroc = -1.0
-
         for max_depth in self.MAX_DEPTH_CANDIDATES:
-            for lr in self.LEARNING_RATE_CANDIDATES:
-                fold_aurocs = []
-                for tr_idx, vl_idx in skf.split(X, y):
-                    if len(np.unique(y[vl_idx])) < 2:
-                        continue
-                    dtrain = xgb.DMatrix(X[tr_idx], label=y[tr_idx])
-                    dval = xgb.DMatrix(X[vl_idx], label=y[vl_idx])
-                    params = self._base_params(max_depth, lr)
-                    bst = xgb.train(
-                        params, dtrain,
-                        num_boost_round=500,
-                        evals=[(dval, 'val')],
-                        early_stopping_rounds=self.early_stopping_rounds,
-                        verbose_eval=False,
-                    )
-                    fold_aurocs.append(roc_auc_score(y[vl_idx], bst.predict(dval)))
+            for learning_rate in self.LEARNING_RATE_CANDIDATES:
+                auroc = _cv_auroc(self._base_params(
+                    max_depth, learning_rate, subsample=0.8, colsample_bytree=0.8, min_child_weight=3
+                ))
+                if auroc > best_auroc:
+                    best_auroc, best_depth, best_lr = auroc, max_depth, learning_rate
 
-                if fold_aurocs and np.mean(fold_aurocs) > best_auroc:
-                    best_auroc = np.mean(fold_aurocs)
-                    best_params = {'max_depth': max_depth, 'learning_rate': lr}
+        # Stage 2: subsample × colsample_bytree × min_child_weight
+        best_sub, best_col, best_mcw = 0.8, 0.8, 3
+        for sub in self.SUBSAMPLE_CANDIDATES:
+            for col in self.COLSAMPLE_CANDIDATES:
+                for mcw in self.MIN_CHILD_WEIGHT_CANDIDATES:
+                    auroc = _cv_auroc(self._base_params(
+                        best_depth, best_lr, subsample=sub, colsample_bytree=col, min_child_weight=mcw
+                    ))
+                    if auroc > best_auroc:
+                        best_auroc, best_sub, best_col, best_mcw = auroc, sub, col, mcw
 
+        best_params = {
+            'max_depth': best_depth, 'learning_rate': best_lr,
+            'subsample': best_sub, 'colsample_bytree': best_col,
+            'min_child_weight': best_mcw,
+        }
         print(f"  Best {label} params: {best_params}, CV AUROC: {best_auroc:.4f}")
         return best_params
 
-    def _base_params(self, max_depth, lr):
+    def _base_params(self, max_depth, learning_rate, subsample=0.8, colsample_bytree=0.8, min_child_weight=3):
         return {
             'objective': 'binary:logistic',
             'eval_metric': 'auc',
             'max_depth': max_depth,
-            'learning_rate': lr,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'min_child_weight': 5,
+            'learning_rate': learning_rate,
+            'subsample': subsample,
+            'colsample_bytree': colsample_bytree,
+            'min_child_weight': min_child_weight,
             'nthread': self.n_jobs or 0,
             'verbosity': 0,
         }
@@ -224,14 +261,13 @@ class XGBoostKmer:
             best_params_kmer = self._tune_xgb_params(X_kmer_base, y_base, 'k-mer')
             self.kmer_model = self._train_submodel(
                 X_kmer_base, y_base, X_kmer_val, y_val,
-                self._base_params(best_params_kmer['max_depth'],
-                                  best_params_kmer['learning_rate']),
+                self._base_params(**best_params_kmer),
             )
             kmer_val_probs = self.kmer_model.predict(
                 xgb.DMatrix(X_kmer_val),
-                iteration_range=(0, self.kmer_model.best_ntree_limit),
+                iteration_range=(0, self.kmer_model.best_iteration + 1),
             )
-            print(f"  k-mer model: {self.kmer_model.best_ntree_limit} trees, "
+            print(f"  k-mer model: {self.kmer_model.best_iteration + 1} trees, "
                   f"val AUROC: {roc_auc_score(y_val, kmer_val_probs):.4f}")
 
         if use_vj:
@@ -245,14 +281,13 @@ class XGBoostKmer:
             best_params_vj = self._tune_xgb_params(X_vj_base, y_base, 'V/J')
             self.vj_model = self._train_submodel(
                 X_vj_base, y_base, X_vj_val, y_val,
-                self._base_params(best_params_vj['max_depth'],
-                                  best_params_vj['learning_rate']),
+                self._base_params(**best_params_vj),
             )
             vj_val_probs = self.vj_model.predict(
                 xgb.DMatrix(X_vj_val),
-                iteration_range=(0, self.vj_model.best_ntree_limit),
+                iteration_range=(0, self.vj_model.best_iteration + 1),
             )
-            print(f"  V/J model: {self.vj_model.best_ntree_limit} trees, "
+            print(f"  V/J model: {self.vj_model.best_iteration + 1} trees, "
                   f"val AUROC: {roc_auc_score(y_val, vj_val_probs):.4f}")
 
         # Alpha sweep on val split
@@ -288,14 +323,14 @@ class XGBoostKmer:
             X_kmer = self.kmer_vectorizer.transform([self._get_kmer_feature_dict(file_path)])
             kmer_prob = float(self.kmer_model.predict(
                 xgb.DMatrix(X_kmer),
-                iteration_range=(0, self.kmer_model.best_ntree_limit),
+                iteration_range=(0, self.kmer_model.best_iteration + 1),
             )[0])
 
         if self.submodel in ('ensemble', 'vj_only'):
             X_vj = self.vj_vectorizer.transform([self._get_vj_feature_dict(file_path)])
             vj_prob = float(self.vj_model.predict(
                 xgb.DMatrix(X_vj),
-                iteration_range=(0, self.vj_model.best_ntree_limit),
+                iteration_range=(0, self.vj_model.best_iteration + 1),
             )[0])
 
         if self.submodel == 'ensemble':
@@ -312,3 +347,130 @@ class XGBoostKmer:
             'best_alpha': self.best_alpha,
             'diagnosis': 'Diseased' if prob >= 0.5 else 'Healthy',
         }
+
+    # ------------------------------------------------------------------
+    # Save / load
+    # ------------------------------------------------------------------
+
+    def save(self, save_dir):
+        """Persist trained models and vectorizers to save_dir."""
+        os.makedirs(save_dir, exist_ok=True)
+        if self.kmer_model is not None:
+            self.kmer_model.save_model(os.path.join(save_dir, 'kmer_model.ubj'))
+            with open(os.path.join(save_dir, 'kmer_vectorizer.pkl'), 'wb') as f:
+                pickle.dump(self.kmer_vectorizer, f)
+        if self.vj_model is not None:
+            self.vj_model.save_model(os.path.join(save_dir, 'vj_model.ubj'))
+            with open(os.path.join(save_dir, 'vj_vectorizer.pkl'), 'wb') as f:
+                pickle.dump(self.vj_vectorizer, f)
+        with open(os.path.join(save_dir, 'meta.json'), 'w') as f:
+            json.dump({
+                'best_alpha': float(self.best_alpha),
+                'submodel': self.submodel,
+                'kmer_size': self.kmer_size,
+                'use_gaps': self.use_gaps,
+                'sequence_col': self.sequence_col,
+                'v_gene_col': self.v_gene_col,
+                'j_gene_col': self.j_gene_col,
+                'canonicalize_genes': self.canonicalize_genes,
+            }, f, indent=2)
+        print(f"  Model saved to: {save_dir}")
+
+    @classmethod
+    def load(cls, save_dir):
+        """Reconstruct a trained XGBoostKmer from a save_dir written by save()."""
+        with open(os.path.join(save_dir, 'meta.json')) as f:
+            meta = json.load(f)
+        obj = cls(
+            submodel=meta['submodel'],
+            kmer_size=meta['kmer_size'],
+            use_gaps=meta['use_gaps'],
+            sequence_col=meta['sequence_col'],
+            v_gene_col=meta['v_gene_col'],
+            j_gene_col=meta['j_gene_col'],
+            canonicalize_genes=meta.get('canonicalize_genes', False),
+        )
+        obj.best_alpha = meta['best_alpha']
+        kmer_path = os.path.join(save_dir, 'kmer_model.ubj')
+        if os.path.exists(kmer_path):
+            obj.kmer_model = xgb.Booster()
+            obj.kmer_model.load_model(kmer_path)
+            with open(os.path.join(save_dir, 'kmer_vectorizer.pkl'), 'rb') as f:
+                obj.kmer_vectorizer = pickle.load(f)
+        vj_path = os.path.join(save_dir, 'vj_model.ubj')
+        if os.path.exists(vj_path):
+            obj.vj_model = xgb.Booster()
+            obj.vj_model.load_model(vj_path)
+            with open(os.path.join(save_dir, 'vj_vectorizer.pkl'), 'rb') as f:
+                obj.vj_vectorizer = pickle.load(f)
+        return obj
+
+    # ------------------------------------------------------------------
+    # Per-sequence driver scoring
+    # ------------------------------------------------------------------
+
+    def score_sequences(self, file_path):
+        """
+        Score each unique CDR3 in a repertoire by disease probability.
+        Uses the trained XGBoost models directly on per-sequence feature vectors
+        (not the aggregated repertoire-level features used for diagnosis).
+        Returns list of (cdr3, score) sorted descending.
+        """
+        df = self.load_repertoire(file_path)
+        seq_col = self.sequence_col
+
+        want_cols = [seq_col]
+        if self.submodel in ('ensemble', 'vj_only'):
+            if self.v_gene_col in df.columns:
+                want_cols.append(self.v_gene_col)
+            if self.j_gene_col in df.columns:
+                want_cols.append(self.j_gene_col)
+
+        rows = (df[[c for c in want_cols if c in df.columns]]
+                .dropna(subset=[seq_col])
+                .drop_duplicates()
+                .reset_index(drop=True))
+        if len(rows) == 0:
+            return []
+
+        scores = np.zeros(len(rows))
+
+        if self.submodel in ('ensemble', 'kmer_only'):
+            kmer_dicts = []
+            for cdr3 in rows[seq_col]:
+                counts = {}
+                for kmer in _extract_kmers(str(cdr3), self.kmer_size, self.use_gaps):
+                    counts[kmer] = counts.get(kmer, 0) + 1
+                kmer_dicts.append(counts)
+            kmer_probs = self.kmer_model.predict(
+                xgb.DMatrix(self.kmer_vectorizer.transform(kmer_dicts)),
+                iteration_range=(0, self.kmer_model.best_iteration + 1),
+            )
+            scores = kmer_probs if self.submodel == 'kmer_only' else self.best_alpha * kmer_probs
+
+        if self.submodel in ('ensemble', 'vj_only'):
+            vj_dicts = []
+            for _, row in rows.iterrows():
+                counts = {}
+                if self.v_gene_col in rows.columns:
+                    v = row.get(self.v_gene_col)
+                    if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                        counts[f'V:{self._normalize_gene(v)}'] = 1
+                if self.j_gene_col in rows.columns:
+                    j = row.get(self.j_gene_col)
+                    if j is not None and not (isinstance(j, float) and np.isnan(j)):
+                        counts[f'J:{self._normalize_gene(j)}'] = 1
+                vj_dicts.append(counts)
+            vj_probs = self.vj_model.predict(
+                xgb.DMatrix(self.vj_vectorizer.transform(vj_dicts)),
+                iteration_range=(0, self.vj_model.best_iteration + 1),
+            )
+            if self.submodel == 'vj_only':
+                scores = vj_probs
+            else:
+                scores += (1 - self.best_alpha) * vj_probs
+
+        rows = rows.copy()
+        rows['_score'] = scores
+        ranked = rows.groupby(seq_col)['_score'].max().sort_values(ascending=False)
+        return list(zip(ranked.index, ranked.values))

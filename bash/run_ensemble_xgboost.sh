@@ -5,17 +5,17 @@ set -uo pipefail
 
 DEBUG=false
 DEBUG_REPERTOIRES=10
-COVARIATE_ADJUST=false
 ADJUST_DISTRIBUTION=false
-N_JOBS=5
+N_JOBS=10
 
 # ---- config ----
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
 RESULTS=${REPO_ROOT}/results
+MODEL_SAVE_DIR=${REPO_ROOT}/results/ensemble_xgboost_models
 LOGDIR=${REPO_ROOT}/logs/ensemble_xgboost
-mkdir -p "$LOGDIR" "$RESULTS"
+mkdir -p "$LOGDIR" "$RESULTS" "$MODEL_SAVE_DIR"
 
 if $DEBUG; then
   DISEASES=("Lupus")
@@ -33,7 +33,6 @@ for i in $(seq 1 "$N_JOBS"); do echo "$i" >&3; done
 cd "${REPO_ROOT}"
 
 suffix="ensemble_xgboost"
-$COVARIATE_ADJUST    && suffix+="_covadj"
 $ADJUST_DISTRIBUTION && suffix+="_distadj"
 
 for disease in "${DISEASES[@]}"; do
@@ -48,7 +47,6 @@ for disease in "${DISEASES[@]}"; do
       echo "[$(date +%T)] start $disease"
 
       extra_flags=()
-      $COVARIATE_ADJUST    && extra_flags+=(--covariate_adjust)
       $ADJUST_DISTRIBUTION && extra_flags+=(--adjust_distribution_by_demographics)
       if $DEBUG; then
         extra_flags+=(--debug_repertoires "$DEBUG_REPERTOIRES")
@@ -59,6 +57,7 @@ for disease in "${DISEASES[@]}"; do
         --repertoire_data_dir "$REPERTOIRE_DIR" \
         --target_disease "$disease" \
         --output_csv "${RESULTS}/ensemble_xgboost_${suffix}_${disease}_classification.csv" \
+        --model_save_dir "$MODEL_SAVE_DIR" \
         "${extra_flags[@]}"
 
       status=$?

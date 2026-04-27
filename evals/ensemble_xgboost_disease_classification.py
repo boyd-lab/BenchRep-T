@@ -45,6 +45,14 @@ class EnsembleXGBoostEvaluator:
         self.n_jobs = n_jobs
         self.canonicalize_genes = False
 
+    @staticmethod
+    def _submodel_csv(output_csv, suffix):
+        """Derive a per-submodel CSV path, e.g. results/foo.csv → results/foo_kmer_only.csv."""
+        if output_csv is None:
+            return None
+        base, ext = os.path.splitext(output_csv)
+        return f"{base}_{suffix}{ext}"
+
     def _method_name(self):
         name = f'EnsembleXGBoost_{self.kmer_size}mer'
         if self.use_gaps:
@@ -123,6 +131,7 @@ class EnsembleXGBoostEvaluator:
                              random_baseline=False, random_baseline_seed=7,
                              covariate_adjust=False,
                              debug_repertoires=0, output_csv=None,
+                             model_save_dir=None,
                              ext_metadata_path=None, ext_data_dir=None,
                              ext_file_template='{participant_label}_TCRB.tsv'):
         raw_metadata = self.load_metadata(metadata_path)
@@ -163,6 +172,12 @@ class EnsembleXGBoostEvaluator:
         all_probs = []
         all_labels = []
         fold_results = []
+
+        # Per-submodel tracking (populated only when self.submodel == 'ensemble')
+        all_test_rows_kmer, all_test_rows_vj = [], []
+        all_probs_kmer, all_probs_vj = [], []
+        all_labels_kmer, all_labels_vj = [], []
+        fold_results_kmer, fold_results_vj = [], []
 
         for test_fold in range(n_folds):
             print(f"\n{'=' * 60}")
@@ -216,23 +231,31 @@ class EnsembleXGBoostEvaluator:
                         'malid_cross_validation_fold_id_when_in_test_set': test_fold,
                     })
             else:
-                test_probs = np.array([
-                    model.predict_diagnosis(fp)['probability_positive']
+                all_preds = [
+                    model.predict_diagnosis(fp)
                     for fp in tqdm(test_data['file_path'].tolist(), desc="Testing")
-                ])
+                ]
+                test_probs = np.array([p['probability_positive'] for p in all_preds])
                 test_labels_arr = test_data['label'].values
 
-                for (_, row), score in zip(test_data.iterrows(), test_probs):
-                    all_test_rows.append({
+                for (_, row), pred in zip(test_data.iterrows(), all_preds):
+                    base = {
                         'participant_label': row[participant_col],
                         'specimen_label': row['specimen_label'],
                         'disease_label': int(row['label']),
                         'disease_label_str': row[disease_col],
-                        'method': self._method_name(),
                         'disease_model': target_disease,
-                        'model_score': float(score),
                         'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    })
+                    }
+                    all_test_rows.append({**base, 'method': self._method_name(),
+                                          'model_score': float(pred['probability_positive'])})
+                    if self.submodel == 'ensemble':
+                        all_test_rows_kmer.append({**base,
+                            'method': self._method_name() + '_Kmer',
+                            'model_score': float(pred['kmer_probability'])})
+                        all_test_rows_vj.append({**base,
+                            'method': self._method_name() + '_VJ',
+                            'model_score': float(pred['vj_probability'])})
 
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
@@ -253,6 +276,33 @@ class EnsembleXGBoostEvaluator:
             })
             all_probs.extend(test_probs.tolist())
             all_labels.extend(test_labels_arr.tolist())
+
+            # Kmer-only and VJ-only fold metrics (ensemble, non-covariate path only)
+            if (self.submodel == 'ensemble' and not covariate_adjust
+                    and len(np.unique(test_labels_arr)) >= 2):
+                for tag, key, rows_list, probs_list, labels_list, results_list in [
+                    ('Kmer', 'kmer_probability', all_test_rows_kmer,
+                     all_probs_kmer, all_labels_kmer, fold_results_kmer),
+                    ('VJ',   'vj_probability',   all_test_rows_vj,
+                     all_probs_vj,   all_labels_vj,   fold_results_vj),
+                ]:
+                    sub_probs = np.array([p[key] for p in all_preds])
+                    sub_auroc = roc_auc_score(test_labels_arr, sub_probs)
+                    sub_aupr  = average_precision_score(test_labels_arr, sub_probs)
+                    sub_preds = (sub_probs >= 0.5).astype(int)
+                    sub_bacc  = balanced_accuracy_score(test_labels_arr, sub_preds)
+                    sub_f1    = f1_score(test_labels_arr, sub_preds)
+                    print(f"  [{tag}] AUROC: {sub_auroc:.4f}, AUPR: {sub_aupr:.4f}, "
+                          f"Bal Acc: {sub_bacc:.4f}, F1: {sub_f1:.4f}")
+                    results_list.append({'fold': test_fold, 'test_auroc': sub_auroc,
+                                         'test_aupr': sub_aupr, 'test_balanced_acc': sub_bacc,
+                                         'test_f1': sub_f1})
+                    probs_list.extend(sub_probs.tolist())
+                    labels_list.extend(test_labels_arr.tolist())
+
+            if model_save_dir is not None:
+                fold_dir = os.path.join(model_save_dir, target_disease, f'fold{test_fold}')
+                model.save(fold_dir)
 
             del model
 
@@ -285,6 +335,41 @@ class EnsembleXGBoostEvaluator:
             scores_df.to_csv(output_csv, index=False)
             print(f"\nScores saved to: {output_csv}")
 
+        # Kmer-only and VJ-only overall results
+        for tag, tag_rows, tag_probs, tag_labels, tag_fold_results, csv_suffix in [
+            ('Kmer-only', all_test_rows_kmer, all_probs_kmer,
+             all_labels_kmer, fold_results_kmer, 'kmer_only'),
+            ('VJ-only',   all_test_rows_vj,   all_probs_vj,
+             all_labels_vj,   fold_results_vj,   'vj_only'),
+        ]:
+            if not tag_rows:
+                continue
+            print(f"\n{'=' * 60}")
+            print(f"OVERALL RESULTS [{tag}]: {target_disease} vs Healthy")
+            print(f"{'=' * 60}")
+            arr = np.array(tag_probs)
+            lbl = np.array(tag_labels)
+            if len(np.unique(lbl)) >= 2:
+                if tag_fold_results:
+                    fa = [r['test_auroc']        for r in tag_fold_results]
+                    fp = [r['test_aupr']          for r in tag_fold_results]
+                    fb = [r['test_balanced_acc']  for r in tag_fold_results]
+                    ff = [r['test_f1']            for r in tag_fold_results]
+                    print(f"Mean Test AUROC:        {np.mean(fa):.4f} ± {np.std(fa):.4f}")
+                    print(f"Mean Test AUPR:         {np.mean(fp):.4f} ± {np.std(fp):.4f}")
+                    print(f"Mean Test Balanced Acc: {np.mean(fb):.4f} ± {np.std(fb):.4f}")
+                    print(f"Mean Test F1:           {np.mean(ff):.4f} ± {np.std(ff):.4f}")
+                ov_preds = (arr >= 0.5).astype(int)
+                print(f"Overall AUROC (all folds combined):        {roc_auc_score(lbl, arr):.4f}")
+                print(f"Overall AUPR  (all folds combined):        {average_precision_score(lbl, arr):.4f}")
+                print(f"Overall Balanced Acc (all folds combined): {balanced_accuracy_score(lbl, ov_preds):.4f}")
+                print(f"Overall F1 (all folds combined):           {f1_score(lbl, ov_preds):.4f}")
+            sub_df = pd.DataFrame(tag_rows)
+            sub_csv = self._submodel_csv(output_csv, csv_suffix)
+            if sub_csv and len(sub_df) > 0:
+                sub_df.to_csv(sub_csv, index=False)
+                print(f"Scores saved to: {sub_csv}")
+
         return scores_df
 
 
@@ -309,6 +394,8 @@ if __name__ == '__main__':
     parser.add_argument('--adjust_distribution_by_demographics', action='store_true')
     parser.add_argument('--covariate_adjust', action='store_true')
     parser.add_argument('--output_csv', type=str, default=None)
+    parser.add_argument('--model_save_dir', type=str, default=None,
+                        help='Directory to save trained per-fold models for later driver evaluation.')
     parser.add_argument('--debug_repertoires', type=int, default=0)
     parser.add_argument('--ext_metadata_path', type=str, default=None,
                         help='Optional external-cohort metadata TSV (MAL-ID column style).')
@@ -336,6 +423,7 @@ if __name__ == '__main__':
         covariate_adjust=args.covariate_adjust,
         debug_repertoires=args.debug_repertoires,
         output_csv=args.output_csv,
+        model_save_dir=args.model_save_dir,
         ext_metadata_path=args.ext_metadata_path,
         ext_data_dir=args.ext_data_dir,
         ext_file_template=args.ext_file_template,
