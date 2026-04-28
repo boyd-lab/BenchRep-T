@@ -1,15 +1,16 @@
 """
-Reassign clone_id in malid_tcr_airr repertoire files using bcr_clones.assign_clones.
+Reassign clone_id in external_data_airr repertoire files using bcr_clones.assign_clones.
 
-For each part_table_*.tsv.gz file under
-/backups/chihoim/datasets/malid_tcr_airr/data_cleaned_per_participant/rep0*/:
-  1. Rename original `clone_id` -> `clone_id_old` (idempotent: skipped if already renamed).
-  2. Run bcr_clones.assign_clones on (v_call, j_call, cdr3_aa) to produce a new `clone_id`.
-  3. Overwrite the file in place (atomic rename via .tmp.gz).
+For each *.tsv file directly under
+/backups/chihoim/datasets/external_data_airr/data_cleaned/:
+  1. Run bcr_clones.assign_clones on (v_call, j_call, cdr3_aa) to produce a new
+     `clone_id` column. Any existing `clone_id` is overwritten; `cloneResolved`
+     is left untouched.
+  2. Overwrite the file in place (atomic rename via .tmp).
 
 Usage:
-    python external_data_process/reassign_clones_bcr_clones.py \
-        --root /backups/chihoim/datasets/malid_tcr_airr/data_cleaned_per_participant \
+    python external_data_process/reassign_clones_external.py \
+        --root /backups/chihoim/datasets/external_data_airr/data_cleaned \
         --workers 16
 """
 
@@ -33,7 +34,6 @@ V_NO_ALLELE_COL = 'v_gene_no_allele'
 J_NO_ALLELE_COL = 'j_gene_no_allele'
 CDR3_COL = 'cdr3_aa'
 CLONE_COL = 'clone_id'
-CLONE_OLD_COL = 'clone_id_old'
 IDENTITY_THRESHOLD = 0.95  # overridden in main() from --identity_threshold
 LINKAGE_METHOD = 'single'
 
@@ -41,15 +41,14 @@ LINKAGE_METHOD = 'single'
 def process_file(path_str):
     path = Path(path_str)
     try:
-        df = pd.read_csv(path, sep='\t', compression='gzip', low_memory=False)
+        df = pd.read_csv(path, sep='\t', low_memory=False)
 
-        if CLONE_OLD_COL not in df.columns:
-            if CLONE_COL not in df.columns:
-                return (path_str, False, f"missing both {CLONE_COL} and {CLONE_OLD_COL}")
-            df = df.rename(columns={CLONE_COL: CLONE_OLD_COL})
-        else:
-            if CLONE_COL in df.columns:
-                df = df.drop(columns=[CLONE_COL])
+        for required in (V_COL, J_COL, CDR3_COL):
+            if required not in df.columns:
+                return (path_str, False, f"missing required column {required}")
+
+        if CLONE_COL in df.columns:
+            df = df.drop(columns=[CLONE_COL])
 
         df[V_NO_ALLELE_COL] = df[V_COL].str.split('*').str[0]
         df[J_NO_ALLELE_COL] = df[J_COL].str.split('*').str[0]
@@ -68,7 +67,7 @@ def process_file(path_str):
         df = df.drop(columns=[V_NO_ALLELE_COL, J_NO_ALLELE_COL])
 
         tmp_path = path.with_suffix(path.suffix + '.tmp')
-        df.to_csv(tmp_path, sep='\t', index=False, compression='gzip')
+        df.to_csv(tmp_path, sep='\t', index=False)
         os.replace(tmp_path, path)
         return (path_str, True, None)
     except Exception as e:
@@ -81,19 +80,16 @@ def process_file(path_str):
         return (path_str, False, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
-def enumerate_files(root, subdir_glob):
+def enumerate_files(root, file_glob):
     root = Path(root)
-    subdirs = sorted(p for p in root.glob(subdir_glob) if p.is_dir())
-    files = []
-    for sd in subdirs:
-        files.extend(sorted(sd.glob('part_table_*.tsv.gz')))
-    return [str(p) for p in files], subdirs
+    return sorted(str(p) for p in root.glob(file_glob) if p.is_file())
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--root', default='/backups/chihoim/datasets/malid_tcr_airr/data_cleaned_per_participant')
-    ap.add_argument('--subdir_glob', default='rep0*', help='Glob pattern matching target subdirectories')
+    ap.add_argument('--root', default='/backups/chihoim/datasets/external_data_airr/data_cleaned')
+    ap.add_argument('--file_glob', default='*.tsv',
+                    help='Glob pattern (relative to --root) matching repertoire files (default *.tsv)')
     ap.add_argument('--identity_threshold', type=float, default=0.95,
                     help='Fraction identity required to be in the same clone (default 0.95)')
     ap.add_argument('--workers', type=int, default=min(max(cpu_count() - 2, 1), 32))
@@ -104,11 +100,9 @@ def main():
     IDENTITY_THRESHOLD = args.identity_threshold
     print(f"Identity threshold: {IDENTITY_THRESHOLD}")
 
-    files, subdirs = enumerate_files(args.root, args.subdir_glob)
-    print(f"Found {len(subdirs)} {args.subdir_glob!r} subdirectories:")
-    for sd in subdirs:
-        n = len(list(sd.glob('part_table_*.tsv.gz')))
-        print(f"  {sd.name}: {n} files")
+    files = enumerate_files(args.root, args.file_glob)
+    print(f"Root: {args.root}")
+    print(f"Glob: {args.file_glob}")
     print(f"Total files: {len(files)}")
 
     if args.limit is not None:
