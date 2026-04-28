@@ -35,6 +35,10 @@ VDJDB_FILES = {
     "Influenza": os.path.join(REPO_ROOT, "data", "public_clones", "Influenza_GT_TRB3.tsv"),
 }
 
+THOMAS_COVID_PATH = os.path.join(
+    REPO_ROOT, "data", "thomas_covid", "41590_2022_1184_MOESM7_ESM.xlsx"
+)
+
 METADATA_PATH = os.path.join(REPO_ROOT, "data", "malid_clean", "metadata.tsv")
 TCR_DIR       = os.path.join(REPO_ROOT, "data", "malid_clean", "TCR")
 
@@ -97,6 +101,39 @@ def load_ground_truth(disease: str, vdjdb_path: str) -> list[dict]:
     return records
 
 
+def load_thomas_covid_ground_truth() -> list[dict]:
+    """
+    Load Thomas et al. COVID clonotypes (specificity == True), validate and
+    trim CDR3 sequences. Returns same dict format as load_ground_truth().
+    """
+    df = pd.read_excel(THOMAS_COVID_PATH, sheet_name="clonotypes")
+    df = df[df["specificity"] == True].copy()
+    tqdm.write(f"[Covid19/Thomas] {len(df)} sequences after specificity==True filter")
+
+    records = []
+    for idx, row in df.iterrows():
+        seq = str(row["cdr3b"])
+        if not seq.startswith("C"):
+            tqdm.write(f"  WARNING [Covid19/Thomas] CDR3 at row {idx} does not start with 'C': {seq!r}")
+        if not seq.endswith("F"):
+            tqdm.write(f"  WARNING [Covid19/Thomas] CDR3 at row {idx} does not end with 'F': {seq!r}")
+        trimmed = seq
+        if trimmed.startswith("C"):
+            trimmed = trimmed[1:]
+        if trimmed.endswith("F"):
+            trimmed = trimmed[:-1]
+        records.append({
+            "trimmed_cdr3": trimmed,
+            "cdr3":  seq,
+            "v":     row["vb"],
+            "j":     row["jb"],
+            "score": None,
+        })
+
+    tqdm.write(f"[Covid19/Thomas] {len(records)} ground truth sequences loaded")
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Per-disease worker (runs in a subprocess)
 # ---------------------------------------------------------------------------
@@ -108,6 +145,20 @@ def process_disease(disease: str, vdjdb_path: str, tqdm_position: int) -> list[d
     tqdm.write(f"\n[{disease}] Starting (VDJdb: {vdjdb_path})")
 
     ground_truth = load_ground_truth(disease, vdjdb_path)
+
+    if disease == "Covid19":
+        thomas_records = load_thomas_covid_ground_truth()
+        seen = {r["trimmed_cdr3"] for r in ground_truth}
+        added = sum(
+            1 for r in thomas_records
+            if r["trimmed_cdr3"] not in seen
+        )
+        ground_truth.extend(r for r in thomas_records if r["trimmed_cdr3"] not in seen)
+        tqdm.write(
+            f"[Covid19] Added {added} unique Thomas et al. sequences "
+            f"({len(ground_truth)} total ground truth)"
+        )
+
     if not ground_truth:
         tqdm.write(f"[{disease}] WARNING: no ground truth sequences, skipped.")
         return []
