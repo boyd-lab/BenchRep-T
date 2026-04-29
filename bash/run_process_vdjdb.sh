@@ -4,7 +4,7 @@ set -uo pipefail
 # ---- config ----
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 LOGDIR=${REPO_ROOT}/logs/vdjdb
-OUTPUT_PATH=${REPO_ROOT}/data/vdjdb_matches.csv
+OUTPUT_PATH=${REPO_ROOT}/data/vdjdb_matches_expanded.csv
 
 mkdir -p "$LOGDIR"
 

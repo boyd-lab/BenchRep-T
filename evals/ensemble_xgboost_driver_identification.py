@@ -93,25 +93,41 @@ class EnsembleXGBoostDriverEvaluator:
     # ------------------------------------------------------------------
 
     def run_cross_validation(self, metadata_path, target_disease, data_dir,
-                              driver_seqs_path, k,
+                              driver_seqs_path, ks,
                               participant_col='participant_label',
                               file_prefix='part_table_', file_suffix='.tsv.gz',
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3,
                               allowed_participants=None,
-                              output_csv=None):
+                              max_repertoires=None,
+                              output_csv=None,
+                              ext_metadata_path=None, ext_data_dir=None,
+                              ext_file_template='{participant_label}_TCRB.tsv'):
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
 
+        if ext_metadata_path is not None:
+            from utils.cohort_merge import prepare_merged_cohort
+            metadata = prepare_merged_cohort(
+                metadata, ext_metadata_path, ext_data_dir, target_disease,
+                ext_file_template=ext_file_template,
+                healthy_label=self.HEALTHY_LABEL,
+                fold_col=fold_col, disease_col=disease_col,
+            )
+
         if allowed_participants is not None:
             before = len(metadata)
             metadata = metadata[metadata['specimen_label'].isin(allowed_participants)]
             print(f"Filtered to {len(metadata)}/{before} specimens "
                   f"via allowed_participants.")
+
+        if max_repertoires is not None and len(metadata) > max_repertoires:
+            metadata = metadata.sample(n=max_repertoires, random_state=7)
+            print(f"Subsampled to {max_repertoires} repertoires for debug run.")
 
         drivers_by_file = self.load_driver_sequences(driver_seqs_path, target_disease)
 
@@ -127,9 +143,11 @@ class EnsembleXGBoostDriverEvaluator:
                                     f'fold{test_fold}')
             if not os.path.isdir(fold_dir):
                 print(f"  WARNING: no saved model at {fold_dir}; skipping fold.")
-                fold_summaries.append({'fold': test_fold, 'n_repertoires': 0,
-                                       'mean_precision_at_k': float('nan'),
-                                       'mean_recall_at_k': float('nan')})
+                fold_summaries.append({
+                    'fold': test_fold, 'n_repertoires': 0,
+                    **{f'mean_precision_at_{k}': float('nan') for k in ks},
+                    **{f'mean_recall_at_{k}': float('nan') for k in ks},
+                })
                 continue
 
             print(f"  Loading model from {fold_dir} ...")
@@ -138,7 +156,8 @@ class EnsembleXGBoostDriverEvaluator:
             test_data = metadata[metadata[fold_col] == test_fold]
             print(f"  Test specimens: {len(test_data)}")
 
-            fold_prec, fold_rec = [], []
+            fold_precisions = {k: [] for k in ks}
+            fold_recalls = {k: [] for k in ks}
 
             for _, row in tqdm(test_data.iterrows(), total=len(test_data),
                                desc="Driver scoring"):
@@ -150,64 +169,82 @@ class EnsembleXGBoostDriverEvaluator:
 
                 gt = drivers_by_file[stem]
                 ranked = model.score_sequences(fp)
-                top_k = {cdr3 for cdr3, _ in ranked[:k]}
-                hits = top_k & gt
-                precision = len(hits) / k
-                recall = len(hits) / len(gt) if gt else 0.0
 
-                fold_prec.append(precision)
-                fold_rec.append(recall)
-                all_results.append({
+                for k in ks:
+                    top_k = {cdr3 for cdr3, _ in ranked[:k]}
+                    hits = top_k & gt
+                    precision = len(hits) / k
+                    recall = len(hits) / len(gt) if gt else 0.0
+
+                    fold_precisions[k].append(precision)
+                    fold_recalls[k].append(recall)
+                    all_results.append({
+                        'fold': test_fold,
+                        'k': k,
+                        'specimen_label': row['specimen_label'],
+                        'participant_label': row[participant_col],
+                        'disease_label': int(row['label']),
+                        'filename': stem,
+                        'n_repertoire_unique_cdr3s': len(ranked),
+                        'n_ground_truth_drivers': len(gt),
+                        'n_hits_at_k': len(hits),
+                        'precision_at_k': precision,
+                        'recall_at_k': recall,
+                    })
+
+            n_reps = len(fold_precisions[ks[0]])
+            if n_reps > 0:
+                print(f"\nFold {test_fold}: {n_reps} repertoires")
+                for k in ks:
+                    mp = np.mean(fold_precisions[k])
+                    mr = np.mean(fold_recalls[k])
+                    print(f"  Mean Precision@{k}: {mp:.4f}")
+                    print(f"  Mean Recall@{k}:    {mr:.4f}")
+                fold_summaries.append({
                     'fold': test_fold,
-                    'specimen_label': row['specimen_label'],
-                    'participant_label': row[participant_col],
-                    'disease_label': int(row['label']),
-                    'filename': stem,
-                    'n_unique_cdr3s': len(ranked),
-                    'n_ground_truth': len(gt),
-                    'n_hits': len(hits),
-                    'precision_at_k': precision,
-                    'recall_at_k': recall,
+                    'n_repertoires': n_reps,
+                    **{f'mean_precision_at_{k}': np.mean(fold_precisions[k]) for k in ks},
+                    **{f'mean_recall_at_{k}': np.mean(fold_recalls[k]) for k in ks},
                 })
-
-            if fold_prec:
-                mp = np.mean(fold_prec)
-                mr = np.mean(fold_rec)
-                print(f"  Fold {test_fold}: {len(fold_prec)} repertoires, "
-                      f"P@{k}={mp:.4f}, R@{k}={mr:.4f}")
-                fold_summaries.append({'fold': test_fold,
-                                       'n_repertoires': len(fold_prec),
-                                       'mean_precision_at_k': mp,
-                                       'mean_recall_at_k': mr})
             else:
                 print(f"  Fold {test_fold}: no test repertoires with ground truth drivers")
-                fold_summaries.append({'fold': test_fold, 'n_repertoires': 0,
-                                       'mean_precision_at_k': float('nan'),
-                                       'mean_recall_at_k': float('nan')})
+                fold_summaries.append({
+                    'fold': test_fold, 'n_repertoires': 0,
+                    **{f'mean_precision_at_{k}': float('nan') for k in ks},
+                    **{f'mean_recall_at_{k}': float('nan') for k in ks},
+                })
 
         results_df = pd.DataFrame(all_results)
 
         print(f"\n{'=' * 60}")
-        print(f"OVERALL RESULTS: {target_disease} Driver Identification (k={k})")
+        print(f"OVERALL RESULTS: {target_disease} Driver Identification")
         print(f"{'=' * 60}")
-        print(f"Repertoires evaluated: {len(results_df)}")
-        if len(results_df) > 0:
-            overall_prec = results_df['precision_at_k'].mean()
-            overall_rec  = results_df['recall_at_k'].mean()
-            total_hits   = results_df['n_hits'].sum()
-            total_gt     = results_df['n_ground_truth'].sum()
-            print(f"Overall Precision@{k} (macro): {overall_prec:.4f}")
-            print(f"Overall Recall@{k}    (macro): {overall_rec:.4f}")
-            if total_gt > 0:
-                print(f"Overall Precision@{k} (micro): "
-                      f"{total_hits / (len(results_df) * k):.4f}")
-                print(f"Overall Recall@{k}    (micro): "
-                      f"{total_hits / total_gt:.4f}")
+
+        for k in ks:
+            k_df = results_df[results_df['k'] == k] if len(results_df) > 0 else results_df
+            if len(k_df) > 0:
+                overall_prec = k_df['precision_at_k'].mean()
+                overall_rec  = k_df['recall_at_k'].mean()
+                total_hits   = k_df['n_hits_at_k'].sum()
+                total_gt     = k_df['n_ground_truth_drivers'].sum()
+                print(f"\nk={k} ({len(k_df)} repertoires):")
+                print(f"  Overall Precision@{k} (macro): {overall_prec:.4f}")
+                print(f"  Overall Recall@{k}    (macro): {overall_rec:.4f}")
+                if total_gt > 0:
+                    print(f"  Overall Precision@{k} (micro): "
+                          f"{total_hits / (len(k_df) * k):.4f}")
+                    print(f"  Overall Recall@{k}    (micro): "
+                          f"{total_hits / total_gt:.4f}")
+            else:
+                print(f"\nk={k}: No results")
+
         print(f"\nPer-fold breakdown:")
         for s in fold_summaries:
-            print(f"  Fold {s['fold']}: {s['n_repertoires']} reps, "
-                  f"P@{k}={s['mean_precision_at_k']:.4f}, "
-                  f"R@{k}={s['mean_recall_at_k']:.4f}")
+            k_strs = '  '.join(
+                f"P@{k}={s[f'mean_precision_at_{k}']:.4f} R@{k}={s[f'mean_recall_at_{k}']:.4f}"
+                for k in ks
+            )
+            print(f"  Fold {s['fold']}: {s['n_repertoires']} reps | {k_strs}")
 
         if output_csv and len(results_df) > 0:
             results_df.to_csv(output_csv, index=False)
@@ -230,14 +267,24 @@ if __name__ == '__main__':
     parser.add_argument('--driver_seqs_path', type=str, required=True,
                         help='Ground truth driver sequences CSV '
                              '(columns: disease, filename, sample_cdr3)')
-    parser.add_argument('--k', type=int, required=True,
-                        help='Number of top-ranked CDR3s to evaluate')
+    parser.add_argument('--k', type=str, required=True,
+                        help='Comma-separated k values, e.g. 100,1000,10000')
     parser.add_argument('--model_save_dir', type=str, required=True,
                         help='Directory written by --model_save_dir in '
                              'ensemble_xgboost_disease_classification.py')
     parser.add_argument('--output_csv', type=str, default=None)
     parser.add_argument('--n_cv_folds', type=int, default=3)
+    parser.add_argument('--max_repertoires', type=int, default=None,
+                        help='Subsample to this many repertoires total (for debug runs).')
+    parser.add_argument('--ext_metadata_path', type=str, default=None,
+                        help='Optional external-cohort metadata TSV (MAL-ID column style).')
+    parser.add_argument('--ext_data_dir', type=str, default=None,
+                        help='Directory of external repertoire files.')
+    parser.add_argument('--ext_file_template', type=str,
+                        default='{participant_label}_TCRB.tsv',
+                        help='Filename template for external repertoires.')
     args = parser.parse_args()
+    ks = [int(x) for x in args.k.split(',')]
 
     evaluator = EnsembleXGBoostDriverEvaluator(
         model_save_dir=args.model_save_dir,
@@ -248,7 +295,11 @@ if __name__ == '__main__':
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         driver_seqs_path=args.driver_seqs_path,
-        k=args.k,
+        ks=ks,
         n_folds=args.n_cv_folds,
+        max_repertoires=args.max_repertoires,
         output_csv=args.output_csv,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
     )
