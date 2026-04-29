@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from models.ensemble_regression import Gapped_4mer_VJgene, _extract_gapped_4mers
+from models.ensemble_regression import Gapped_4mer_VJgene, _extract_kmers
 
 
 class EnsembleRegressionDriverIdentificationEvaluator:
@@ -169,7 +169,7 @@ class EnsembleRegressionDriverIdentificationEvaluator:
             kmer_dicts = []
             for cdr3 in triples_df[seq_col].values:
                 counts = {}
-                for kmer in _extract_gapped_4mers(str(cdr3)):
+                for kmer in _extract_kmers(str(cdr3), model.kmer_size, model.use_gaps):
                     counts[kmer] = counts.get(kmer, 0) + 1
                 kmer_dicts.append(counts)
 
