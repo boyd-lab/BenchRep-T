@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # ---- flags ----
-DEBUG=false
+DEBUG=true
 K="100,1000,10000"
 FEATURES="full"
 
@@ -15,7 +15,7 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-GPUS=(2)
+GPUS=(2 3)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
@@ -30,7 +30,7 @@ if $DEBUG; then
   EPOCHS=5
   PATIENCE=3
 else
-  DISEASES=("HIV" "Influenza" "Covid19")
+  DISEASES=("Influenza" "Covid19")
   MAX_REPERTOIRES=""
   EPOCHS=100
   PATIENCE=10

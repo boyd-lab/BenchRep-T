@@ -13,12 +13,11 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-GPUS=(0)
+GPUS=(1 2 3)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
 DRIVER_SEQS=${REPO_ROOT}/data/public_clones/vdjdb_matches_expanded.csv
-MODEL_SAVE_DIR=${REPO_ROOT}/results/deeprc_best
 RESULTS=${REPO_ROOT}/results
 LOGDIR=${REPO_ROOT}/logs/deeprc_driver
 mkdir -p "$LOGDIR" "$RESULTS"
@@ -62,7 +61,6 @@ for disease in "${DISEASES[@]}"; do
         --target_disease "$disease" \
         --driver_seqs_path "$DRIVER_SEQS" \
         --k "$K" \
-        --model_save_dir "$MODEL_SAVE_DIR" \
         --output_csv "${RESULTS}/deeprc_2020_${disease}_driver_k${k_tag}_${RUN_TS}.csv" \
         --batch_size 32 \
         "${debug_flags[@]}"
@@ -70,7 +68,7 @@ for disease in "${DISEASES[@]}"; do
       status=$?
       echo "[$(date +%T)] done  $disease k=${K} on GPU $gpu (exit $status)"
       exit $status
-    } >"$log" 2>&1
+    } 2>&1 | if $DEBUG; then tee "$log"; else cat >"$log"; fi
 
     echo "$gpu" >&3  # return GPU token
     echo "[$(date +%T)] done  $disease k=${K} on GPU $gpu | log: $log"

@@ -214,7 +214,7 @@ class DeepRC2020DriverIdentificationEvaluator:
         Returns:
             features: float tensor (K, max_seq_len, n_features) on device
             seq_lengths: long tensor (K,) on device
-            counts: float tensor (K,) on device (log-scaled)
+            counts: float tensor (K,) on device (raw, matching no_sequence_count_scaling)
             cdr3_strings: list of K CDR3 strings (original order)
         """
         try:
@@ -236,8 +236,24 @@ class DeepRC2020DriverIdentificationEvaluator:
             if indices is not None:
                 df = df.iloc[indices]
 
-        seqs = df[self.sequence_col].fillna('').tolist()
-        raw_counts = pd.to_numeric(df[self.count_col], errors='coerce').fillna(1).values
+        raw_seqs = df[self.sequence_col].astype(str).values
+        raw_counts = pd.to_numeric(df[self.count_col], errors='coerce').fillna(1).values.astype(np.float32)
+
+        # Filter to sequences composed entirely of valid AAs, matching training path
+        def _all_valid(s):
+            if not s:
+                return False
+            b = np.frombuffer(s.encode('ascii', errors='replace'), dtype=np.uint8)
+            return bool(np.all(self._byte_lookup[b] >= 0))
+
+        valid_mask = np.array([_all_valid(s) for s in raw_seqs], dtype=bool)
+        seqs = raw_seqs[valid_mask].tolist()
+        raw_counts = raw_counts[valid_mask]
+
+        if len(seqs) == 0:
+            return None, None, None, []
+
+        # Use raw counts, matching no_sequence_count_scaling used during training
         raw_counts = np.maximum(raw_counts, 0)
 
         K = len(seqs)
@@ -256,9 +272,7 @@ class DeepRC2020DriverIdentificationEvaluator:
 
         seq_idx_t = torch.from_numpy(seq_indices).long().to(self.device)
         seq_len_t = torch.from_numpy(seq_lengths).long().to(self.device)
-        counts_t = torch.from_numpy(
-            np.log(np.maximum(raw_counts, 1)).astype(np.float16)
-        ).to(self.device)
+        counts_t = torch.from_numpy(raw_counts.astype(np.float32)).to(self.device)
 
         # Replicate __compute_features__ from DeepRC (architectures.py)
         embedding_dtype = torch.float16
@@ -269,14 +283,14 @@ class DeepRC2020DriverIdentificationEvaluator:
         flat_idx = seq_idx_t.reshape(-1)
         flat_features = features[:, :seq_idx_t.shape[1], :].reshape(-1, n_features)
         valid_mask = flat_idx != -1
-        flat_features[torch.arange(flat_features.shape[0])[valid_mask],
+        flat_features[torch.arange(flat_features.shape[0], device=self.device)[valid_mask],
                       flat_idx[valid_mask]] = 1.0
         features[:, :seq_idx_t.shape[1], :] = flat_features.reshape(K, seq_idx_t.shape[1], n_features)
         # Scale by counts
         features = features * counts_t[:, None, None]
         # Add positional information
         pos_feats = torch.from_numpy(
-            model_pos_feats := _compute_position_features_np(max_len, seq_lengths)
+            _compute_position_features_np(max_len, seq_lengths)
         ).to(dtype=embedding_dtype, device=self.device)
         features[:, :seq_idx_t.shape[1], -3:] = pos_feats[:, :seq_idx_t.shape[1]]
         # Normalize
@@ -298,7 +312,7 @@ class DeepRC2020DriverIdentificationEvaluator:
         """
         model.eval()
 
-        features, seq_lengths, counts, cdr3_strings = self._encode_repertoire(file_path)
+        features, seq_lengths, _counts, cdr3_strings = self._encode_repertoire(file_path)
         if features is None or len(cdr3_strings) == 0:
             return []
 
@@ -309,13 +323,13 @@ class DeepRC2020DriverIdentificationEvaluator:
             mb_size = int(5e4)
             emb_parts = []
             for start in range(0, K, mb_size):
-                chunk = features[start:start + mb_size].to(dtype=torch.float32)
+                chunk = features[start:start + mb_size].to(dtype=torch.float16)
                 lens_chunk = seq_lengths[start:start + mb_size]
                 emb_parts.append(model.sequence_embedding(chunk, sequence_lengths=lens_chunk))
             emb_seqs = torch.cat(emb_parts, dim=0)  # (K, n_kernels)
 
             # Attention weights (pre-softmax)
-            attn_raw = model.attention_nn(emb_seqs)  # (K, 1)
+            attn_raw = model.attention_nn(emb_seqs.to(dtype=torch.float32))  # (K, 1)
             attn = torch.softmax(attn_raw, dim=0).squeeze(dim=1).cpu().numpy()  # (K,)
 
         # Aggregate by CDR3 — max attention weight per unique CDR3
