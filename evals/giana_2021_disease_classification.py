@@ -149,7 +149,7 @@ class GIANAEvaluator:
                  threshold_vgene=3.7,
                  n_threads=1,
                  use_gpu=False,
-                 max_seqs_per_specimen=None,
+                 max_seqs_per_specimen=10000,
                  indices_map=None,
                  results_dir='results/giana',
                  canonicalize_genes=False,
@@ -170,7 +170,7 @@ class GIANAEvaluator:
             threshold_vgene: V-gene similarity threshold (default 3.7).
             n_threads: Number of FAISS CPU threads.
             use_gpu: If True, use GPU-accelerated FAISS index (requires faiss-gpu).
-            max_seqs_per_specimen: If set, cap sequences per specimen (top by count).
+            max_seqs_per_specimen: Cap sequences per specimen (top by count; default: 10000, matching the paper).
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
                          rep_id is the filename without extension, e.g.
                          'part_table_PARTICIPANT_SPECIMEN'.
@@ -1038,8 +1038,8 @@ if __name__ == '__main__':
                         help='Use GPU-accelerated FAISS index (requires faiss-gpu)')
     parser.add_argument('--no_v_gene', action='store_true',
                         help='Disable V-gene features (CDR3 only)')
-    parser.add_argument('--max_seqs_per_specimen', type=int, default=None,
-                        help='Cap sequences per specimen (top by count; default: no cap)')
+    parser.add_argument('--max_seqs_per_specimen', type=int, default=10000,
+                        help='Cap sequences per specimen (top by count; default: 10000)')
     parser.add_argument('--debug', action='store_true',
                         help='Debug mode: load only a small number of repertoires per class')
     parser.add_argument('--debug_repertoires', type=int, default=10,

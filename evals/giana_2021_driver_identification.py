@@ -400,7 +400,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_threads', type=int, default=1)
     parser.add_argument('--use_gpu', action='store_true')
     parser.add_argument('--no_v_gene', action='store_true')
-    parser.add_argument('--max_seqs_per_specimen', type=int, default=None)
+    parser.add_argument('--max_seqs_per_specimen', type=int, default=10000)
     args = parser.parse_args()
 
     evaluator = GIANADriverIdentificationEvaluator(
