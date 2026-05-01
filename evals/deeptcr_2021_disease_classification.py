@@ -26,7 +26,7 @@ from utils_s import Get_Train_Valid_Test_KFold
 from data_processing import Process_Seq
 from Layers import make_test_pred_object
 
-from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
+from utils.cohort_adjustments import apply_cohort_adjustment
 
 
 class DeepTCREvaluator:
@@ -129,10 +129,29 @@ class DeepTCREvaluator:
     def load_metadata(self, metadata_path):
         return pd.read_csv(metadata_path, sep='\t')
 
-    def prepare_disease_data(self, metadata, target_disease, disease_col='disease'):
+    def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
+                             adjust_distribution_by_demographics=False,
+                             random_baseline=False, random_baseline_seed=7,
+                             require_demographics=False):
         mask = metadata[disease_col].isin([target_disease, self.HEALTHY_LABEL])
         filtered = metadata[mask].copy()
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
+
+        if adjust_distribution_by_demographics:
+            filtered = apply_cohort_adjustment(
+                filtered, target_disease,
+                seed=random_baseline_seed,
+                random_baseline=random_baseline,
+            )
+
+        if require_demographics:
+            before = len(filtered)
+            filtered = filtered.dropna(subset=['age', 'sex', 'ancestry'])
+            filtered = filtered[filtered['ancestry'].str.strip() != '']
+            after = len(filtered)
+            if before != after:
+                print(f"  Dropped {before - after} rows with missing demographics "
+                      f"({before} -> {after})")
 
         n_disease = (filtered['label'] == 1).sum()
         n_healthy = (filtered['label'] == 0).sum()
@@ -315,7 +334,9 @@ class DeepTCREvaluator:
                               tune_parameters=True,
                               p_value_candidates=None,
                               allowed_participants=None,
-                              covariate_adjust=False,
+                              require_demographics=False,
+                              adjust_distribution_by_demographics=False,
+                              random_baseline=False, random_baseline_seed=7,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -346,7 +367,11 @@ class DeepTCREvaluator:
         rng = random_state if random_state is not None else self.random_state
 
         raw_metadata = self.load_metadata(metadata_path)
-        metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col)
+        metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col,
+                                             adjust_distribution_by_demographics=adjust_distribution_by_demographics,
+                                             random_baseline=random_baseline,
+                                             random_baseline_seed=random_baseline_seed,
+                                             require_demographics=require_demographics)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
@@ -503,7 +528,7 @@ class DeepTCREvaluator:
                 suppress_output=False,
             )
             dtcr.test_pred = make_test_pred_object()
-            dtcr._train(write=covariate_adjust, batch_seed=None, iteration=test_fold)
+            dtcr._train(write=False, batch_seed=None, iteration=test_fold)
 
             id_to_row = {
                 row['specimen_label']: row
@@ -513,100 +538,32 @@ class DeepTCREvaluator:
             fold_probs = []
             fold_labels = []
 
-            if covariate_adjust:
-                # ----------------------------------------------------------
-                # Covariate-adjusted prediction via Sample_Features embeddings
-                # ----------------------------------------------------------
-                dtcr.Sample_Features(set='all')
-                sf = dtcr.sample_features  # DataFrame indexed by specimen label
+            # dtcr.y_pred: shape [n_test, n_classes], same order as test[0]
+            # dtcr.test[0]: array of specimen labels (no file extension)
+            test_sample_names = dtcr.test[0]
+            test_preds = dtcr.y_pred            # [n_test, n_classes]
+            test_labels_arr = dtcr.y_test       # [n_test, n_classes] one-hot
 
-                tv_specimen_names = np.concatenate([dtcr.train[0], dtcr.valid[0]])
-                tv_labels_oh = np.concatenate([dtcr.train[1], dtcr.valid[1]], axis=0)
-                tv_labels_bin = (tv_labels_oh.argmax(axis=1) == disease_class_idx).astype(int)
-
-                test_specimen_names = dtcr.test[0]
-                test_labels_bin = (dtcr.y_test.argmax(axis=1) == disease_class_idx).astype(int)
-
-                meta_idx = metadata.set_index('specimen_label')
-
-                def _has_demo(specimen):
-                    if specimen not in meta_idx.index or specimen not in sf.index:
-                        return False
-                    row = meta_idx.loc[specimen]
-                    return (
-                        pd.notna(row.get('age')) and
-                        pd.notna(row.get('sex')) and
-                        pd.notna(row.get('ancestry')) and
-                        str(row.get('ancestry', '')).strip() != ''
-                    )
-
-                tv_mask = np.array([_has_demo(s) for s in tv_specimen_names])
-                test_mask = np.array([_has_demo(s) for s in test_specimen_names])
-
-                tv_spec = tv_specimen_names[tv_mask]
-                tv_lbl = tv_labels_bin[tv_mask]
-                test_spec = test_specimen_names[test_mask]
-                test_lbl = test_labels_bin[test_mask]
-
-                print(f"  Covariate adjust: {len(tv_spec)} train/val, "
-                      f"{len(test_spec)} test samples with complete demographics.")
-
-                X_tv = sf.loc[tv_spec].values.astype(float)
-                X_test_emb = sf.loc[test_spec].values.astype(float)
-                tv_meta = meta_idx.loc[tv_spec]
-                test_meta = meta_idx.loc[test_spec]
-
-                test_probs_cov = covariate_adjusted_predict(
-                    X_tv, tv_meta, tv_lbl, X_test_emb, test_meta
-                )
-
-                fold_probs = test_probs_cov.tolist()
-                fold_labels = test_lbl.tolist()
-
-                for specimen, score in zip(test_spec, test_probs_cov):
-                    if specimen not in id_to_row:
-                        continue
-                    row = id_to_row[specimen]
-                    all_test_rows.append({
-                        'participant_label': row[participant_col],
-                        'specimen_label': specimen,
-                        'disease_label': int(row['label']),
-                        'disease_label_str': row[disease_col],
-                        'method': 'DeepTCR_CovAdj',
-                        'disease_model': target_disease,
-                        'model_score': float(score),
-                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    })
-            else:
-                # ----------------------------------------------------------
-                # Standard DeepTCR prediction
-                # ----------------------------------------------------------
-                # dtcr.y_pred: shape [n_test, n_classes], same order as test[0]
-                # dtcr.test[0]: array of specimen labels (no file extension)
-                test_sample_names = dtcr.test[0]
-                test_preds = dtcr.y_pred            # [n_test, n_classes]
-                test_labels_arr = dtcr.y_test       # [n_test, n_classes] one-hot
-
-                for fname, pred_vec, label_vec in zip(
-                        test_sample_names, test_preds, test_labels_arr):
-                    specimen = fname  # Load_Data stores names without .tsv extension
-                    if specimen not in id_to_row:
-                        continue
-                    row = id_to_row[specimen]
-                    score = float(pred_vec[disease_class_idx])
-                    true_label = int(row['label'])
-                    fold_probs.append(score)
-                    fold_labels.append(true_label)
-                    all_test_rows.append({
-                        'participant_label': row[participant_col],
-                        'specimen_label': specimen,
-                        'disease_label': true_label,
-                        'disease_label_str': row[disease_col],
-                        'method': 'DeepTCR',
-                        'disease_model': target_disease,
-                        'model_score': score,
-                        'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    })
+            for fname, pred_vec, label_vec in zip(
+                    test_sample_names, test_preds, test_labels_arr):
+                specimen = fname  # Load_Data stores names without .tsv extension
+                if specimen not in id_to_row:
+                    continue
+                row = id_to_row[specimen]
+                score = float(pred_vec[disease_class_idx])
+                true_label = int(row['label'])
+                fold_probs.append(score)
+                fold_labels.append(true_label)
+                all_test_rows.append({
+                    'participant_label': row[participant_col],
+                    'specimen_label': specimen,
+                    'disease_label': true_label,
+                    'disease_label_str': row[disease_col],
+                    'method': 'DeepTCR',
+                    'disease_model': target_disease,
+                    'model_score': score,
+                    'malid_cross_validation_fold_id_when_in_test_set': test_fold,
+                })
 
             if len(fold_labels) < 2 or len(set(fold_labels)) < 2:
                 print(f"Warning: fold {test_fold} has <2 classes in test, skipping metrics.")
@@ -704,10 +661,12 @@ if __name__ == '__main__':
                         help='Debug mode: load only a small number of repertoires per class')
     parser.add_argument('--debug_repertoires', type=int, default=10,
                         help='Repertoires per class to load in debug mode (default: 10)')
-    parser.add_argument('--covariate_adjust', action='store_true',
-                        help='Residualize sample-level embeddings against demographics '
-                             '(age, sex, ancestry) and train an L1 logistic regression head '
-                             '(requires complete demographics; saves model checkpoint)')
+    parser.add_argument('--require_demographics', action='store_true',
+                        help='Drop repertoires with missing demographic data '
+                             '(age, sex, ancestry) to match demographic baseline subset')
+    parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
+                        help='Apply per-disease cohort distribution adjustment for fair comparison '
+                             '(see utils.cohort_adjustments)')
     parser.add_argument('--ext_metadata_path', type=str, default=None,
                         help='Optional external-cohort metadata TSV (MAL-ID column style). '
                              'Merges external samples by fold; auto-canonicalizes V/J.')
@@ -738,7 +697,8 @@ if __name__ == '__main__':
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
-        covariate_adjust=args.covariate_adjust,
+        require_demographics=args.require_demographics,
+        adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
         ext_metadata_path=args.ext_metadata_path,
         ext_data_dir=args.ext_data_dir,
         ext_file_template=args.ext_file_template,

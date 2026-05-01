@@ -17,8 +17,8 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-GPUS=(0 3)
-JOBS_PER_GPU=3  # concurrent jobs sharing each GPU
+GPUS=(1 2 3)
+JOBS_PER_GPU=1  # one job per GPU
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
@@ -30,7 +30,7 @@ mkdir -p "$LOGDIR" "$RESULTS/giana_driver"
 if $DEBUG; then
   DISEASES=("Covid19")
 else
-  DISEASES=("Influenza" "Covid19")
+  DISEASES=("Influenza" "Covid19" "HIV")
 fi
 
 # FIFO GPU token pool

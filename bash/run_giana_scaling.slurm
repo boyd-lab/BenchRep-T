@@ -47,7 +47,7 @@ echo "GPU(s): $CUDA_VISIBLE_DEVICES"
 echo "======================================="
 
 # ---- run scaling experiment ----
-CUDA_VISIBLE_DEVICES=0 python -u -m evals.sequencing_depth_experiment \
+CUDA_VISIBLE_DEVICES=1 python -u -m evals.sequencing_depth_experiment \
   --model giana_2021 \
   --target_disease "$DISEASE" \
   --metadata_path "$METADATA" \

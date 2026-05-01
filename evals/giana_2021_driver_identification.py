@@ -137,7 +137,7 @@ class GIANADriverIdentificationEvaluator(GIANAEvaluator):
 
     def run_cross_validation_driver_id(
         self, metadata_path, target_disease, data_dir,
-        driver_seqs_path, k,
+        driver_seqs_path, ks,
         participant_col='participant_label',
         file_prefix='part_table_', file_suffix='.tsv.gz',
         disease_col='disease',
@@ -154,10 +154,13 @@ class GIANADriverIdentificationEvaluator(GIANAEvaluator):
         1. Build reference clusters from training sequences.
         2. Assign test sequences to reference clusters via GIANA query mode.
         3. Score each test CDR3 by its cluster's disease fraction.
-        4. Compare top-k CDR3s against ground truth driver sequences.
+        4. Compare top-k CDR3s against ground truth driver sequences for each k in ks.
+
+        Args:
+            ks: List of int k values (e.g. [100, 1000, 10000]).
 
         Returns:
-            DataFrame with per-repertoire precision@k and recall@k.
+            DataFrame with per-repertoire, per-k precision@k and recall@k.
         """
         os.makedirs(self.results_dir, exist_ok=True)
 
@@ -276,9 +279,9 @@ class GIANADriverIdentificationEvaluator(GIANAEvaluator):
                     merged_file, target_disease
                 )
 
-            print(f"\n--- Evaluating driver identification (k={k}) ---")
-            fold_precisions = []
-            fold_recalls = []
+            print(f"\n--- Evaluating driver identification (ks={ks}) ---")
+            fold_precisions = {k: [] for k in ks}
+            fold_recalls = {k: [] for k in ks}
 
             for _, row in tqdm(test_data.iterrows(), total=len(test_data),
                                desc="Evaluating"):
@@ -294,79 +297,84 @@ class GIANADriverIdentificationEvaluator(GIANAEvaluator):
 
                 driver_cdr3s = drivers_by_file[filename_stem]
                 ranked = cdr3_scores_by_specimen.get(specimen, [])
-                top_k_cdr3s = set(cdr3 for cdr3, _ in ranked[:k])
 
-                hits = top_k_cdr3s & driver_cdr3s
-                precision = len(hits) / k
-                recall = len(hits) / len(driver_cdr3s)
+                for k in ks:
+                    top_k_cdr3s = set(cdr3 for cdr3, _ in ranked[:k])
+                    hits = top_k_cdr3s & driver_cdr3s
+                    precision = len(hits) / k
+                    recall = len(hits) / len(driver_cdr3s)
 
-                fold_precisions.append(precision)
-                fold_recalls.append(recall)
+                    fold_precisions[k].append(precision)
+                    fold_recalls[k].append(recall)
 
-                all_results.append({
-                    'fold': test_fold,
-                    'filename': filename_stem,
-                    'specimen_label': specimen,
-                    'participant_label': row[participant_col],
-                    'disease_label': int(row['label']),
-                    'n_repertoire_unique_cdr3s': len(ranked),
-                    'n_ground_truth_drivers': len(driver_cdr3s),
-                    'n_hits_at_k': len(hits),
-                    'precision_at_k': precision,
-                    'recall_at_k': recall,
-                })
+                    all_results.append({
+                        'fold': test_fold,
+                        'k': k,
+                        'filename': filename_stem,
+                        'specimen_label': specimen,
+                        'participant_label': row[participant_col],
+                        'disease_label': int(row['label']),
+                        'n_repertoire_unique_cdr3s': len(ranked),
+                        'n_ground_truth_drivers': len(driver_cdr3s),
+                        'n_hits_at_k': len(hits),
+                        'precision_at_k': precision,
+                        'recall_at_k': recall,
+                    })
 
-            if fold_precisions:
-                mean_prec = np.mean(fold_precisions)
-                mean_rec = np.mean(fold_recalls)
-                print(f"\nFold {test_fold}: {len(fold_precisions)} repertoires")
-                print(f"  Mean Precision@{k}: {mean_prec:.4f}")
-                print(f"  Mean Recall@{k}:    {mean_rec:.4f}")
+            n_reps = len(fold_precisions[ks[0]])
+            if n_reps > 0:
+                print(f"\nFold {test_fold}: {n_reps} repertoires")
+                for k in ks:
+                    print(f"  Mean Precision@{k}: {np.mean(fold_precisions[k]):.4f}")
+                    print(f"  Mean Recall@{k}:    {np.mean(fold_recalls[k]):.4f}")
                 fold_summaries.append({
                     'fold': test_fold,
-                    'n_repertoires': len(fold_precisions),
-                    'mean_precision_at_k': mean_prec,
-                    'mean_recall_at_k': mean_rec,
+                    'n_repertoires': n_reps,
+                    **{f'mean_precision_at_{k}': np.mean(fold_precisions[k]) for k in ks},
+                    **{f'mean_recall_at_{k}': np.mean(fold_recalls[k]) for k in ks},
                 })
             else:
                 print(f"\nFold {test_fold}: No test repertoires with ground truth drivers")
                 fold_summaries.append({
                     'fold': test_fold,
                     'n_repertoires': 0,
-                    'mean_precision_at_k': float('nan'),
-                    'mean_recall_at_k': float('nan'),
+                    **{f'mean_precision_at_{k}': float('nan') for k in ks},
+                    **{f'mean_recall_at_{k}': float('nan') for k in ks},
                 })
 
         results_df = pd.DataFrame(all_results)
 
-        if len(results_df) > 0:
-            overall_precision = results_df['precision_at_k'].mean()
-            overall_recall = results_df['recall_at_k'].mean()
-            total_hits = results_df['n_hits_at_k'].sum()
-            total_possible = results_df['n_ground_truth_drivers'].sum()
-        else:
-            overall_precision = overall_recall = 0.0
-            total_hits = total_possible = 0
-
         print(f"\n{'=' * 60}")
-        print(f"OVERALL RESULTS: {target_disease} Driver Identification (k={k})")
+        print(f"OVERALL RESULTS: {target_disease} Driver Identification")
         print(f"{'=' * 60}")
-        print(f"Repertoires evaluated: {len(results_df)}")
-        print(f"Overall Precision@{k} (macro): {overall_precision:.4f}")
-        print(f"Overall Recall@{k}    (macro): {overall_recall:.4f}")
-        if total_possible > 0:
-            micro_recall = total_hits / total_possible
-            micro_precision = (
-                total_hits / (len(results_df) * k) if len(results_df) > 0 else 0.0
-            )
-            print(f"Overall Precision@{k} (micro): {micro_precision:.4f}")
-            print(f"Overall Recall@{k}    (micro): {micro_recall:.4f}")
+
+        for k in ks:
+            k_df = results_df[results_df['k'] == k] if len(results_df) > 0 else results_df
+            if len(k_df) > 0:
+                overall_precision = k_df['precision_at_k'].mean()
+                overall_recall = k_df['recall_at_k'].mean()
+                total_hits = k_df['n_hits_at_k'].sum()
+                total_possible = k_df['n_ground_truth_drivers'].sum()
+                n_reps = len(k_df)
+                print(f"\nk={k} ({n_reps} repertoires):")
+                print(f"  Overall Precision@{k} (macro): {overall_precision:.4f}")
+                print(f"  Overall Recall@{k}    (macro): {overall_recall:.4f}")
+                if total_possible > 0:
+                    micro_recall = total_hits / total_possible
+                    micro_precision = total_hits / (n_reps * k)
+                    print(f"  Overall Precision@{k} (micro): {micro_precision:.4f}")
+                    print(f"  Overall Recall@{k}    (micro): {micro_recall:.4f}")
+            else:
+                print(f"\nk={k}: No results")
 
         print(f"\nPer-fold breakdown:")
         for s in fold_summaries:
-            print(f"  Fold {s['fold']}: {s['n_repertoires']} reps, "
-                  f"P@{k}={s['mean_precision_at_k']:.4f}, "
-                  f"R@{k}={s['mean_recall_at_k']:.4f}")
+            k_strs = '  '.join(
+                f"P@{k}={s[f'mean_precision_at_{k}']:.4f} "
+                f"R@{k}={s[f'mean_recall_at_{k}']:.4f}"
+                for k in ks
+            )
+            print(f"  Fold {s['fold']}: {s['n_repertoires']} reps | {k_strs}")
 
         if output_csv and len(results_df) > 0:
             results_df.to_csv(output_csv, index=False)
@@ -387,7 +395,8 @@ if __name__ == '__main__':
     parser.add_argument('--repertoire_data_dir', type=str, required=True)
     parser.add_argument('--target_disease', type=str, required=True)
     parser.add_argument('--driver_seqs_path', type=str, required=True)
-    parser.add_argument('--k', type=int, required=True)
+    parser.add_argument('--k', type=str, required=True,
+                        help='Comma-separated k values, e.g. 100,1000,10000')
     parser.add_argument('--output_csv', type=str, default=None)
     parser.add_argument('--results_dir', type=str, default='results/giana_driver')
     parser.add_argument('--cluster_dir', type=str, default=None,
@@ -415,12 +424,14 @@ if __name__ == '__main__':
         results_dir=args.results_dir,
     )
 
+    ks = [int(x) for x in args.k.split(',')]
+
     results = evaluator.run_cross_validation_driver_id(
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         driver_seqs_path=args.driver_seqs_path,
-        k=args.k,
+        ks=ks,
         cluster_dir=args.cluster_dir,
         output_csv=args.output_csv,
     )

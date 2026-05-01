@@ -1,29 +1,35 @@
 #!/bin/bash
 set -uo pipefail
 
+# Run ABMIL on the demographic-complete subset (age/sex/ancestry present)
+# without using demographic features — mirrors run_abmil_demographic.sh but
+# calls ensemble_abmil_disease_classification with --require_demographics only.
+
 # ---- flags ----
 DEBUG=false
 DEBUG_REPERTOIRES=10
+FEATURES="full"
 for arg in "$@"; do
   case $arg in
     --debug) DEBUG=true ;;
     --debug_repertoires=*) DEBUG_REPERTOIRES="${arg#*=}" ;;
+    --features=*) FEATURES="${arg#*=}" ;;
   esac
 done
 
 # ---- config ----
-GPUS=(0 1 2 3)
+GPUS=(1 2 3)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
 RESULTS=${REPO_ROOT}/results
-LOGDIR=${REPO_ROOT}/logs/deeptcr
+LOGDIR=${REPO_ROOT}/logs/abmil_demo_subset
 mkdir -p "$LOGDIR" "$RESULTS"
 
 if $DEBUG; then
   DISEASES=("Lupus")
 else
-  DISEASES=("Lupus" "T1D" "HIV" "Influenza" "Covid19")
+  DISEASES=("Lupus" "HIV" "Covid19")
 fi
 
 # FIFO GPU token pool
@@ -35,30 +41,32 @@ for g in "${GPUS[@]}"; do echo "$g" >&3; done
 
 cd "${REPO_ROOT}"
 
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+
 for disease in "${DISEASES[@]}"; do
   read -r gpu <&3  # blocks until a GPU is free
 
   {
     ts=$(date +%Y%m%d_%H%M%S)
-    log="${LOGDIR}/deeptcr_${disease}_${ts}.log"
+    log="${LOGDIR}/abmil_demo_subset_${disease}_${FEATURES}_${ts}.log"
     echo "[$(date +%T)] start $disease on GPU $gpu -> $log"
 
     {
       echo "[$(date +%T)] start $disease on GPU $gpu"
 
-      debug_flags=()
-      $DEBUG && debug_flags=(--debug --debug_repertoires "$DEBUG_REPERTOIRES" --epochs_max 5)
+      extra_flags=()
+      if $DEBUG; then
+        extra_flags+=(--epochs 5 --max_repertoires_per_class "$DEBUG_REPERTOIRES")
+      fi
 
-      CUDA_VISIBLE_DEVICES="$gpu" python -u -m evals.deeptcr_2021_disease_classification \
+      CUDA_VISIBLE_DEVICES="$gpu" python -u -m evals.ensemble_abmil_disease_classification \
         --metadata_path "$METADATA" \
         --repertoire_data_dir "$REPERTOIRE_DIR" \
         --target_disease "$disease" \
-        --output_csv "${RESULTS}/deeptcr_2021_${disease}_DemoInject_classification.csv" \
-        --results_dir "${RESULTS}/deeptcr" \
-        --batch_size 4 \
-        --device 0 \
-        --inject_demographics \
-        "${debug_flags[@]}"
+        --features "$FEATURES" \
+        --require_demographics \
+        --output_csv "${RESULTS}/abmil_demo_subset_${disease}_${FEATURES}_${RUN_TS}_classification.csv" \
+        "${extra_flags[@]}"
 
       status=$?
       echo "[$(date +%T)] done  $disease on GPU $gpu (exit $status)"

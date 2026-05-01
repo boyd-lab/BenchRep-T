@@ -48,6 +48,7 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
+from utils.cohort_adjustments import apply_cohort_adjustment
 
 # GIANA source files live in models/GIANA/
 _GIANA_DIR = os.path.join(
@@ -202,10 +203,19 @@ class GIANAEvaluator:
     def load_metadata(self, metadata_path):
         return pd.read_csv(metadata_path, sep='\t')
 
-    def prepare_disease_data(self, metadata, target_disease, disease_col='disease'):
+    def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
+                             adjust_distribution_by_demographics=False,
+                             random_baseline=False, random_baseline_seed=7):
         mask = metadata[disease_col].isin([target_disease, self.HEALTHY_LABEL])
         filtered = metadata[mask].copy()
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
+
+        if adjust_distribution_by_demographics:
+            filtered = apply_cohort_adjustment(
+                filtered, target_disease,
+                seed=random_baseline_seed,
+                random_baseline=random_baseline,
+            )
 
         n_disease = (filtered['label'] == 1).sum()
         n_healthy = (filtered['label'] == 0).sum()
@@ -649,6 +659,8 @@ class GIANAEvaluator:
                               p_value_candidates=None,
                               allowed_participants=None,
                               covariate_adjust=False,
+                              adjust_distribution_by_demographics=False,
+                              random_baseline=False, random_baseline_seed=7,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -684,7 +696,10 @@ class GIANAEvaluator:
         os.makedirs(self.results_dir, exist_ok=True)
 
         raw_metadata = self.load_metadata(metadata_path)
-        metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col)
+        metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col,
+                                             adjust_distribution_by_demographics=adjust_distribution_by_demographics,
+                                             random_baseline=random_baseline,
+                                             random_baseline_seed=random_baseline_seed)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
@@ -1048,6 +1063,9 @@ if __name__ == '__main__':
                         help='Residualize GIANA scores against demographics using cross-fold OLS '
                              '(other folds\' test scores used as training data to avoid circularity; '
                              'requires complete demographics)')
+    parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
+                        help='Apply per-disease cohort distribution adjustment for fair comparison '
+                             '(see utils.cohort_adjustments)')
     parser.add_argument('--ext_metadata_path', type=str, default=None,
                         help='Optional external-cohort metadata TSV (MAL-ID column style). '
                              'When set, external samples are merged into the same fold-based '
@@ -1079,6 +1097,7 @@ if __name__ == '__main__':
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
         covariate_adjust=args.covariate_adjust,
+        adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
         ext_metadata_path=args.ext_metadata_path,
         ext_data_dir=args.ext_data_dir,
         ext_file_template=args.ext_file_template,

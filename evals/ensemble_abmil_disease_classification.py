@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from models.ensemble_abmil import ABMIL
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
+from utils.cohort_adjustments import apply_cohort_adjustment
 
 
 class ABMILEvaluator:
@@ -119,7 +120,9 @@ class ABMILEvaluator:
         return pd.read_csv(metadata_path, sep='\t')
 
     def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
-                             require_demographics=False):
+                             require_demographics=False,
+                             adjust_distribution_by_demographics=False,
+                             random_baseline=False, random_baseline_seed=7):
         """
         Filter metadata to target disease vs. Healthy/Background and add binary labels.
 
@@ -129,6 +132,11 @@ class ABMILEvaluator:
             disease_col: Column with disease labels.
             require_demographics: If True, drop rows with missing age, sex,
                 or ancestry so the subset matches the demographic baseline.
+            adjust_distribution_by_demographics: If True, apply per-disease cohort
+                distribution adjustment (see utils.cohort_adjustments).
+            random_baseline: If True (with adjust_distribution_by_demographics),
+                resample healthy uniformly at random to the same target N.
+            random_baseline_seed: RNG seed for the random-baseline draw.
 
         Returns:
             DataFrame with a 'label' column (1 = disease, 0 = healthy).
@@ -136,6 +144,13 @@ class ABMILEvaluator:
         mask = metadata[disease_col].isin([target_disease, self.HEALTHY_LABEL])
         filtered = metadata[mask].copy()
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
+
+        if adjust_distribution_by_demographics:
+            filtered = apply_cohort_adjustment(
+                filtered, target_disease,
+                seed=random_baseline_seed,
+                random_baseline=random_baseline,
+            )
 
         if require_demographics:
             before = len(filtered)
@@ -200,6 +215,8 @@ class ABMILEvaluator:
                               n_folds=3, random_state=7,
                               allowed_participants=None,
                               require_demographics=False,
+                              adjust_distribution_by_demographics=False,
+                              random_baseline=False, random_baseline_seed=7,
                               covariate_adjust=False,
                               model_save_dir=None,
                               ext_metadata_path=None, ext_data_dir=None,
@@ -237,7 +254,10 @@ class ABMILEvaluator:
         """
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col,
-                                             require_demographics=require_demographics)
+                                             require_demographics=require_demographics,
+                                             adjust_distribution_by_demographics=adjust_distribution_by_demographics,
+                                             random_baseline=random_baseline,
+                                             random_baseline_seed=random_baseline_seed)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
@@ -262,6 +282,10 @@ class ABMILEvaluator:
         all_probs = []
         all_labels = []
         fold_results = []
+
+        base_method = 'ABMIL_CovAdj' if covariate_adjust else 'ABMIL'
+        if random_baseline:
+            base_method += '_RandomBaseline'
 
         for test_fold in range(n_folds):
             print(f"\n{'='*60}")
@@ -339,18 +363,20 @@ class ABMILEvaluator:
                 )
                 test_labels_arr = test_cov['label'].values
 
-                method_name = 'ABMIL_CovAdj'
                 for (_, row), score in zip(test_cov.iterrows(), test_probs):
-                    all_test_rows.append({
+                    entry = {
                         'participant_label': row[participant_col],
                         'specimen_label': row['specimen_label'],
                         'disease_label': int(row['label']),
                         'disease_label_str': row[disease_col],
-                        'method': method_name,
+                        'method': base_method,
                         'disease_model': target_disease,
                         'model_score': float(score),
                         'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    })
+                    }
+                    if random_baseline:
+                        entry['random_baseline_seed'] = int(random_baseline_seed)
+                    all_test_rows.append(entry)
             else:
                 # ----------------------------------------------------------
                 # Standard ABMIL prediction
@@ -364,16 +390,19 @@ class ABMILEvaluator:
                 test_labels_arr = np.array(test_labels)
 
                 for (_, row), score in zip(test_data.iterrows(), test_probs):
-                    all_test_rows.append({
+                    entry = {
                         'participant_label': row[participant_col],
                         'specimen_label': row['specimen_label'],
                         'disease_label': int(row['label']),
                         'disease_label_str': row[disease_col],
-                        'method': 'ABMIL',
+                        'method': base_method,
                         'disease_model': target_disease,
                         'model_score': float(score),
                         'malid_cross_validation_fold_id_when_in_test_set': test_fold,
-                    })
+                    }
+                    if random_baseline:
+                        entry['random_baseline_seed'] = int(random_baseline_seed)
+                    all_test_rows.append(entry)
 
             test_auroc = roc_auc_score(test_labels_arr, test_probs)
             test_aupr = average_precision_score(test_labels_arr, test_probs)
@@ -476,6 +505,20 @@ if __name__ == "__main__":
     parser.add_argument('--covariate_adjust', action='store_true',
                         help='Residualize bag embeddings against demographics (age, sex, ancestry) '
                              'and train an L1 logistic regression head (requires complete demographics)')
+    parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
+                        help='Apply per-disease cohort distribution adjustment for fair '
+                             'comparison. HIV: filter both cohorts to African ancestry. '
+                             'Lupus/T1D/Influenza/Covid19: keep the disease cohort unchanged '
+                             'and subsample Healthy/Background so its age distribution (10y '
+                             'bins) matches the disease cohort.')
+    parser.add_argument('--random_baseline_seeds', type=int, nargs='+', default=None,
+                        help='Run the random-sampling healthy baseline for each seed '
+                             '(implies --adjust_distribution_by_demographics). For each '
+                             'seed, healthy is resampled uniformly at random to the same '
+                             'target N as the demographic-matched cohort; disease side '
+                             'mirrors the demographic-matched run. Results from all seeds '
+                             'are concatenated into one output, with a '
+                             '`random_baseline_seed` column. Example: 7 14 21 28 35.')
     parser.add_argument('--model_save_dir', type=str, default=None,
                         help='Directory to save trained per-fold models for driver evaluation.')
     parser.add_argument('--output_csv', type=str, default=None,
@@ -509,17 +552,60 @@ if __name__ == "__main__":
         features=args.features,
     )
 
-    scores_df = evaluator.run_cross_validation(
-        metadata_path=args.metadata_path,
-        target_disease=args.target_disease,
-        data_dir=args.repertoire_data_dir,
-        require_demographics=args.require_demographics,
-        covariate_adjust=args.covariate_adjust,
-        model_save_dir=args.model_save_dir,
-        ext_metadata_path=args.ext_metadata_path,
-        ext_data_dir=args.ext_data_dir,
-        ext_file_template=args.ext_file_template,
-    )
+    if args.random_baseline_seeds:
+        seed_dfs = []
+        for seed in args.random_baseline_seeds:
+            print(f"\n{'#'*60}")
+            print(f"# RANDOM BASELINE RUN — seed={seed}")
+            print(f"{'#'*60}")
+            seed_df = evaluator.run_cross_validation(
+                metadata_path=args.metadata_path,
+                target_disease=args.target_disease,
+                data_dir=args.repertoire_data_dir,
+                require_demographics=args.require_demographics,
+                adjust_distribution_by_demographics=True,
+                random_baseline=True,
+                random_baseline_seed=seed,
+                covariate_adjust=args.covariate_adjust,
+                model_save_dir=args.model_save_dir,
+                ext_metadata_path=args.ext_metadata_path,
+                ext_data_dir=args.ext_data_dir,
+                ext_file_template=args.ext_file_template,
+            )
+            seed_dfs.append(seed_df)
+        scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
+
+        per_seed = []
+        for seed, seed_df in scores_df.groupby('random_baseline_seed'):
+            y = seed_df['disease_label'].values
+            p = seed_df['model_score'].values
+            per_seed.append({
+                'random_baseline_seed': int(seed),
+                'overall_auroc': roc_auc_score(y, p),
+                'overall_aupr': average_precision_score(y, p),
+            })
+        summary_df = pd.DataFrame(per_seed)
+        print(f"\n{'#'*60}")
+        print(f"# RANDOM BASELINE SUMMARY — across {len(summary_df)} seeds")
+        print(f"{'#'*60}")
+        print(summary_df.to_string(index=False))
+        print(f"Mean overall AUROC: {summary_df['overall_auroc'].mean():.4f} "
+              f"± {summary_df['overall_auroc'].std(ddof=0):.4f}")
+        print(f"Mean overall AUPR:  {summary_df['overall_aupr'].mean():.4f} "
+              f"± {summary_df['overall_aupr'].std(ddof=0):.4f}")
+    else:
+        scores_df = evaluator.run_cross_validation(
+            metadata_path=args.metadata_path,
+            target_disease=args.target_disease,
+            data_dir=args.repertoire_data_dir,
+            require_demographics=args.require_demographics,
+            adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
+            covariate_adjust=args.covariate_adjust,
+            model_save_dir=args.model_save_dir,
+            ext_metadata_path=args.ext_metadata_path,
+            ext_data_dir=args.ext_data_dir,
+            ext_file_template=args.ext_file_template,
+        )
 
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)

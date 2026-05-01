@@ -1,6 +1,10 @@
 #!/bin/bash
 set -uo pipefail
 
+# Run DeepTCR on the demographic-complete subset (age/sex/ancestry present)
+# without using demographic features — mirrors run_deeptcr_demographic.sh but
+# calls deeptcr_2021_disease_classification with --require_demographics.
+
 # ---- flags ----
 DEBUG=false
 DEBUG_REPERTOIRES=10
@@ -12,18 +16,18 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-GPUS=(0 1 2 3)
+GPUS=(2, 3)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
 RESULTS=${REPO_ROOT}/results
-LOGDIR=${REPO_ROOT}/logs/deeptcr
+LOGDIR=${REPO_ROOT}/logs/deeptcr_demo_subset
 mkdir -p "$LOGDIR" "$RESULTS"
 
 if $DEBUG; then
   DISEASES=("Lupus")
 else
-  DISEASES=("Lupus" "T1D" "HIV" "Influenza" "Covid19")
+  DISEASES=("Lupus" "HIV" "Covid19")
 fi
 
 # FIFO GPU token pool
@@ -35,12 +39,14 @@ for g in "${GPUS[@]}"; do echo "$g" >&3; done
 
 cd "${REPO_ROOT}"
 
+RUN_TS=$(date +%Y%m%d_%H%M%S)
+
 for disease in "${DISEASES[@]}"; do
   read -r gpu <&3  # blocks until a GPU is free
 
   {
     ts=$(date +%Y%m%d_%H%M%S)
-    log="${LOGDIR}/deeptcr_${disease}_${ts}.log"
+    log="${LOGDIR}/deeptcr_demo_subset_${disease}_${ts}.log"
     echo "[$(date +%T)] start $disease on GPU $gpu -> $log"
 
     {
@@ -53,11 +59,11 @@ for disease in "${DISEASES[@]}"; do
         --metadata_path "$METADATA" \
         --repertoire_data_dir "$REPERTOIRE_DIR" \
         --target_disease "$disease" \
-        --output_csv "${RESULTS}/deeptcr_2021_${disease}_DemoInject_classification.csv" \
-        --results_dir "${RESULTS}/deeptcr" \
+        --output_csv "${RESULTS}/deeptcr_demo_subset_${disease}_${RUN_TS}_classification.csv" \
+        --results_dir "${RESULTS}/deeptcr_demo_subset" \
+        --require_demographics \
         --batch_size 4 \
         --device 0 \
-        --inject_demographics \
         "${debug_flags[@]}"
 
       status=$?

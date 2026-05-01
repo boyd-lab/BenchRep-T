@@ -47,7 +47,12 @@ def create_evaluator(model_name, indices_map=None):
         return Ostmeyer2019Evaluator(indices_map=indices_map)
     elif model_name == 'giana_2021':
         from evals.giana_2021_disease_classification import GIANAEvaluator
-        return GIANAEvaluator(indices_map=indices_map, exact=False)
+        return GIANAEvaluator(indices_map=indices_map,
+                              exact=True,
+                              threshold_iso=7,
+                              n_threads=10,
+                              use_gpu=True,
+                              max_seqs_per_specimen=None)
     elif model_name == 'deeprc_2020':
         from evals.deeprc_2020_disease_classification import DeepRC2020Evaluator
         return DeepRC2020Evaluator(indices_map=indices_map,
