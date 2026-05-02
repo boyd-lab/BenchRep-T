@@ -163,8 +163,10 @@ class Gapped_4mer_VJgene:
 
     def _get_kmer_feature_dict(self, file_path):
         """
-        Extract gapped 4-mer counts from a repertoire file.
-        Returns a dict {kmer_string: count}.
+        Extract gapped 4-mer relative frequencies from a repertoire file.
+        Counts are normalized by the total k-mer count in the repertoire so
+        that values are comparable across repertoires of different depths.
+        Returns a dict {kmer_string: frequency}.
         """
         if file_path in self._kmer_features_cache:
             return self._kmer_features_cache[file_path]
@@ -174,6 +176,10 @@ class Gapped_4mer_VJgene:
         for seq in df[self.sequence_col].dropna():
             for kmer in _extract_kmers(str(seq), self.kmer_size, self.use_gaps):
                 counts[kmer] = counts.get(kmer, 0) + 1
+
+        total = sum(counts.values())
+        if total > 0:
+            counts = {k: v / total for k, v in counts.items()}
 
         self._kmer_features_cache[file_path] = counts
         return counts
@@ -191,26 +197,39 @@ class Gapped_4mer_VJgene:
 
     def _get_vj_feature_dict(self, file_path):
         """
-        Extract V gene and J gene frequency counts from a repertoire file.
-        Returns a dict {'V:<gene>': count, 'J:<gene>': count}.
+        Extract V gene and J gene relative frequencies from a repertoire file.
+        V and J are each normalized by their own total (independent
+        distributions over gene calls), so that values are comparable across
+        repertoires of different depths.
+        Returns a dict {'V:<gene>': frequency, 'J:<gene>': frequency}.
         """
         if file_path in self._vj_features_cache:
             return self._vj_features_cache[file_path]
 
         df = self.load_repertoire(file_path)
-        counts = {}
+        v_counts = {}
+        j_counts = {}
 
         if self.v_gene_col in df.columns:
             for gene in df[self.v_gene_col].dropna():
                 gene = self._normalize_gene(gene)
-                key = f'V:{gene}'
-                counts[key] = counts.get(key, 0) + 1
+                v_counts[gene] = v_counts.get(gene, 0) + 1
 
         if self.j_gene_col in df.columns:
             for gene in df[self.j_gene_col].dropna():
                 gene = self._normalize_gene(gene)
-                key = f'J:{gene}'
-                counts[key] = counts.get(key, 0) + 1
+                j_counts[gene] = j_counts.get(gene, 0) + 1
+
+        v_total = sum(v_counts.values())
+        j_total = sum(j_counts.values())
+
+        counts = {}
+        if v_total > 0:
+            for gene, c in v_counts.items():
+                counts[f'V:{gene}'] = c / v_total
+        if j_total > 0:
+            for gene, c in j_counts.items():
+                counts[f'J:{gene}'] = c / j_total
 
         self._vj_features_cache[file_path] = counts
         return counts
@@ -397,11 +416,12 @@ class Gapped_4mer_VJgene:
         """
         Return a per-sample dense vector of L1-selected feature values.
 
-        Concatenates the raw counts at the columns where the trained k-mer and
-        V/J L1 logistic regressions retained non-zero coefficients (subject to
-        ``self.submodel``). Used for covariate-adjusted classification, where
-        the resulting (n_samples, n_selected) matrix is residualized against
-        demographics before refitting an L1 logistic regression.
+        Concatenates the per-repertoire normalized values at the columns where
+        the trained k-mer and V/J L1 logistic regressions retained non-zero
+        coefficients (subject to ``self.submodel``). Used for covariate-adjusted
+        classification, where the resulting (n_samples, n_selected) matrix is
+        residualized against demographics before refitting an L1 logistic
+        regression.
 
         Returns:
             np.ndarray of shape (n_selected_kmer + n_selected_vj,) with dtype
