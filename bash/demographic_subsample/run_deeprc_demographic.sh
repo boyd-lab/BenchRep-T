@@ -20,7 +20,7 @@ done
 MODES=("adjust" "baseline")
 
 # ---- config ----
-GPUS=(2 3)
+GPUS=(0 1)
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR

@@ -48,7 +48,6 @@ for disease in "${DISEASES[@]}"; do
         --results_dir "${RESULTS}/giana" \
         --n_threads "$N_THREADS" \
         --max_seqs_per_specimen 10000 \
-        --use_gpu \
         --exact \
         --threshold_iso 7 \
         --output_csv "${RESULTS}/giana_2021_${disease}_classification.csv" \

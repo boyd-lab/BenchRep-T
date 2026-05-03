@@ -65,7 +65,8 @@ class DeepTCREvaluator:
                  indices_map=None,
                  canonicalize_genes=False,
                  debug=False,
-                 debug_repertoires=10):
+                 debug_repertoires=10,
+                 healthy_label=None):
         """
         Args:
             sequence_col: AIRR column with CDR3 amino acid sequences.
@@ -121,6 +122,8 @@ class DeepTCREvaluator:
         self.canonicalize_genes = canonicalize_genes
         self.debug = debug
         self.debug_repertoires = debug_repertoires
+        if healthy_label is not None:
+            self.HEALTHY_LABEL = healthy_label
 
     # ------------------------------------------------------------------
     # Metadata helpers (same pattern as other evaluators)
@@ -632,6 +635,20 @@ if __name__ == '__main__':
                         help='Directory containing AIRR .tsv.gz repertoire files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Disease to classify (e.g. Lupus, T1D, HIV)')
+    parser.add_argument('--healthy_label', type=str,
+                        default=DeepTCREvaluator.HEALTHY_LABEL,
+                        help='Negative-class label in the disease column.')
+    parser.add_argument('--participant_col', type=str, default='participant_label',
+                        help='Metadata column used as participant_label in outputs and internal file paths.')
+    parser.add_argument('--disease_col', type=str, default='disease',
+                        help='Metadata column containing disease/control labels.')
+    parser.add_argument('--fold_col', type=str,
+                        default='malid_cross_validation_fold_id_when_in_test_set',
+                        help='Metadata column containing fold IDs.')
+    parser.add_argument('--file_prefix', type=str, default='part_table_',
+                        help='Internal cohort file prefix.')
+    parser.add_argument('--file_suffix', type=str, default='.tsv.gz',
+                        help='Internal cohort file suffix.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     parser.add_argument('--results_dir', type=str, default='results/deeptcr',
@@ -694,6 +711,7 @@ if __name__ == '__main__':
         results_dir=args.results_dir,
         debug=args.debug,
         debug_repertoires=args.debug_repertoires,
+        healthy_label=args.healthy_label,
     )
 
     if args.random_baseline_seeds:
@@ -706,6 +724,11 @@ if __name__ == '__main__':
                 metadata_path=args.metadata_path,
                 target_disease=args.target_disease,
                 data_dir=args.repertoire_data_dir,
+                participant_col=args.participant_col,
+                file_prefix=args.file_prefix,
+                file_suffix=args.file_suffix,
+                disease_col=args.disease_col,
+                fold_col=args.fold_col,
                 require_demographics=args.require_demographics,
                 adjust_distribution_by_demographics=True,
                 random_baseline=True,
@@ -722,6 +745,11 @@ if __name__ == '__main__':
             metadata_path=args.metadata_path,
             target_disease=args.target_disease,
             data_dir=args.repertoire_data_dir,
+            participant_col=args.participant_col,
+            file_prefix=args.file_prefix,
+            file_suffix=args.file_suffix,
+            disease_col=args.disease_col,
+            fold_col=args.fold_col,
             require_demographics=args.require_demographics,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             ext_metadata_path=args.ext_metadata_path,

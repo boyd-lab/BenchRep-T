@@ -49,7 +49,7 @@ class DeepRC2020Evaluator:
                  kernel_size=9, n_kernels=32,
                  max_seq_len=50,
                  device=None, results_dir='results/deeprc',
-                 indices_map=None):
+                 indices_map=None, healthy_label=None):
         """
         Args:
             n_updates: Number of gradient updates for training.
@@ -86,6 +86,8 @@ class DeepRC2020Evaluator:
         self.max_seq_len = max_seq_len
         self.results_dir = results_dir
         self.indices_map = indices_map
+        if healthy_label is not None:
+            self.HEALTHY_LABEL = healthy_label
 
         if device is None:
             self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -484,6 +486,20 @@ if __name__ == '__main__':
                         help='Directory containing AIRR .tsv.gz repertoire files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Disease to classify (e.g. Lupus, T1D, HIV)')
+    parser.add_argument('--healthy_label', type=str,
+                        default=DeepRC2020Evaluator.HEALTHY_LABEL,
+                        help='Negative-class label in the disease column.')
+    parser.add_argument('--participant_col', type=str, default='participant_label',
+                        help='Metadata column used as participant_label in outputs and internal file paths.')
+    parser.add_argument('--disease_col', type=str, default='disease',
+                        help='Metadata column containing disease/control labels.')
+    parser.add_argument('--fold_col', type=str,
+                        default='malid_cross_validation_fold_id_when_in_test_set',
+                        help='Metadata column containing fold IDs.')
+    parser.add_argument('--file_prefix', type=str, default='part_table_',
+                        help='Internal cohort file prefix.')
+    parser.add_argument('--file_suffix', type=str, default='.tsv.gz',
+                        help='Internal cohort file suffix.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     parser.add_argument('--n_updates', type=int, default=int(1e4),
@@ -526,6 +542,7 @@ if __name__ == '__main__':
         batch_size=args.batch_size,
         sample_n_sequences=args.sample_n_sequences,
         max_seq_len=args.max_seq_len,
+        healthy_label=args.healthy_label,
     )
 
     if args.random_baseline_seeds:
@@ -538,6 +555,11 @@ if __name__ == '__main__':
                 metadata_path=args.metadata_path,
                 target_disease=args.target_disease,
                 data_dir=args.repertoire_data_dir,
+                participant_col=args.participant_col,
+                file_prefix=args.file_prefix,
+                file_suffix=args.file_suffix,
+                disease_col=args.disease_col,
+                fold_col=args.fold_col,
                 raw_file_cache={},
                 covariate_adjust=args.covariate_adjust,
                 adjust_distribution_by_demographics=True,
@@ -555,6 +577,11 @@ if __name__ == '__main__':
             metadata_path=args.metadata_path,
             target_disease=args.target_disease,
             data_dir=args.repertoire_data_dir,
+            participant_col=args.participant_col,
+            file_prefix=args.file_prefix,
+            file_suffix=args.file_suffix,
+            disease_col=args.disease_col,
+            fold_col=args.fold_col,
             raw_file_cache={},
             covariate_adjust=args.covariate_adjust,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,

@@ -6,7 +6,7 @@ Scripts are grouped by experiment/workflow:
 - `scaling/`: scaling/depth experiments and scheduler wrappers.
 - `demographic_subsample/`: demographic-matched subsampling, random baselines, and demographic-complete subset controls.
 - `predict_with_demographics/`: models that explicitly use demographic covariates as predictors.
-- `external/`: external-cohort experiments.
+- `external/`: external-cohort experiments (RA, T1D, Tb) and MAL-ID+external merged runs.
 - `drivers/`: driver/public-clone identification experiments.
 - `preprocessing/`: one-off data preprocessing helpers.
 

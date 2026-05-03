@@ -1,19 +1,16 @@
 #!/bin/bash
 set -uo pipefail
 
-# Run external/cohort-merged XGBoost jobs from one entrypoint.
-#
-# Examples:
-#   bash bash/run_xgboost_ext.sh --datasets=RA,T1D,Tb --gpus=0,1,2 --parallel --n_jobs=8
-#   bash bash/run_xgboost_ext.sh --datasets=RA --debug --gpus=0
-#   bash bash/run_xgboost_ext.sh --datasets=T1D --xgb_device=cpu --n_jobs=16
+# Run DeepRC on external/cohort-merged datasets.
 
 DEBUG=false
-N_JOBS=10
 DATASETS="RA,T1D,Tb"
 GPUS=""
 PARALLEL=false
-XGB_DEVICE="cpu"
+BATCH_SIZE=32
+N_UPDATES=10000
+EVALUATE_AT=1000
+SAMPLE_N_SEQUENCES=10000
 
 for arg in "$@"; do
   case $arg in
@@ -21,22 +18,24 @@ for arg in "$@"; do
     --parallel) PARALLEL=true ;;
     --serial) PARALLEL=false ;;
     --datasets=*) DATASETS="${arg#*=}" ;;
-    --gpus=*) GPUS="${arg#*=}"; XGB_DEVICE="cuda" ;;
-    --n_jobs=*) N_JOBS="${arg#*=}" ;;
-    --xgb_device=*) XGB_DEVICE="${arg#*=}" ;;
-    *)
-      echo "Unknown argument: $arg" >&2
-      exit 2
-      ;;
+    --gpus=*) GPUS="${arg#*=}" ;;
+    --batch_size=*) BATCH_SIZE="${arg#*=}" ;;
+    --n_updates=*) N_UPDATES="${arg#*=}" ;;
+    --evaluate_at=*) EVALUATE_AT="${arg#*=}" ;;
+    --sample_n_sequences=*) SAMPLE_N_SEQUENCES="${arg#*=}" ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
 
+if $DEBUG; then
+  N_UPDATES=100
+  EVALUATE_AT=50
+fi
+
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 RESULTS=${REPO_ROOT}/results
-MODEL_SAVE_DIR=${REPO_ROOT}/results/ensemble_xgboost_models_ext
-LOGDIR=${REPO_ROOT}/logs/ensemble_xgboost_ext
-
-mkdir -p "$LOGDIR" "$RESULTS" "$MODEL_SAVE_DIR"
+LOGDIR=${REPO_ROOT}/logs/deeprc_ext
+mkdir -p "$LOGDIR" "$RESULTS"
 
 IFS=',' read -r -a DATASET_LIST <<< "$DATASETS"
 IFS=',' read -r -a GPU_LIST <<< "$GPUS"
@@ -46,24 +45,14 @@ normalize_dataset() {
     RA|ra) echo "RA" ;;
     T1D|t1d) echo "T1D" ;;
     Tb|TB|tb) echo "Tb" ;;
-    *)
-      echo "Unknown dataset '$1'. Use RA,T1D,Tb." >&2
-      return 1
-      ;;
+    *) echo "Unknown dataset '$1'. Use RA,T1D,Tb." >&2; return 1 ;;
   esac
 }
 
-run_dataset() {
-  local dataset="$1"
-  local gpu="${2:-}"
-  local run_ts="$3"
-
-  local log="${LOGDIR}/ensemble_xgboost_ext_${dataset}_${run_ts}.log"
-  local -a args
-
-  case "$dataset" in
+dataset_args() {
+  case "$1" in
     RA)
-      args=(
+      DATASET_ARGS=(
         --metadata_path "${REPO_ROOT}/data/external_datasets/rheumatoid_arthritis/metadata_RA_final.tsv"
         --repertoire_data_dir "${REPO_ROOT}/data/external_datasets/rheumatoid_arthritis/data_processed_v2"
         --target_disease "Rheumatoid Arthritis"
@@ -72,22 +61,22 @@ run_dataset() {
         --ext_metadata_path "${REPO_ROOT}/data/external_datasets/rheumatoid_arthritis/metadata_RA_final.tsv"
         --ext_data_dir "${REPO_ROOT}/data/external_datasets/rheumatoid_arthritis/data_processed_v2"
         --ext_file_template "{participant_label}.tsv"
-        --output_csv "${RESULTS}/ensemble_xgboost_ext_RA_classification.csv"
+        --output_csv "${RESULTS}/deeprc_2020_ext_RA_classification.csv"
       )
       ;;
     T1D)
-      args=(
+      DATASET_ARGS=(
         --metadata_path "${REPO_ROOT}/data/malid_clean/metadata.tsv"
         --repertoire_data_dir "${REPO_ROOT}/data/malid_clean/TCR"
         --target_disease "T1D"
         --ext_metadata_path "${REPO_ROOT}/data/external_datasets/T1D/metadata_T1D.tsv"
         --ext_data_dir "${REPO_ROOT}/data/external_datasets/T1D/data_processed_v2"
         --ext_file_template "{participant_label}.tsv"
-        --output_csv "${RESULTS}/ensemble_xgboost_ext_T1D_classification.csv"
+        --output_csv "${RESULTS}/deeprc_2020_ext_T1D_classification.csv"
       )
       ;;
     Tb)
-      args=(
+      DATASET_ARGS=(
         --metadata_path "${REPO_ROOT}/data/external_datasets/tuberculosis/metadata_Tb_final.tsv"
         --repertoire_data_dir "${REPO_ROOT}/data/external_datasets/tuberculosis/data_processed_v2"
         --target_disease "Progressor"
@@ -96,30 +85,40 @@ run_dataset() {
         --ext_metadata_path "${REPO_ROOT}/data/external_datasets/tuberculosis/metadata_Tb_final.tsv"
         --ext_data_dir "${REPO_ROOT}/data/external_datasets/tuberculosis/data_processed_v2"
         --ext_file_template "{sample_name}.tsv"
-        --output_csv "${RESULTS}/ensemble_xgboost_ext_Tb_controller_progressor_classification.csv"
+        --output_csv "${RESULTS}/deeprc_2020_ext_Tb_controller_progressor_classification.csv"
       )
       ;;
   esac
+}
 
-  if $DEBUG; then
-    args+=(--debug_repertoires 10)
-  fi
+run_dataset() {
+  local dataset="$1"
+  local gpu="${2:-}"
+  local run_ts="$3"
+  local log="${LOGDIR}/deeprc_ext_${dataset}_${run_ts}.log"
 
-  echo "[$(date +%T)] start ${dataset} xgboost -> ${log}"
+  dataset_args "$dataset"
+
+  echo "[$(date +%T)] start ${dataset} DeepRC -> ${log}"
   {
-    echo "[$(date +%T)] start ${dataset} xgboost"
-    if [ -n "$gpu" ] && [ "$XGB_DEVICE" = "cuda" ]; then
+    echo "[$(date +%T)] start ${dataset} DeepRC"
+    device="cpu"
+    if [ -n "$gpu" ]; then
       echo "Using CUDA_VISIBLE_DEVICES=${gpu}"
       export CUDA_VISIBLE_DEVICES="$gpu"
+      device="cuda:0"
     fi
     cd "${REPO_ROOT}"
-    python -u -m evals.ensemble_xgboost_disease_classification \
-      "${args[@]}" \
-      --n_jobs "$N_JOBS" \
-      --xgb_device "$XGB_DEVICE" \
-      --model_save_dir "$MODEL_SAVE_DIR"
-    local status=$?
-    echo "[$(date +%T)] done ${dataset} xgboost (exit ${status})"
+    python -u -m evals.deeprc_2020_disease_classification \
+      "${DATASET_ARGS[@]}" \
+      --results_dir "${RESULTS}/deeprc_ext" \
+      --device "$device" \
+      --batch_size "$BATCH_SIZE" \
+      --n_updates "$N_UPDATES" \
+      --evaluate_at "$EVALUATE_AT" \
+      --sample_n_sequences "$SAMPLE_N_SEQUENCES"
+    status=$?
+    echo "[$(date +%T)] done ${dataset} DeepRC (exit ${status})"
     return $status
   } >"$log" 2>&1
 }
@@ -148,7 +147,7 @@ if $PARALLEL; then
   status=0
   for i in "${!pids[@]}"; do
     if ! wait "${pids[$i]}"; then
-      echo "Dataset ${labels[$i]} failed; see ${LOGDIR}/ensemble_xgboost_ext_${labels[$i]}_${RUN_TS}.log" >&2
+      echo "Dataset ${labels[$i]} failed; see ${LOGDIR}/deeprc_ext_${labels[$i]}_${RUN_TS}.log" >&2
       status=1
     fi
   done

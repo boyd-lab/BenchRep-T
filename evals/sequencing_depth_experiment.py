@@ -27,7 +27,11 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 
 
-def create_evaluator(model_name, indices_map=None):
+def create_evaluator(model_name, indices_map=None, depth=None, repeat=None,
+                     giana_results_dir='results/giana_scaling',
+                     giana_exact=True, giana_threshold_iso=7,
+                     giana_n_threads=10, giana_use_gpu=True,
+                     debug=False, debug_repertoires=10):
     """
     Create an evaluator instance for the specified model.
 
@@ -47,12 +51,23 @@ def create_evaluator(model_name, indices_map=None):
         return Ostmeyer2019Evaluator(indices_map=indices_map)
     elif model_name == 'giana_2021':
         from evals.giana_2021_disease_classification import GIANAEvaluator
+        if depth is None:
+            raise ValueError("GIANA scaling requires depth to be passed through.")
+        depth_tag = f"depth{int(depth)}"
+        repeat_tag = f"rep{int(repeat)}" if repeat is not None else "repNA"
         return GIANAEvaluator(indices_map=indices_map,
-                              exact=True,
-                              threshold_iso=7,
-                              n_threads=10,
-                              use_gpu=True,
-                              max_seqs_per_specimen=None)
+                              exact=giana_exact,
+                              threshold_iso=giana_threshold_iso,
+                              n_threads=giana_n_threads,
+                              use_gpu=giana_use_gpu,
+                              # The base GIANA runner caps at 10k, but scaling
+                              # must let the current sequencing depth define
+                              # the per-specimen cap.
+                              max_seqs_per_specimen=depth,
+                              results_dir=os.path.join(giana_results_dir,
+                                                       f"{depth_tag}_{repeat_tag}"),
+                              debug=debug,
+                              debug_repertoires=debug_repertoires)
     elif model_name == 'deeprc_2020':
         from evals.deeprc_2020_disease_classification import DeepRC2020Evaluator
         return DeepRC2020Evaluator(indices_map=indices_map,
@@ -142,7 +157,11 @@ def build_indices_map(repertoires, repeat, depth):
 def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_data_dir,
                          depth_indices_path, random_seed=7, output_json=None,
                          ext_metadata_path=None, ext_data_dir=None,
-                         ext_file_template='{participant_label}_TCRB.tsv'):
+                         ext_file_template='{participant_label}_TCRB.tsv',
+                         giana_results_dir='results/giana_scaling',
+                         giana_exact=True, giana_threshold_iso=7,
+                         giana_n_threads=10, giana_use_gpu=True,
+                         debug=False, debug_repertoires=10):
     """
     Run the sequencing depth experiment using pre-generated indices.
 
@@ -196,7 +215,19 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
             # Create evaluator with the indices.
             # For DeepRC, pass sample_n_sequences=None so training uses all
             # sequences provided by the indices_map (i.e. exactly `depth` sequences).
-            evaluator = create_evaluator(model_name, indices_map=indices_map)
+            evaluator = create_evaluator(
+                model_name,
+                indices_map=indices_map,
+                depth=depth,
+                repeat=repeat_idx,
+                giana_results_dir=giana_results_dir,
+                giana_exact=giana_exact,
+                giana_threshold_iso=giana_threshold_iso,
+                giana_n_threads=giana_n_threads,
+                giana_use_gpu=giana_use_gpu,
+                debug=debug,
+                debug_repertoires=debug_repertoires,
+            )
 
             # Run cross-validation
             cv_kwargs = dict(
@@ -246,6 +277,16 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
             'n_repeats': n_repeats,
             'random_seed': random_seed,
             'depths': depths,
+            'giana_params': {
+                'results_dir': giana_results_dir,
+                'exact': giana_exact,
+                'threshold_iso': giana_threshold_iso,
+                'n_threads': giana_n_threads,
+                'use_gpu': giana_use_gpu,
+                'max_seqs_per_specimen': 'current_depth',
+                'debug': debug,
+                'debug_repertoires': debug_repertoires,
+            },
             'results': all_results,
         }
         with open(output_json, 'w') as f:
@@ -331,6 +372,21 @@ if __name__ == "__main__":
     parser.add_argument('--ext_file_template', type=str,
                         default='{participant_label}_TCRB.tsv',
                         help='Filename template for external repertoires.')
+    parser.add_argument('--giana_results_dir', type=str,
+                        default='results/giana_scaling',
+                        help='Directory for GIANA scaling cluster files.')
+    parser.add_argument('--giana_n_threads', type=int, default=10,
+                        help='GIANA FAISS CPU threads (default: 10, matching base runner).')
+    parser.add_argument('--giana_threshold_iso', type=float, default=7,
+                        help='GIANA isometric threshold (default: 7, matching base runner).')
+    parser.add_argument('--giana_no_exact', action='store_true',
+                        help='Disable GIANA exact mode.')
+    parser.add_argument('--giana_cpu', action='store_true',
+                        help='Disable GIANA GPU FAISS.')
+    parser.add_argument('--debug', action='store_true',
+                        help='Debug mode for supported evaluators.')
+    parser.add_argument('--debug_repertoires', type=int, default=10,
+                        help='Repertoires per class in debug mode.')
 
     args = parser.parse_args()
 
@@ -345,4 +401,11 @@ if __name__ == "__main__":
         ext_metadata_path=args.ext_metadata_path,
         ext_data_dir=args.ext_data_dir,
         ext_file_template=args.ext_file_template,
+        giana_results_dir=args.giana_results_dir,
+        giana_exact=not args.giana_no_exact,
+        giana_threshold_iso=args.giana_threshold_iso,
+        giana_n_threads=args.giana_n_threads,
+        giana_use_gpu=not args.giana_cpu,
+        debug=args.debug,
+        debug_repertoires=args.debug_repertoires,
     )

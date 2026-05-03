@@ -17,8 +17,6 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-GPUS=(1 2 3)
-JOBS_PER_GPU=1  # one job per GPU
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
@@ -33,29 +31,18 @@ else
   DISEASES=("Influenza" "Covid19" "HIV")
 fi
 
-# FIFO GPU token pool
-fifo=$(mktemp -u)
-mkfifo "$fifo"
-exec 3<>"$fifo"
-rm -f "$fifo"
-for g in "${GPUS[@]}"; do
-  for _ in $(seq 1 "$JOBS_PER_GPU"); do echo "$g" >&3; done
-done
-
 cd "${REPO_ROOT}"
 
 RUN_TS=$(date +%Y%m%d_%H%M%S)
 
 for disease in "${DISEASES[@]}"; do
-  read -r gpu <&3  # blocks until a GPU is free
-
   {
     k_tag="${K//,/_}"
     log="${LOGDIR}/giana_driver_${disease}_k${k_tag}_${RUN_TS}.log"
-    echo "[$(date +%T)] start $disease (k=${K}) on GPU $gpu -> $log"
+    echo "[$(date +%T)] start $disease (k=${K}) on CPU -> $log"
 
     {
-      echo "[$(date +%T)] start $disease k=${K} on GPU $gpu"
+      echo "[$(date +%T)] start $disease k=${K} on CPU"
 
       debug_flags=()
       $DEBUG && debug_flags=(--debug --debug_repertoires "$DEBUG_REPERTOIRES")
@@ -67,7 +54,7 @@ for disease in "${DISEASES[@]}"; do
         cluster_dir_flag=(--cluster_dir "${RESULTS}/giana")
       fi
 
-      CUDA_VISIBLE_DEVICES="$gpu" python -u -m evals.giana_2021_driver_identification \
+      python -u -m evals.giana_2021_driver_identification \
         --metadata_path "$METADATA" \
         --repertoire_data_dir "$REPERTOIRE_DIR" \
         --target_disease "$disease" \
@@ -75,7 +62,6 @@ for disease in "${DISEASES[@]}"; do
         --k "$K" \
         --results_dir "${RESULTS}/giana_driver" \
         --n_threads "$N_THREADS" \
-        --use_gpu \
         --max_seqs_per_specimen 10000 \
         --exact \
         --threshold_iso 7 \
@@ -84,12 +70,11 @@ for disease in "${DISEASES[@]}"; do
         "${debug_flags[@]}"
 
       status=$?
-      echo "[$(date +%T)] done  $disease k=${K} on GPU $gpu (exit $status)"
+      echo "[$(date +%T)] done  $disease k=${K} on CPU (exit $status)"
       exit $status
     } 2>&1 | if $DEBUG; then tee "$log"; else cat >"$log"; fi
 
-    echo "$gpu" >&3  # return GPU token
-    echo "[$(date +%T)] done  $disease on GPU $gpu | log: $log"
+    echo "[$(date +%T)] done  $disease on CPU | log: $log"
   } &
 done
 
