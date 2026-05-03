@@ -13,8 +13,7 @@ for arg in "$@"; do
 done
 
 # ---- config ----
-# Internal MAL-ID data provides T1D + healthy samples; external T1D metadata
-# is merged on the fly via prepare_merged_cohort to form the combined dataset.
+# MAL-ID T1D + healthy samples are merged with the external T1D cohort.
 REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
@@ -22,8 +21,8 @@ MODEL_SAVE_DIR=${REPO_ROOT}/results/ensemble_xgboost_models_ext
 RESULTS=${REPO_ROOT}/results
 LOGDIR=${REPO_ROOT}/logs/ensemble_xgboost_ext
 
-EXT_METADATA=${REPO_ROOT}/data/external_airr/T1D/metadata_T1D.tsv
-EXT_DATA_DIR=${REPO_ROOT}/data/external_airr/T1D/data_cleaned
+EXT_METADATA=${REPO_ROOT}/data/external_datasets/T1D/metadata_T1D.tsv
+EXT_DATA_DIR=${REPO_ROOT}/data/external_datasets/T1D/data_cleaned
 EXT_FILE_TEMPLATE='{participant_label}_TCRB.tsv'
 
 TARGET_DISEASE="T1D"

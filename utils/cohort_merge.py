@@ -28,11 +28,15 @@ FOLD_COL = 'malid_cross_validation_fold_id_when_in_test_set'
 _DENVER_PATTERN = re.compile(r'^(DenverT1D-)(\d+)$')
 
 
-def _resolve_external_path(sample_name, ext_data_dir, ext_file_template):
+def _resolve_external_path(row, ext_data_dir, ext_file_template):
     """Construct an external file path, handling DenverT1D zero-padding."""
-    plain = ext_file_template.format(participant_label=sample_name,
-                                     specimen_label=sample_name,
-                                     sample_name=sample_name)
+    values = row.to_dict()
+    sample_name = values.get('sample_name') or values.get('participant_label')
+    values.setdefault('participant_label', sample_name)
+    values.setdefault('specimen_label', values.get('participant_label'))
+    values.setdefault('sample_name', sample_name)
+
+    plain = ext_file_template.format(**values)
     plain_path = os.path.join(ext_data_dir, plain)
     if os.path.exists(plain_path):
         return plain_path
@@ -41,9 +45,13 @@ def _resolve_external_path(sample_name, ext_data_dir, ext_file_template):
     if m:
         prefix, num = m.groups()
         padded = f"{prefix}{int(num):03d}"
-        padded_name = ext_file_template.format(participant_label=padded,
-                                               specimen_label=padded,
-                                               sample_name=padded)
+        padded_values = values.copy()
+        padded_values['participant_label'] = padded
+        if padded_values.get('specimen_label') == sample_name:
+            padded_values['specimen_label'] = padded
+        if padded_values.get('sample_name') == sample_name:
+            padded_values['sample_name'] = padded
+        padded_name = ext_file_template.format(**padded_values)
         padded_path = os.path.join(ext_data_dir, padded_name)
         if os.path.exists(padded_path):
             return padded_path
@@ -106,8 +114,9 @@ def prepare_merged_cohort(internal_metadata,
     ext['label'] = (ext[disease_col] == target_disease).astype(int)
 
     if ext_data_dir is not None:
-        ext['file_path'] = ext['participant_label'].apply(
-            lambda s: _resolve_external_path(s, ext_data_dir, ext_file_template)
+        ext['file_path'] = ext.apply(
+            lambda row: _resolve_external_path(row, ext_data_dir, ext_file_template),
+            axis=1,
         )
         before = len(ext)
         ext = ext[ext['file_path'].apply(os.path.exists)].copy()

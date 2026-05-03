@@ -116,6 +116,9 @@ class XGBoostKmer:
         for seq in df[self.sequence_col].dropna():
             for kmer in _extract_kmers(str(seq), self.kmer_size, self.use_gaps):
                 counts[kmer] = counts.get(kmer, 0) + 1
+        total = sum(counts.values())
+        if total > 0:
+            counts = {k: v / total for k, v in counts.items()}
         self._kmer_features_cache[file_path] = counts
         return counts
 
@@ -123,15 +126,25 @@ class XGBoostKmer:
         if file_path in self._vj_features_cache:
             return self._vj_features_cache[file_path]
         df = self.load_repertoire(file_path)
-        counts = {}
+        v_counts = {}
+        j_counts = {}
         if self.v_gene_col in df.columns:
             for gene in df[self.v_gene_col].dropna():
-                key = f'V:{self._normalize_gene(gene)}'
-                counts[key] = counts.get(key, 0) + 1
+                gene = self._normalize_gene(gene)
+                v_counts[gene] = v_counts.get(gene, 0) + 1
         if self.j_gene_col in df.columns:
             for gene in df[self.j_gene_col].dropna():
-                key = f'J:{self._normalize_gene(gene)}'
-                counts[key] = counts.get(key, 0) + 1
+                gene = self._normalize_gene(gene)
+                j_counts[gene] = j_counts.get(gene, 0) + 1
+        v_total = sum(v_counts.values())
+        j_total = sum(j_counts.values())
+        counts = {}
+        if v_total > 0:
+            for gene, c in v_counts.items():
+                counts[f'V:{gene}'] = c / v_total
+        if j_total > 0:
+            for gene, c in j_counts.items():
+                counts[f'J:{gene}'] = c / j_total
         self._vj_features_cache[file_path] = counts
         return counts
 
