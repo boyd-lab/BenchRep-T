@@ -32,7 +32,7 @@ class EnsembleXGBoostEvaluator:
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7,
                  kmer_size=4, use_gaps=True, submodel='ensemble', n_jobs=None,
-                 healthy_label=None):
+                 healthy_label=None, xgb_device='cpu'):
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
         self.sequence_col = sequence_col
@@ -44,6 +44,7 @@ class EnsembleXGBoostEvaluator:
         self.use_gaps = use_gaps
         self.submodel = submodel
         self.n_jobs = n_jobs
+        self.xgb_device = xgb_device
         if healthy_label is not None:
             self.HEALTHY_LABEL = healthy_label
         self.canonicalize_genes = False
@@ -122,6 +123,7 @@ class EnsembleXGBoostEvaluator:
             use_gaps=self.use_gaps,
             submodel=self.submodel,
             n_jobs=self.n_jobs,
+            xgb_device=self.xgb_device,
         )
 
     def run_cross_validation(self, metadata_path, target_disease, data_dir,
@@ -394,6 +396,9 @@ if __name__ == '__main__':
     parser.add_argument('--n_cv_folds', type=int, default=3)
     parser.add_argument('--val_split', type=float, default=0.2)
     parser.add_argument('--n_jobs', type=int, default=None)
+    parser.add_argument('--xgb_device', type=str, default='cpu',
+                        choices=['cpu', 'cuda'],
+                        help='Use cpu or cuda XGBoost training. For multi-GPU runs, set CUDA_VISIBLE_DEVICES per process.')
     parser.add_argument('--healthy_label', type=str,
                         default=EnsembleXGBoostEvaluator.HEALTHY_LABEL,
                         help='Negative-class label in the disease column.')
@@ -409,6 +414,9 @@ if __name__ == '__main__':
     parser.add_argument('--file_suffix', type=str, default='.tsv.gz',
                         help='Internal cohort file suffix.')
     parser.add_argument('--adjust_distribution_by_demographics', action='store_true')
+    parser.add_argument('--random_baseline_seeds', type=int, nargs='+', default=None,
+                        help='Run random-sampling healthy baselines for each seed '
+                             '(implies --adjust_distribution_by_demographics).')
     parser.add_argument('--covariate_adjust', action='store_true')
     parser.add_argument('--output_csv', type=str, default=None)
     parser.add_argument('--model_save_dir', type=str, default=None,
@@ -431,23 +439,57 @@ if __name__ == '__main__':
         submodel=args.submodel,
         n_jobs=args.n_jobs,
         healthy_label=args.healthy_label,
+        xgb_device=args.xgb_device,
     )
 
-    scores_df = evaluator.run_cross_validation(
-        metadata_path=args.metadata_path,
-        target_disease=args.target_disease,
-        data_dir=args.repertoire_data_dir,
-        participant_col=args.participant_col,
-        file_prefix=args.file_prefix,
-        file_suffix=args.file_suffix,
-        disease_col=args.disease_col,
-        fold_col=args.fold_col,
-        adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
-        covariate_adjust=args.covariate_adjust,
-        debug_repertoires=args.debug_repertoires,
-        output_csv=args.output_csv,
-        model_save_dir=args.model_save_dir,
-        ext_metadata_path=args.ext_metadata_path,
-        ext_data_dir=args.ext_data_dir,
-        ext_file_template=args.ext_file_template,
-    )
+    if args.random_baseline_seeds:
+        seed_dfs = []
+        for seed in args.random_baseline_seeds:
+            print(f"\n{'#' * 60}")
+            print(f"# RANDOM BASELINE RUN - seed={seed}")
+            print(f"{'#' * 60}")
+            seed_df = evaluator.run_cross_validation(
+                metadata_path=args.metadata_path,
+                target_disease=args.target_disease,
+                data_dir=args.repertoire_data_dir,
+                participant_col=args.participant_col,
+                file_prefix=args.file_prefix,
+                file_suffix=args.file_suffix,
+                disease_col=args.disease_col,
+                fold_col=args.fold_col,
+                adjust_distribution_by_demographics=True,
+                random_baseline=True,
+                random_baseline_seed=seed,
+                covariate_adjust=args.covariate_adjust,
+                debug_repertoires=args.debug_repertoires,
+                output_csv=None,
+                model_save_dir=args.model_save_dir,
+                ext_metadata_path=args.ext_metadata_path,
+                ext_data_dir=args.ext_data_dir,
+                ext_file_template=args.ext_file_template,
+            )
+            seed_df['random_baseline_seed'] = int(seed)
+            seed_dfs.append(seed_df)
+        scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
+        if args.output_csv:
+            scores_df.to_csv(args.output_csv, index=False)
+            print(f"\nScores saved to: {args.output_csv}")
+    else:
+        scores_df = evaluator.run_cross_validation(
+            metadata_path=args.metadata_path,
+            target_disease=args.target_disease,
+            data_dir=args.repertoire_data_dir,
+            participant_col=args.participant_col,
+            file_prefix=args.file_prefix,
+            file_suffix=args.file_suffix,
+            disease_col=args.disease_col,
+            fold_col=args.fold_col,
+            adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
+            covariate_adjust=args.covariate_adjust,
+            debug_repertoires=args.debug_repertoires,
+            output_csv=args.output_csv,
+            model_save_dir=args.model_save_dir,
+            ext_metadata_path=args.ext_metadata_path,
+            ext_data_dir=args.ext_data_dir,
+            ext_file_template=args.ext_file_template,
+        )

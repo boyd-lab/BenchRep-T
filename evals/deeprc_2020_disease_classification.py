@@ -506,6 +506,9 @@ if __name__ == '__main__':
     parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
                         help='Apply per-disease cohort distribution adjustment for fair comparison '
                              '(see utils.cohort_adjustments)')
+    parser.add_argument('--random_baseline_seeds', type=int, nargs='+', default=None,
+                        help='Run random-sampling healthy baselines for each seed '
+                             '(implies --adjust_distribution_by_demographics).')
     parser.add_argument('--ext_metadata_path', type=str, default=None,
                         help='Optional external-cohort metadata TSV (MAL-ID column style).')
     parser.add_argument('--ext_data_dir', type=str, default=None,
@@ -525,17 +528,40 @@ if __name__ == '__main__':
         max_seq_len=args.max_seq_len,
     )
 
-    scores_df = evaluator.run_cross_validation(
-        metadata_path=args.metadata_path,
-        target_disease=args.target_disease,
-        data_dir=args.repertoire_data_dir,
-        raw_file_cache={},
-        covariate_adjust=args.covariate_adjust,
-        adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
-        ext_metadata_path=args.ext_metadata_path,
-        ext_data_dir=args.ext_data_dir,
-        ext_file_template=args.ext_file_template,
-    )
+    if args.random_baseline_seeds:
+        seed_dfs = []
+        for seed in args.random_baseline_seeds:
+            print(f"\n{'#' * 60}")
+            print(f"# RANDOM BASELINE RUN - seed={seed}")
+            print(f"{'#' * 60}")
+            seed_df = evaluator.run_cross_validation(
+                metadata_path=args.metadata_path,
+                target_disease=args.target_disease,
+                data_dir=args.repertoire_data_dir,
+                raw_file_cache={},
+                covariate_adjust=args.covariate_adjust,
+                adjust_distribution_by_demographics=True,
+                random_baseline=True,
+                random_baseline_seed=seed,
+                ext_metadata_path=args.ext_metadata_path,
+                ext_data_dir=args.ext_data_dir,
+                ext_file_template=args.ext_file_template,
+            )
+            seed_df['random_baseline_seed'] = int(seed)
+            seed_dfs.append(seed_df)
+        scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
+    else:
+        scores_df = evaluator.run_cross_validation(
+            metadata_path=args.metadata_path,
+            target_disease=args.target_disease,
+            data_dir=args.repertoire_data_dir,
+            raw_file_cache={},
+            covariate_adjust=args.covariate_adjust,
+            adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
+            ext_metadata_path=args.ext_metadata_path,
+            ext_data_dir=args.ext_data_dir,
+            ext_file_template=args.ext_file_template,
+        )
 
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)

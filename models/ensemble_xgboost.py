@@ -46,7 +46,7 @@ class XGBoostKmer:
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
                  indices_map=None, ignore_allele=False,
                  canonicalize_genes=False,
-                 early_stopping_rounds=20, n_jobs=None,
+                 early_stopping_rounds=20, n_jobs=None, xgb_device='cpu',
                  kmer_size=4, use_gaps=True, submodel='ensemble'):
         if submodel not in self.VALID_SUBMODELS:
             raise ValueError(f"submodel must be one of {self.VALID_SUBMODELS}")
@@ -63,6 +63,7 @@ class XGBoostKmer:
         self.canonicalize_genes = canonicalize_genes
         self.early_stopping_rounds = early_stopping_rounds
         self.n_jobs = n_jobs
+        self.xgb_device = xgb_device
         self.kmer_size = kmer_size
         self.use_gaps = use_gaps
         self.submodel = submodel
@@ -215,7 +216,7 @@ class XGBoostKmer:
         return best_params
 
     def _base_params(self, max_depth, learning_rate, subsample=0.8, colsample_bytree=0.8, min_child_weight=3):
-        return {
+        params = {
             'objective': 'binary:logistic',
             'eval_metric': 'auc',
             'max_depth': max_depth,
@@ -226,6 +227,10 @@ class XGBoostKmer:
             'nthread': self.n_jobs or 0,
             'verbosity': 0,
         }
+        if self.xgb_device == 'cuda':
+            params['tree_method'] = 'hist'
+            params['device'] = 'cuda'
+        return params
 
     def _train_submodel(self, X_base, y_base, X_val, y_val, params):
         """Train a single XGBoost with early stopping on the val split."""
