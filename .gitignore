@@ -209,5 +209,5 @@ __marimo__/
 # Project data and outputs
 data/
 
-bash/
+# bash/
 plots/

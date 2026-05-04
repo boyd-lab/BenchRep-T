@@ -18,6 +18,7 @@ RUN_DEMOGRAPHIC=true
 RUN_SCALING=true
 RUN_DRIVER=true
 DRY_RUN=false
+SMOKE_TEST=false
 
 DEMO_PARALLEL=4
 DEMO_N_JOBS=20
@@ -26,6 +27,11 @@ SCALING_N_JOBS=30
 DRIVER_TRAIN_PARALLEL=2
 DRIVER_TRAIN_N_JOBS=30
 DRIVER_SCORE_PARALLEL=2
+DEBUG_REPERTOIRES=0
+BASELINE_SEEDS=(7 14 21 28 35)
+DRIVER_K="100,1000,10000"
+DRIVER_K_TAG="100_1000_10000"
+DRIVER_MAX_REPERTOIRES=()
 
 for arg in "$@"; do
   case "$arg" in
@@ -52,6 +58,9 @@ for arg in "$@"; do
     --dry_run)
       DRY_RUN=true
       ;;
+    --smoke_test)
+      SMOKE_TEST=true
+      ;;
     --demo_parallel=*) DEMO_PARALLEL="${arg#*=}" ;;
     --demo_n_jobs=*) DEMO_N_JOBS="${arg#*=}" ;;
     --scaling_parallel=*) SCALING_PARALLEL="${arg#*=}" ;;
@@ -59,6 +68,7 @@ for arg in "$@"; do
     --driver_train_parallel=*) DRIVER_TRAIN_PARALLEL="${arg#*=}" ;;
     --driver_train_n_jobs=*) DRIVER_TRAIN_N_JOBS="${arg#*=}" ;;
     --driver_score_parallel=*) DRIVER_SCORE_PARALLEL="${arg#*=}" ;;
+    --debug_repertoires=*) DEBUG_REPERTOIRES="${arg#*=}" ;;
     *)
       echo "Unknown argument: $arg" >&2
       exit 2
@@ -66,7 +76,26 @@ for arg in "$@"; do
   esac
 done
 
-REPO_ROOT=/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench
+if $SMOKE_TEST; then
+  DEMO_PARALLEL=1
+  DEMO_N_JOBS=1
+  SCALING_PARALLEL=1
+  SCALING_N_JOBS=1
+  DRIVER_TRAIN_PARALLEL=1
+  DRIVER_TRAIN_N_JOBS=1
+  DRIVER_SCORE_PARALLEL=1
+  DEBUG_REPERTOIRES="${DEBUG_REPERTOIRES:-6}"
+  if [[ "$DEBUG_REPERTOIRES" -eq 0 ]]; then
+    DEBUG_REPERTOIRES=6
+  fi
+  BASELINE_SEEDS=(7)
+  DRIVER_K="1,5"
+  DRIVER_K_TAG="1_5"
+  DRIVER_MAX_REPERTOIRES=(--max_repertoires 12)
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT=${REPO_ROOT:-"$(cd "${SCRIPT_DIR}/.." && pwd)"}
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
 DEPTH_INDICES=${REPO_ROOT}/data/depth_indices/depth_indices_max75k.json.gz
@@ -152,9 +181,12 @@ run_demographic_one() {
   local args=()
 
   if [[ "$mode" == "baseline" ]]; then
-    args+=(--random_baseline_seeds 7 14 21 28 35)
+    args+=(--random_baseline_seeds "${BASELINE_SEEDS[@]}")
   else
     args+=(--adjust_distribution_by_demographics)
+  fi
+  if [[ "$DEBUG_REPERTOIRES" -gt 0 ]]; then
+    args+=(--debug_repertoires "$DEBUG_REPERTOIRES")
   fi
 
   echo "[$(date +%T)] start demographic $mode $disease slot=$slot"
@@ -180,6 +212,10 @@ run_scaling_one() {
   local output="${RESULTS}/ensemble_xgboost_${disease}_scaling_${RUN_TS}.json"
 
   echo "[$(date +%T)] start scaling $disease slot=$slot"
+  local debug_args=()
+  if [[ "$DEBUG_REPERTOIRES" -gt 0 ]]; then
+    debug_args=(--debug --debug_repertoires "$DEBUG_REPERTOIRES")
+  fi
   run_cmd "$log" \
     "$PYTHON_BIN" -u -m evals.sequencing_depth_experiment \
       --model ensemble_xgboost \
@@ -189,7 +225,8 @@ run_scaling_one() {
       --depth_indices "$DEPTH_INDICES" \
       --xgboost_n_jobs "$SCALING_N_JOBS" \
       --xgboost_device cpu \
-      --output_json "$output"
+      --output_json "$output" \
+      "${debug_args[@]}"
   local status=$?
   echo "[$(date +%T)] done scaling $disease exit=$status log=$log"
   return "$status"
@@ -202,6 +239,10 @@ run_driver_train_one() {
   local output="${RESULTS}/ensemble_xgboost_driver_retrain_${disease}_${RUN_TS}_classification.csv"
 
   echo "[$(date +%T)] start driver retrain $disease slot=$slot"
+  local debug_args=()
+  if [[ "$DEBUG_REPERTOIRES" -gt 0 ]]; then
+    debug_args=(--debug_repertoires "$DEBUG_REPERTOIRES")
+  fi
   run_cmd "$log" \
     "$PYTHON_BIN" -u -m evals.ensemble_xgboost_disease_classification \
       --metadata_path "$METADATA" \
@@ -210,7 +251,8 @@ run_driver_train_one() {
       --n_jobs "$DRIVER_TRAIN_N_JOBS" \
       --xgb_device cpu \
       --output_csv "$output" \
-      --model_save_dir "$DRIVER_MODEL_DIR"
+      --model_save_dir "$DRIVER_MODEL_DIR" \
+      "${debug_args[@]}"
   local status=$?
   echo "[$(date +%T)] done driver retrain $disease exit=$status log=$log"
   return "$status"
@@ -219,10 +261,8 @@ run_driver_train_one() {
 run_driver_score_one() {
   local disease="$1"
   local slot="$2"
-  local k="100,1000,10000"
-  local k_tag="100_1000_10000"
-  local log="${DRIVER_LOGDIR}/ensemble_xgboost_driver_${disease}_k${k_tag}_${RUN_TS}.log"
-  local output="${RESULTS}/ensemble_xgboost_driver_${disease}_k${k_tag}_${RUN_TS}.csv"
+  local log="${DRIVER_LOGDIR}/ensemble_xgboost_driver_${disease}_k${DRIVER_K_TAG}_${RUN_TS}.log"
+  local output="${RESULTS}/ensemble_xgboost_driver_${disease}_k${DRIVER_K_TAG}_${RUN_TS}.csv"
 
   echo "[$(date +%T)] start driver scoring $disease slot=$slot"
   run_cmd "$log" \
@@ -231,9 +271,10 @@ run_driver_score_one() {
       --repertoire_data_dir "$REPERTOIRE_DIR" \
       --target_disease "$disease" \
       --driver_seqs_path "$DRIVER_SEQS" \
-      --k "$k" \
+      --k "$DRIVER_K" \
       --model_save_dir "$DRIVER_MODEL_DIR" \
-      --output_csv "$output"
+      --output_csv "$output" \
+      "${DRIVER_MAX_REPERTOIRES[@]}"
   local status=$?
   echo "[$(date +%T)] done driver scoring $disease exit=$status log=$log"
   return "$status"
