@@ -1,5 +1,7 @@
 # AIRRBench
 
+> 🚧 **Under active construction** — interfaces, results, and documentation are still evolving.
+
 A unified benchmark for TCRβ repertoire-based disease classification, harmonizing the Mal-ID cohort with three external immunoSEQ cohorts (T1D, TB, RA) into a single AIRR-compliant schema and evaluating a representative set of statistical, feature-engineered, and deep-learning methods on identical inputs and splits.
 
 ## Overview
@@ -15,14 +17,14 @@ It defines four evaluation tasks: disease classification, driver-sequence identi
 
 ```
 models/                          Classification methods
-├── emerson_2017.py              Emerson et al. 2017
-├── ostmeyer_2019.py             Ostmeyer et al. 2019
-├── ensemble_regression.py       Gapped k-mer + V/J gene logistic regression
-├── ensemble_xgboost.py          Gapped k-mer + V/J gene XGBoost
-├── ensemble_abmil.py            Attention-based deep MIL
-├── GIANA/                       Zhang et al. 2021 (GIANA 4.1)
-├── DeepRC/                      Widrich et al. 2020
-└── DeepTCR/                     Sidhom et al. 2021
+├── emerson_2017.py              Emerson et al. 2017          (statistical)
+├── ostmeyer_2019.py             Ostmeyer et al. 2019         (statistical)
+├── ensemble_regression.py       V/J + gkmer LogReg           (engineered features)
+├── ensemble_xgboost.py          V/J + gkmer XGBoost          (engineered features)
+├── GIANA/                       Zhang et al. 2021 (GIANA 4.1) (similarity/clustering)
+├── ensemble_abmil.py            ABMIL                        (deep learning)
+├── DeepRC/                      Widrich et al. 2020          (deep learning)
+└── DeepTCR/                     Sidhom et al. 2021           (deep learning)
 evals/                           Per-method experiment scripts (disease, drivers, depth, demographics)
 preprocessing/                   Mal-ID data cleaning and preparation
 external_data_process/           immunoSEQ dataset conversion (Adaptive -> AIRR) and gene harmonization
@@ -32,22 +34,25 @@ scripts/                         Misc analysis helpers
 
 ## Implemented Methods
 
-### Statistical
+### Disease-signature / statistical
 
 - **Emerson et al. 2017** — Identifies disease-associated CDR3 sequences via Fisher's exact test, then scores repertoires using a Beta-Binomial generative model over the discovered sequences.
+- **Ostmeyer et al. 2019** — Multiple-instance learning over 4-mer motifs extracted from CDR3 sequences, encoded with Atchley factors and classified by logistic regression with random restarts under a max-aggregation MIL objective.
 
-### Feature Engineering
+### Engineered repertoire-level features
 
-- **Ostmeyer et al. 2019** — Multiple instance learning over 4-mer motifs extracted from CDR3 sequences, encoded with Atchley factors and classified by logistic regression with random restarts.
-- **Ensemble Regression** — Weighted combination of two logistic regression models: one over gapped 4-mer frequencies from CDR3 sequences, the other over V/J gene usage frequencies. Hyperparameters (regularization strength, ensemble weight) are tuned via internal cross-validation.
-- **Ensemble XGBoost** — Same gapped 4-mer + V/J gene feature decomposition as the regression ensemble, but with XGBoost classifiers tuned via two-stage grid search (depth/learning rate, then subsampling/regularization) with early stopping.
+- **V/J + gkmer (LogReg)** — Each repertoire is summarized as two feature dictionaries: V/J gene usage and gapped 4-mer frequencies. An L1-penalized logistic regression is trained on each, and the two predictions are linearly combined with a tuned weight α.
+- **V/J + gkmer (XGBoost)** — Same feature decomposition as above, with each base learner replaced by a gradient-boosted tree classifier tuned via two-stage grid search with early stopping.
 
-### Deep Learning
+### Similarity / clustering-based
 
-- **GIANA (Zhang et al. 2021)** — Isometric encoding of CDR3 sequences into fixed-length vectors, followed by similarity-based clustering. Test repertoires are scored by the disease fraction of clusters their sequences fall into.
-- **DeepRC (Widrich et al. 2020)** — 1D-CNN sequence embedding aggregated via modern Hopfield networks for end-to-end repertoire classification.
-- **DeepTCR (Sidhom et al. 2021)** — Deep learning framework operating on CDR3 sequences with V/D/J gene features for supervised repertoire classification.
-- **Attention-Based MIL (ABMIL)** — Learned amino acid and V/J gene embeddings fed through a 1D-CNN encoder, aggregated via gated attention over each repertoire's sequences.
+- **GIANA (Zhang et al. 2021)** — Encodes each CDR3 into a 96-dim isometric vector so that Euclidean distance approximates a BLOSUM-weighted sequence distance, then jointly clusters all training and test sequences. Test repertoires are scored by the mean disease fraction of the training-derived clusters their sequences fall into.
+
+### Deep learning
+
+- **ABMIL** — Learned amino-acid and V/J gene embeddings fed through a 1D-CNN encoder, with a gated-attention aggregator pooling per-sequence features into a repertoire-level representation for end-to-end classification.
+- **DeepRC (Widrich et al. 2020)** — 1D-CNN sequence embeddings aggregated via a modern Hopfield attention block over up to ~10⁵ sequences per repertoire.
+- **DeepTCR (Sidhom et al. 2021)** — Convolutional encoder over CDR3 plus V/D/J gene identities, with attention pooling over a fixed concept bank for repertoire-level prediction (whole-file workflow).
 
 ## Tasks
 
