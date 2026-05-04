@@ -31,6 +31,7 @@ def create_evaluator(model_name, indices_map=None, depth=None, repeat=None,
                      giana_results_dir='results/giana_scaling',
                      giana_exact=True, giana_threshold_iso=7,
                      giana_n_threads=10, giana_use_gpu=True,
+                     xgboost_n_jobs=None, xgboost_device='cpu',
                      debug=False, debug_repertoires=10):
     """
     Create an evaluator instance for the specified model.
@@ -82,10 +83,22 @@ def create_evaluator(model_name, indices_map=None, depth=None, repeat=None,
         }
         return EnsembleRegressionEvaluator(
             indices_map=indices_map, submodel=submodel_map[model_name])
+    elif model_name in ('ensemble_xgboost', 'ensemble_xgboost_kmer',
+                        'ensemble_xgboost_vj'):
+        from evals.ensemble_xgboost_disease_classification import EnsembleXGBoostEvaluator
+        submodel_map = {
+            'ensemble_xgboost': 'ensemble',
+            'ensemble_xgboost_kmer': 'kmer_only',
+            'ensemble_xgboost_vj': 'vj_only',
+        }
+        return EnsembleXGBoostEvaluator(
+            indices_map=indices_map, submodel=submodel_map[model_name],
+            n_jobs=xgboost_n_jobs, xgb_device=xgboost_device)
     else:
         raise ValueError(f"Unknown model: {model_name}. "
                          f"Choose from: emerson_2017, ostmeyer_2019, giana_2021, "
-                         f"ensemble_regression, ensemble_regression_kmer, ensemble_regression_vj")
+                         f"ensemble_regression, ensemble_regression_kmer, ensemble_regression_vj, "
+                         f"ensemble_xgboost, ensemble_xgboost_kmer, ensemble_xgboost_vj")
 
 
 def load_depth_indices(path):
@@ -161,6 +174,7 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
                          giana_results_dir='results/giana_scaling',
                          giana_exact=True, giana_threshold_iso=7,
                          giana_n_threads=10, giana_use_gpu=True,
+                         xgboost_n_jobs=None, xgboost_device='cpu',
                          debug=False, debug_repertoires=10):
     """
     Run the sequencing depth experiment using pre-generated indices.
@@ -225,6 +239,8 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
                 giana_threshold_iso=giana_threshold_iso,
                 giana_n_threads=giana_n_threads,
                 giana_use_gpu=giana_use_gpu,
+                xgboost_n_jobs=xgboost_n_jobs,
+                xgboost_device=xgboost_device,
                 debug=debug,
                 debug_repertoires=debug_repertoires,
             )
@@ -234,10 +250,11 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
                 metadata_path=metadata_path,
                 target_disease=target_disease,
                 data_dir=repertoire_data_dir,
-                random_state=random_seed,
-                tune_parameters=True,
                 allowed_participants=allowed_specimens,
             )
+            if not model_name.startswith('ensemble_xgboost'):
+                cv_kwargs['random_state'] = random_seed
+                cv_kwargs['tune_parameters'] = True
             # Only DeepRC supports raw_file_cache
             if model_name == 'deeprc_2020':
                 cv_kwargs['raw_file_cache'] = raw_file_cache
@@ -286,6 +303,10 @@ def run_depth_experiment(model_name, target_disease, metadata_path, repertoire_d
                 'max_seqs_per_specimen': 'current_depth',
                 'debug': debug,
                 'debug_repertoires': debug_repertoires,
+            },
+            'xgboost_params': {
+                'n_jobs': xgboost_n_jobs,
+                'xgb_device': xgboost_device,
             },
             'results': all_results,
         }
@@ -350,7 +371,8 @@ if __name__ == "__main__":
                         choices=['emerson_2017', 'ostmeyer_2019',
                                  'giana_2021', 'ensemble_regression',
                                  'ensemble_regression_kmer', 'ensemble_regression_vj',
-                                 'deeprc_2020'],
+                                 'ensemble_xgboost', 'ensemble_xgboost_kmer',
+                                 'ensemble_xgboost_vj', 'deeprc_2020'],
                         help='Model to evaluate')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Target disease to classify (e.g., CMV, Lupus, T1D)')
@@ -383,6 +405,11 @@ if __name__ == "__main__":
                         help='Disable GIANA exact mode.')
     parser.add_argument('--giana_cpu', action='store_true',
                         help='Disable GIANA GPU FAISS.')
+    parser.add_argument('--xgboost_n_jobs', type=int, default=None,
+                        help='Threads per XGBoost model when --model is ensemble_xgboost*.')
+    parser.add_argument('--xgboost_device', type=str, default='cpu',
+                        choices=['cpu', 'cuda'],
+                        help='XGBoost device for ensemble_xgboost* models.')
     parser.add_argument('--debug', action='store_true',
                         help='Debug mode for supported evaluators.')
     parser.add_argument('--debug_repertoires', type=int, default=10,
@@ -406,6 +433,8 @@ if __name__ == "__main__":
         giana_threshold_iso=args.giana_threshold_iso,
         giana_n_threads=args.giana_n_threads,
         giana_use_gpu=not args.giana_cpu,
+        xgboost_n_jobs=args.xgboost_n_jobs,
+        xgboost_device=args.xgboost_device,
         debug=args.debug,
         debug_repertoires=args.debug_repertoires,
     )

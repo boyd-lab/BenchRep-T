@@ -32,7 +32,7 @@ class EnsembleXGBoostEvaluator:
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7,
                  kmer_size=4, use_gaps=True, submodel='ensemble', n_jobs=None,
-                 healthy_label=None, xgb_device='cpu'):
+                 healthy_label=None, xgb_device='cpu', indices_map=None):
         self.val_split = val_split
         self.n_cv_folds = n_cv_folds
         self.sequence_col = sequence_col
@@ -45,6 +45,7 @@ class EnsembleXGBoostEvaluator:
         self.submodel = submodel
         self.n_jobs = n_jobs
         self.xgb_device = xgb_device
+        self.indices_map = indices_map
         if healthy_label is not None:
             self.HEALTHY_LABEL = healthy_label
         self.canonicalize_genes = False
@@ -118,6 +119,7 @@ class EnsembleXGBoostEvaluator:
             j_gene_col=self.j_gene_col,
             subsample_fraction=self.subsample_fraction,
             subsample_seed=self.subsample_seed,
+            indices_map=self.indices_map,
             canonicalize_genes=self.canonicalize_genes,
             kmer_size=self.kmer_size,
             use_gaps=self.use_gaps,
@@ -471,6 +473,24 @@ if __name__ == '__main__':
             seed_df['random_baseline_seed'] = int(seed)
             seed_dfs.append(seed_df)
         scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
+        per_seed = []
+        for seed, seed_df in scores_df.groupby('random_baseline_seed'):
+            y = seed_df['disease_label'].values
+            p = seed_df['model_score'].values
+            per_seed.append({
+                'random_baseline_seed': int(seed),
+                'overall_auroc': roc_auc_score(y, p),
+                'overall_aupr': average_precision_score(y, p),
+            })
+        summary_df = pd.DataFrame(per_seed)
+        print(f"\n{'#' * 60}")
+        print(f"# RANDOM BASELINE SUMMARY - across {len(summary_df)} seeds")
+        print(f"{'#' * 60}")
+        print(summary_df.to_string(index=False))
+        print(f"Mean overall AUROC: {summary_df['overall_auroc'].mean():.4f} "
+              f"± {summary_df['overall_auroc'].std(ddof=0):.4f}")
+        print(f"Mean overall AUPR:  {summary_df['overall_aupr'].mean():.4f} "
+              f"± {summary_df['overall_aupr'].std(ddof=0):.4f}")
         if args.output_csv:
             scores_df.to_csv(args.output_csv, index=False)
             print(f"\nScores saved to: {args.output_csv}")

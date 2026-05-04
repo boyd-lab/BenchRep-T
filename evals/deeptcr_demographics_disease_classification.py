@@ -21,6 +21,8 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.preprocessing import StandardScaler
 
+from utils.cohort_adjustments import apply_cohort_adjustment
+
 _DEEPTCR_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     'models', 'DeepTCR'
@@ -99,7 +101,9 @@ class DeepTCRDemographicsEvaluator:
     def load_metadata(self, metadata_path):
         return pd.read_csv(metadata_path, sep='\t')
 
-    def prepare_disease_data(self, metadata, target_disease, disease_col='disease'):
+    def prepare_disease_data(self, metadata, target_disease, disease_col='disease',
+                             adjust_distribution_by_demographics=False,
+                             random_baseline=False, random_baseline_seed=7):
         """Filter to target disease vs healthy, requiring complete demographics."""
         mask = metadata[disease_col].isin([target_disease, self.HEALTHY_LABEL])
         filtered = metadata[mask].copy()
@@ -109,6 +113,14 @@ class DeepTCRDemographicsEvaluator:
         filtered = filtered.dropna(subset=['age', 'sex', 'ancestry'])
         filtered = filtered[filtered['ancestry'].str.strip() != '']
         after = len(filtered)
+
+        if adjust_distribution_by_demographics:
+            filtered = apply_cohort_adjustment(
+                filtered,
+                target_disease,
+                seed=random_baseline_seed if random_baseline else self.random_state,
+                random_baseline=random_baseline,
+            )
 
         n_disease = (filtered['label'] == 1).sum()
         n_healthy = (filtered['label'] == 0).sum()
@@ -305,6 +317,9 @@ class DeepTCRDemographicsEvaluator:
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3,
+                              adjust_distribution_by_demographics=False,
+                              random_baseline=False,
+                              random_baseline_seed=7,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -313,7 +328,14 @@ class DeepTCRDemographicsEvaluator:
         fit L1 logistic regression, evaluate on held-out test fold.
         """
         raw_metadata = self.load_metadata(metadata_path)
-        metadata = self.prepare_disease_data(raw_metadata, target_disease, disease_col)
+        metadata = self.prepare_disease_data(
+            raw_metadata,
+            target_disease,
+            disease_col,
+            adjust_distribution_by_demographics=adjust_distribution_by_demographics,
+            random_baseline=random_baseline,
+            random_baseline_seed=random_baseline_seed,
+        )
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
                                        file_prefix, file_suffix)
         metadata = self.filter_existing_files(metadata)
@@ -634,6 +656,12 @@ if __name__ == '__main__':
                         help='Inner CV folds for C tuning (default: 5)')
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--debug_repertoires', type=int, default=10)
+    parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
+                        help='Apply per-disease cohort distribution adjustment for fair comparison '
+                             '(see utils.cohort_adjustments)')
+    parser.add_argument('--random_baseline_seeds', type=int, nargs='+', default=None,
+                        help='Run random-sampling healthy baselines for each seed '
+                             '(implies --adjust_distribution_by_demographics).')
     parser.add_argument('--ext_metadata_path', type=str, default=None)
     parser.add_argument('--ext_data_dir', type=str, default=None)
     parser.add_argument('--ext_file_template', type=str,
@@ -657,14 +685,55 @@ if __name__ == '__main__':
         debug_repertoires=args.debug_repertoires,
     )
 
-    scores_df = evaluator.run_cross_validation(
-        metadata_path=args.metadata_path,
-        target_disease=args.target_disease,
-        data_dir=args.repertoire_data_dir,
-        ext_metadata_path=args.ext_metadata_path,
-        ext_data_dir=args.ext_data_dir,
-        ext_file_template=args.ext_file_template,
-    )
+    if args.random_baseline_seeds:
+        seed_dfs = []
+        for seed in args.random_baseline_seeds:
+            print(f"\n{'#' * 60}")
+            print(f"# RANDOM BASELINE RUN - seed={seed}")
+            print(f"{'#' * 60}")
+            seed_df = evaluator.run_cross_validation(
+                metadata_path=args.metadata_path,
+                target_disease=args.target_disease,
+                data_dir=args.repertoire_data_dir,
+                adjust_distribution_by_demographics=True,
+                random_baseline=True,
+                random_baseline_seed=seed,
+                ext_metadata_path=args.ext_metadata_path,
+                ext_data_dir=args.ext_data_dir,
+                ext_file_template=args.ext_file_template,
+            )
+            seed_df['random_baseline_seed'] = int(seed)
+            seed_dfs.append(seed_df)
+        scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
+
+        per_seed = []
+        for seed, seed_df in scores_df.groupby('random_baseline_seed'):
+            y = seed_df['disease_label'].values
+            p = seed_df['model_score'].values
+            per_seed.append({
+                'random_baseline_seed': int(seed),
+                'overall_auroc': roc_auc_score(y, p),
+                'overall_aupr': average_precision_score(y, p),
+            })
+        summary_df = pd.DataFrame(per_seed)
+        print(f"\n{'#' * 60}")
+        print(f"# RANDOM BASELINE SUMMARY - across {len(summary_df)} seeds")
+        print(f"{'#' * 60}")
+        print(summary_df.to_string(index=False))
+        print(f"Mean overall AUROC: {summary_df['overall_auroc'].mean():.4f} "
+              f"± {summary_df['overall_auroc'].std(ddof=0):.4f}")
+        print(f"Mean overall AUPR:  {summary_df['overall_aupr'].mean():.4f} "
+              f"± {summary_df['overall_aupr'].std(ddof=0):.4f}")
+    else:
+        scores_df = evaluator.run_cross_validation(
+            metadata_path=args.metadata_path,
+            target_disease=args.target_disease,
+            data_dir=args.repertoire_data_dir,
+            adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
+            ext_metadata_path=args.ext_metadata_path,
+            ext_data_dir=args.ext_data_dir,
+            ext_file_template=args.ext_file_template,
+        )
 
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)
