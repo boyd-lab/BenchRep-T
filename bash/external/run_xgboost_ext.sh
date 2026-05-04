@@ -124,7 +124,16 @@ run_dataset() {
   } >"$log" 2>&1
 }
 
+print_planned_logs() {
+  echo "XGBoost log files for run ${RUN_TS}:"
+  for dataset_raw in "${DATASET_LIST[@]}"; do
+    dataset="$(normalize_dataset "$dataset_raw")" || exit 2
+    echo "  ${dataset}: ${LOGDIR}/ensemble_xgboost_ext_${dataset}_${RUN_TS}.log"
+  done
+}
+
 RUN_TS=$(date +%Y%m%d_%H%M%S)
+print_planned_logs
 pids=()
 labels=()
 

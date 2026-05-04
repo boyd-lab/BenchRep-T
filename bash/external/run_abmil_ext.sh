@@ -8,7 +8,7 @@ DEBUG_REPERTOIRES=10
 DATASETS="RA,T1D,Tb"
 GPUS=""
 PARALLEL=false
-FEATURES="vj_only"
+FEATURES="full"
 EPOCHS=100
 
 for arg in "$@"; do
@@ -120,7 +120,16 @@ run_dataset() {
   } >"$log" 2>&1
 }
 
+print_planned_logs() {
+  echo "ABMIL log files for run ${RUN_TS}:"
+  for dataset_raw in "${DATASET_LIST[@]}"; do
+    dataset="$(normalize_dataset "$dataset_raw")" || exit 2
+    echo "  ${dataset}: ${LOGDIR}/abmil_ext_${dataset}_${FEATURES}_${RUN_TS}.log"
+  done
+}
+
 RUN_TS=$(date +%Y%m%d_%H%M%S)
+print_planned_logs
 pids=()
 labels=()
 

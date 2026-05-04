@@ -8,7 +8,8 @@ DEBUG_REPERTOIRES=10
 DATASETS="RA,T1D,Tb"
 PARALLEL=false
 N_THREADS=10
-USE_GPU=false
+USE_GPU=true
+GPUS=""
 
 for arg in "$@"; do
   case $arg in
@@ -16,6 +17,7 @@ for arg in "$@"; do
     --parallel) PARALLEL=true ;;
     --serial) PARALLEL=false ;;
     --datasets=*) DATASETS="${arg#*=}" ;;
+    --gpus=*) GPUS="${arg#*=}"; USE_GPU=true ;;
     --n_threads=*) N_THREADS="${arg#*=}" ;;
     --cpu) USE_GPU=false ;;
     --gpu) USE_GPU=true ;;
@@ -30,6 +32,7 @@ LOGDIR=${REPO_ROOT}/logs/giana_ext
 mkdir -p "$LOGDIR" "$RESULTS/giana_ext"
 
 IFS=',' read -r -a DATASET_LIST <<< "$DATASETS"
+IFS=',' read -r -a GPU_LIST <<< "$GPUS"
 
 normalize_dataset() {
   case "$1" in
@@ -84,7 +87,8 @@ dataset_args() {
 
 run_dataset() {
   local dataset="$1"
-  local run_ts="$2"
+  local gpu="${2:-}"
+  local run_ts="$3"
   local log="${LOGDIR}/giana_ext_${dataset}_${run_ts}.log"
 
   dataset_args "$dataset"
@@ -98,6 +102,10 @@ run_dataset() {
   echo "[$(date +%T)] start ${dataset} GIANA -> ${log}"
   {
     echo "[$(date +%T)] start ${dataset} GIANA"
+    if $USE_GPU && [ -n "$gpu" ]; then
+      echo "Using CUDA_VISIBLE_DEVICES=${gpu}"
+      export CUDA_VISIBLE_DEVICES="$gpu"
+    fi
     cd "${REPO_ROOT}"
     python -u -m evals.giana_2021_disease_classification \
       "${DATASET_ARGS[@]}" \
@@ -117,14 +125,19 @@ RUN_TS=$(date +%Y%m%d_%H%M%S)
 pids=()
 labels=()
 
-for dataset_raw in "${DATASET_LIST[@]}"; do
-  dataset="$(normalize_dataset "$dataset_raw")" || exit 2
+for i in "${!DATASET_LIST[@]}"; do
+  dataset="$(normalize_dataset "${DATASET_LIST[$i]}")" || exit 2
+  gpu=""
+  if [ ${#GPU_LIST[@]} -gt 0 ] && [ -n "${GPU_LIST[0]}" ]; then
+    gpu="${GPU_LIST[$((i % ${#GPU_LIST[@]}))]}"
+  fi
+
   if $PARALLEL; then
-    run_dataset "$dataset" "$RUN_TS" &
+    run_dataset "$dataset" "$gpu" "$RUN_TS" &
     pids+=("$!")
     labels+=("$dataset")
   else
-    run_dataset "$dataset" "$RUN_TS" || exit $?
+    run_dataset "$dataset" "$gpu" "$RUN_TS" || exit $?
   fi
 done
 

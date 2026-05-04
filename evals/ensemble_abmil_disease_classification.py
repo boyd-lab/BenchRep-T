@@ -31,6 +31,14 @@ class ABMILEvaluator:
 
     HEALTHY_LABEL = "Healthy/Background"
 
+    @staticmethod
+    def _feature_csv(output_csv, feature):
+        """Derive a per-feature CSV path, e.g. results/foo.csv -> results/foo_vj_only.csv."""
+        if output_csv is None:
+            return None
+        base, ext = os.path.splitext(output_csv)
+        return f"{base}_{feature}{ext}"
+
     def __init__(
         self,
         sequence_col='cdr3_aa',
@@ -287,6 +295,10 @@ class ABMILEvaluator:
         fold_results = []
 
         base_method = 'ABMIL_CovAdj' if covariate_adjust else 'ABMIL'
+        if self.features == 'cdr3_only':
+            base_method += '_CDR3'
+        elif self.features == 'vj_only':
+            base_method += '_VJ'
         if random_baseline:
             base_method += '_RandomBaseline'
 
@@ -498,6 +510,11 @@ if __name__ == "__main__":
                         help="Which features to use: 'full' (CDR3 + V/J genes), "
                              "'cdr3_only' (CDR3 sequence only), or "
                              "'vj_only' (V/J gene identities only). Default: full")
+    parser.add_argument('--include_feature_baselines', action='store_true',
+                        help='When --features full, also run cdr3_only and vj_only '
+                             'ABMIL models with the same dataset arguments. Sibling '
+                             'CSV files are written by appending _cdr3_only and '
+                             '_vj_only to --output_csv.')
     parser.add_argument('--healthy_label', type=str,
                         default=ABMILEvaluator.HEALTHY_LABEL,
                         help='Negative-class label in the disease column.')
@@ -550,25 +567,42 @@ if __name__ == "__main__":
                         help='Filename template for external repertoires.')
     args = parser.parse_args()
 
-    evaluator = ABMILEvaluator(
-        max_instances=args.max_instances,
-        M=args.M,
-        L=args.L,
-        epochs=args.epochs,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        patience=args.patience,
-        val_split=args.val_split,
-        use_gpu=not args.no_gpu,
-        max_repertoires_per_class=args.max_repertoires_per_class,
-        dropout=args.dropout,
-        max_length=args.max_length,
-        embedding_dim_aa=args.embedding_dim_aa,
-        embedding_dim_genes=args.embedding_dim_genes,
-        kernel=args.kernel,
-        features=args.features,
-        healthy_label=args.healthy_label,
-    )
+    if args.include_feature_baselines:
+        if args.features != 'full':
+            raise ValueError("--include_feature_baselines requires --features full")
+        if args.random_baseline_seeds:
+            raise ValueError("--include_feature_baselines is not supported with "
+                             "--random_baseline_seeds")
+
+    def make_evaluator(feature):
+        return ABMILEvaluator(
+            max_instances=args.max_instances,
+            M=args.M,
+            L=args.L,
+            epochs=args.epochs,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            patience=args.patience,
+            val_split=args.val_split,
+            use_gpu=not args.no_gpu,
+            max_repertoires_per_class=args.max_repertoires_per_class,
+            dropout=args.dropout,
+            max_length=args.max_length,
+            embedding_dim_aa=args.embedding_dim_aa,
+            embedding_dim_genes=args.embedding_dim_genes,
+            kernel=args.kernel,
+            features=feature,
+            healthy_label=args.healthy_label,
+        )
+
+    def feature_model_save_dir(feature):
+        if args.model_save_dir is None:
+            return None
+        if args.include_feature_baselines and args.features == 'full':
+            return os.path.join(args.model_save_dir, feature)
+        return args.model_save_dir
+
+    evaluator = make_evaluator(args.features)
 
     if args.random_baseline_seeds:
         seed_dfs = []
@@ -638,3 +672,30 @@ if __name__ == "__main__":
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)
         print(f"\nScores saved to: {args.output_csv}")
+
+    if args.include_feature_baselines:
+        for feature in ['cdr3_only', 'vj_only']:
+            feature_output_csv = ABMILEvaluator._feature_csv(args.output_csv, feature)
+            print(f"\n{'#'*60}")
+            print(f"# ABMIL FEATURE BASELINE - {feature}")
+            print(f"{'#'*60}")
+            feature_scores_df = make_evaluator(feature).run_cross_validation(
+                metadata_path=args.metadata_path,
+                target_disease=args.target_disease,
+                data_dir=args.repertoire_data_dir,
+                participant_col=args.participant_col,
+                file_prefix=args.file_prefix,
+                file_suffix=args.file_suffix,
+                disease_col=args.disease_col,
+                fold_col=args.fold_col,
+                require_demographics=args.require_demographics,
+                adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
+                covariate_adjust=args.covariate_adjust,
+                model_save_dir=feature_model_save_dir(feature),
+                ext_metadata_path=args.ext_metadata_path,
+                ext_data_dir=args.ext_data_dir,
+                ext_file_template=args.ext_file_template,
+            )
+            if feature_output_csv:
+                feature_scores_df.to_csv(feature_output_csv, index=False)
+                print(f"\nScores saved to: {feature_output_csv}")
