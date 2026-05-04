@@ -1,12 +1,15 @@
 # AIRRBench
 
-Benchmarking framework for TCR repertoire-based disease classification methods, evaluated on the Mal-ID cohort.
+A unified benchmark for TCRβ repertoire-based disease classification, harmonizing the Mal-ID cohort with three external immunoSEQ cohorts (T1D, TB, RA) into a single AIRR-compliant schema and evaluating a representative set of statistical, feature-engineered, and deep-learning methods on identical inputs and splits.
 
 ## Overview
 
-AIRRBench provides a standardized comparison of computational methods that predict disease status from T-cell receptor beta (TRB) repertoire sequencing data. The benchmark covers a range of approaches — from statistical association tests to deep learning — and evaluates them on shared cross-validation splits across multiple diseases (HIV, Covid-19, Influenza, Lupus, T1D, and others).
+AIRRBench covers seven diseases organized into three groups:
+- **Mal-ID-only**: HIV, Lupus, Influenza, COVID-19
+- **Hybrid (Mal-ID + external)**: T1D (pooled with the Mitchell et al. cohort)
+- **External-only**: Tuberculosis progression, Rheumatoid Arthritis
 
-Beyond disease classification, the framework includes experiments for driver sequence identification, sequencing depth sensitivity, external dataset generalization, and demographic confounding analysis.
+It defines four evaluation tasks: disease classification, driver-sequence identification, sequencing-depth scaling, and demographic-confounding analysis. All methods consume identical AIRR-formatted repertoire files and are scored on pre-assigned 3-fold cross-validation splits.
 
 ## Repository Structure
 
@@ -14,15 +17,17 @@ Beyond disease classification, the framework includes experiments for driver seq
 models/                          Classification methods
 ├── emerson_2017.py              Emerson et al. 2017
 ├── ostmeyer_2019.py             Ostmeyer et al. 2019
-├── ensemble_regression.py       Gapped k-mer + V/J gene ensemble
+├── ensemble_regression.py       Gapped k-mer + V/J gene logistic regression
+├── ensemble_xgboost.py          Gapped k-mer + V/J gene XGBoost
 ├── ensemble_abmil.py            Attention-based deep MIL
 ├── GIANA/                       Zhang et al. 2021 (GIANA 4.1)
 ├── DeepRC/                      Widrich et al. 2020
 └── DeepTCR/                     Sidhom et al. 2021
-evals/                           Evaluation harness and experiments
-preprocessing/                   Data cleaning and preparation
-utils/                           Repertoire I/O and gene name harmonization
-external_data_process/           External dataset conversion (Adaptive -> AIRR)
+evals/                           Per-method experiment scripts (disease, drivers, depth, demographics)
+preprocessing/                   Mal-ID data cleaning and preparation
+external_data_process/           immunoSEQ dataset conversion (Adaptive -> AIRR) and gene harmonization
+utils/                           Repertoire I/O, metric helpers, cohort/covariate adjustment
+scripts/                         Misc analysis helpers
 ```
 
 ## Implemented Methods
@@ -35,6 +40,7 @@ external_data_process/           External dataset conversion (Adaptive -> AIRR)
 
 - **Ostmeyer et al. 2019** — Multiple instance learning over 4-mer motifs extracted from CDR3 sequences, encoded with Atchley factors and classified by logistic regression with random restarts.
 - **Ensemble Regression** — Weighted combination of two logistic regression models: one over gapped 4-mer frequencies from CDR3 sequences, the other over V/J gene usage frequencies. Hyperparameters (regularization strength, ensemble weight) are tuned via internal cross-validation.
+- **Ensemble XGBoost** — Same gapped 4-mer + V/J gene feature decomposition as the regression ensemble, but with XGBoost classifiers tuned via two-stage grid search (depth/learning rate, then subsampling/regularization) with early stopping.
 
 ### Deep Learning
 
@@ -43,33 +49,41 @@ external_data_process/           External dataset conversion (Adaptive -> AIRR)
 - **DeepTCR (Sidhom et al. 2021)** — Deep learning framework operating on CDR3 sequences with V/D/J gene features for supervised repertoire classification.
 - **Attention-Based MIL (ABMIL)** — Learned amino acid and V/J gene embeddings fed through a 1D-CNN encoder, aggregated via gated attention over each repertoire's sequences.
 
-## Experiments
+## Tasks
 
-### Disease Classification
+### 1. Disease Classification
 
-The primary evaluation task. Each method is trained to distinguish a target disease from healthy/background controls in a binary classification setting. Evaluation uses pre-defined 3-fold cross-validation with a 90/10 train/validation split for hyperparameter tuning. A **demographics-only baseline** (logistic regression on age, sex, ancestry) is included to quantify confounding.
+Binary disease-vs-control classification under pooled 3-fold cross-validation, with an internal 80/20 or 90/10 train/validation split for hyperparameter tuning. The seven diseases are evaluated under three protocols, all reusing the same harness:
+
+- **Mal-ID-only diseases** (HIV, Lupus, Influenza, COVID-19) — Mal-ID's pre-assigned 3-fold splits, scored against Healthy/Background controls.
+- **Hybrid disease (T1D)** — Mal-ID T1D specimens are pooled with the Mitchell et al. cohort and re-stratified into 3 specimen-level folds, exposing each method to two clinical protocols simultaneously.
+- **External-only diseases (TB, RA)** — Each cohort is evaluated entirely within itself under the same 3-fold protocol; this measures within-cohort accuracy on a different assay rather than cross-cohort transfer.
 
 Metrics: AUROC, AUPR.
 
-### Driver Sequence Identification
+### 2. Driver Sequence Identification
 
-Tests whether models can recover known disease-associated TCR sequences. Ground truth is derived from VDJdb (confidence score >= 2), matched to repertoires via Levenshtein similarity (>= 90%). Currently supported for Emerson 2017 (ranked by Fisher's test p-value) and Ensemble Regression (ranked by decision function score).
+Tests whether per-sequence scores produced as a by-product of classification surface known antigen-specific TCRs. Ground truth is built from VDJdb (confidence ≥ 2), augmented for COVID-19 with experimentally validated SARS-CoV-2 clonotypes from Minervina et al., and matched to Mal-ID repertoires via ≥90% Levenshtein similarity. Supported for Emerson 2017, GIANA, Ensemble Regression, Ensemble XGBoost, ABMIL, and DeepRC; each ranks sequences by its native score (Fisher p-value, cluster disease fraction, decision-function weight, attention weight, etc.). A random-chance baseline is provided by `compute_random_baseline_recall.py`.
 
-Metrics: recall@k (macro-averaged across repertoires).
+Metrics: recall@k (k ∈ {100, 1000, 10000}, macro-averaged across disease-positive repertoires).
 
-### Sequencing Depth Sensitivity
+### 3. Sequencing Depth Scaling
 
-Evaluates how classification performance scales with repertoire size. Models are tested at subsampled depths of 1K, 5K, 10K, 25K, 50K, and 75K sequences, with 5 independent repetitions per depth using pre-computed nested subsampling indices for reproducibility.
+Re-runs disease classification after downsampling every repertoire (training and test) to a common target depth D ∈ {1k, 5k, 10k, 25k, 50k, 75k}. Subsampling indices are pre-generated with a fixed seed and **nested** across depths, so the D sequences at depth D are always a subset of those used at any larger depth — differences across depths cannot be explained by drawing different sequences. Five independent replicates per depth; specimens with fewer than 75k unique sequences are excluded.
 
-### External Cohort Generalization
+### 4. Demographic Confounding Analysis
 
-Trains on all internal Mal-ID data and evaluates on independently collected external datasets. External repertoires (originally in Adaptive/immunoSEQ format) are converted to AIRR format with gene name harmonization.
+Two complementary analyses probe whether classifier signal is carried by participant demographics rather than disease biology:
 
-### Demographic Confounding
-
-A stacking experiment to test whether TCR-derived predictions and demographic features carry orthogonal signal. A logistic regression meta-model is trained on the combination of a base model's out-of-sample predictions and demographic features (age, sex, ancestry). If the meta-model substantially outperforms the base model alone, it suggests demographic confounding in the classification signal.
+1. **Demographic-matched controls** — For each disease, the random pool of healthy controls is replaced with a subset matched to the disease cohort's dominant confounder (age for Lupus, Influenza, COVID-19; African ancestry for HIV). Matched-control AUROC is compared against a random-control baseline averaged over five draws of the same size. Sample lists are dumped by `dump_demographic_cohorts.py`.
+2. **Demographic-feature concatenation** — Each method's repertoire-level features are concatenated with age, sex, and ancestry; the concatenated model is compared against the base model and a demographics-only logistic-regression baseline. Implemented for Ensemble Regression/XGBoost, ABMIL, and DeepTCR (`*_demographics_disease_classification.py`); standalone demographics-only and V/J-gene-only baselines are also provided.
 
 ## Data
+
+### Sources
+
+- **Mal-ID** (Zaslavsky et al. 2025) — 550 TCRβ specimens from 542 participants across multiple clinical sites: 197 Healthy/Background, 98 HIV, 96 T1D, 64 Lupus, 58 COVID-19, 37 Influenza. A subset has age, sex, and self-reported ancestry annotations.
+- **immunoSEQ** (Adaptive platform) — three independent cohorts: T1D (Mitchell et al., 197 specimens), TB progression (Musvosvi et al., 140 specimens), and RA (Savola et al., 94 specimens).
 
 ### Format
 
@@ -86,7 +100,7 @@ File naming convention: `part_table_<participant>_<specimen>.tsv.gz`
 
 ### Metadata
 
-A tab-separated `metadata.tsv` file provides sample annotations:
+`metadata_malid.tsv` provides Mal-ID sample annotations; `metadata_{T1D,RA,Tb}_final.tsv` provide the corresponding immunoSEQ cohorts. Common columns:
 
 | Column | Description |
 |--------|-------------|
@@ -94,32 +108,37 @@ A tab-separated `metadata.tsv` file provides sample annotations:
 | `specimen_label` | Specimen identifier |
 | `disease` | Disease label (e.g., HIV, Covid19, Healthy/Background) |
 | `malid_cross_validation_fold_id_when_in_test_set` | Pre-assigned CV fold (0, 1, or 2) |
-| `age`, `sex`, `ancestry` | Demographics |
+| `age`, `sex`, `ancestry` | Demographics (Mal-ID; subset of specimens) |
 
 ### Directory Layout
 
 ```
 data/
-├── metadata.tsv                     Sample annotations and CV fold assignments
-├── malid_clean/TCR/                 Per-specimen repertoire files (.tsv.gz)
-├── public_clones/                   VDJdb ground truth driver sequences per disease
-├── depth_indices_seed7.json.gz      Pre-computed subsampling indices
-├── external_raw/                    External repertoires (Adaptive format)
-└── external_processed/              External repertoires (converted to AIRR)
+├── metadata_malid.tsv               Mal-ID annotations and CV fold assignments
+├── metadata_{T1D,RA,Tb}_final.tsv   immunoSEQ cohort metadata
+├── malid_clean/TCR/                 Mal-ID per-specimen repertoires (.tsv.gz)
+├── vdjdb_driver_seqs.csv            VDJdb ground truth driver sequences
+├── vdjdb_matches_expanded.csv       VDJdb-to-Mal-ID Levenshtein matches
+├── depth_indices_max75k.json.gz     Pre-computed nested subsampling indices
+├── external_raw/                    immunoSEQ repertoires (Adaptive format)
+└── external_processed/              immunoSEQ repertoires (converted to AIRR)
 ```
 
 ## Preprocessing
 
-The `preprocessing/` directory contains scripts for preparing raw data:
+Mal-ID and immunoSEQ data enter the pipeline in different raw formats and follow conceptually parallel cleanup paths that converge on a single AIRR-compliant schema (`cdr3_aa`, `v_call`, `j_call`).
 
-- **Sequence QC** (`clean_tcr_data.py`) — Filters non-productive and low-confidence sequences, removes sequences with non-standard amino acids, standardizes V gene nomenclature, and validates against a reference gene set.
-- **Format conversion** (`clean_tcr_data_to_airr.py`) — Maps internal column names to AIRR standard.
-- **Specimen splitting** (`clean_airr_split_by_specimen.py`) — Splits per-participant files into per-specimen files, retaining only specimens present in metadata.
-- **Depth indices** (`generate_depth_indices.py`) — Pre-generates reproducible subsampling indices for the sequencing depth experiment.
-- **Driver sequence matching** (`process_driver_sequences.py`) — Matches VDJdb entries to Mal-ID repertoires via Levenshtein similarity for the driver identification evaluation.
-- **Demographic analysis** (`check_demographics.py`) — Summarizes demographic completeness per disease.
+**Mal-ID** (`preprocessing/`): drops non-productive rearrangements and low-confidence V calls, strips IgBLAST whitespace and uppercases amino-acid fields, drops rows with missing or non-standard CDR3/V/J, collapses V-gene alleles indistinguishable under the FR3 primer set (per Meysman et al.), renames to AIRR columns, and splits per-participant tables into per-specimen files.
 
-Gene name harmonization between Adaptive/immunoSEQ and AIRR/IMGT conventions is handled by `utils/gene_harmonization.py`.
+**immunoSEQ** (`external_data_process/`): renames Adaptive columns (`aminoAcid` → `cdr3_aa`, etc.), converts Adaptive V/J names (e.g. `TCRBV07-02`) to AIRR/IMGT form (`TRBV7-2`), strips allele annotations, and trims the flanking conserved cysteine and phenylalanine from each CDR3 to match the Mal-ID definition. Specimens with fewer than 1,000 unique post-preprocessing sequences are excluded.
+
+**Cross-source gene-label reconciliation**: when an immunoSEQ cohort is merged with Mal-ID (T1D), the Adaptive-style `-1` suffix on singleton TRBV families (TRBV2, TRBV9, TRBV13–15, TRBV18, TRBV19, TRBV27, TRBV28, TRBV30) is collapsed so the same gene receives the same label across sources. Within-source evaluations preserve each source's native labels. Reconciliation is handled by `utils/gene_harmonization.py`.
+
+Other preprocessing utilities:
+
+- **Depth indices** (`preprocessing/generate_depth_indices.py`) — pre-generates reproducible nested subsampling indices for the depth-scaling experiment.
+- **Driver sequence matching** (`preprocessing/process_driver_sequences.py`) — matches VDJdb entries to Mal-ID repertoires via Levenshtein similarity.
+- **Demographic analysis** (`preprocessing/check_demographics.py`, `scripts/check_demographics_v2.py`) — summarizes demographic completeness per disease.
 
 ## Setup
 
