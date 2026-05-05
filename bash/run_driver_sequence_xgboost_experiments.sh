@@ -3,14 +3,12 @@ set -uo pipefail
 
 # CPU-only runner for Ensemble XGBoost driver sequence experiments.
 #
-# This retrains base Ensemble XGBoost models for Influenza and Covid19, then
-# runs driver identification at k=100,1000,10000.
+# This uses a presaved base Ensemble XGBoost checkpoint for HIV and runs
+# driver identification at k=100,1000,10000. It does not retrain models.
 
 DRY_RUN=false
 SMOKE_TEST=false
 
-DRIVER_TRAIN_PARALLEL=2
-DRIVER_TRAIN_N_JOBS=30
 DRIVER_SCORE_PARALLEL=2
 DEBUG_REPERTOIRES=0
 DRIVER_K="100,1000,10000"
@@ -25,8 +23,6 @@ for arg in "$@"; do
     --smoke_test)
       SMOKE_TEST=true
       ;;
-    --driver_train_parallel=*) DRIVER_TRAIN_PARALLEL="${arg#*=}" ;;
-    --driver_train_n_jobs=*) DRIVER_TRAIN_N_JOBS="${arg#*=}" ;;
     --driver_score_parallel=*) DRIVER_SCORE_PARALLEL="${arg#*=}" ;;
     --debug_repertoires=*) DEBUG_REPERTOIRES="${arg#*=}" ;;
     *)
@@ -37,8 +33,6 @@ for arg in "$@"; do
 done
 
 if $SMOKE_TEST; then
-  DRIVER_TRAIN_PARALLEL=1
-  DRIVER_TRAIN_N_JOBS=1
   DRIVER_SCORE_PARALLEL=1
   DEBUG_REPERTOIRES="${DEBUG_REPERTOIRES:-6}"
   if [[ "$DEBUG_REPERTOIRES" -eq 0 ]]; then
@@ -60,9 +54,9 @@ PYTHON_BIN=${PYTHON_BIN:-python}
 RUN_TS=$(date +%Y%m%d_%H%M%S)
 
 DRIVER_LOGDIR=${REPO_ROOT}/logs/ensemble_xgboost_driver_cpu
-DRIVER_MODEL_DIR=${RESULTS}/ensemble_xgboost_models_driver_cpu_${RUN_TS}
+DRIVER_MODEL_DIR=${DRIVER_MODEL_DIR:-${RESULTS}/ensemble_xgboost_models}
 
-mkdir -p "$RESULTS" "$DRIVER_LOGDIR" "$DRIVER_MODEL_DIR"
+mkdir -p "$RESULTS" "$DRIVER_LOGDIR"
 
 cd "$REPO_ROOT" || exit 1
 
@@ -121,32 +115,6 @@ run_pool() {
   return "$status"
 }
 
-run_driver_train_one() {
-  local disease="$1"
-  local slot="$2"
-  local log="${DRIVER_LOGDIR}/ensemble_xgboost_driver_retrain_${disease}_${RUN_TS}.log"
-  local output="${RESULTS}/ensemble_xgboost_driver_retrain_${disease}_${RUN_TS}_classification.csv"
-
-  echo "[$(date +%T)] start driver retrain $disease slot=$slot"
-  local debug_args=()
-  if [[ "$DEBUG_REPERTOIRES" -gt 0 ]]; then
-    debug_args=(--debug_repertoires "$DEBUG_REPERTOIRES")
-  fi
-  run_cmd "$log" \
-    "$PYTHON_BIN" -u -m evals.ensemble_xgboost_disease_classification \
-      --metadata_path "$METADATA" \
-      --repertoire_data_dir "$REPERTOIRE_DIR" \
-      --target_disease "$disease" \
-      --n_jobs "$DRIVER_TRAIN_N_JOBS" \
-      --xgb_device cpu \
-      --output_csv "$output" \
-      --model_save_dir "$DRIVER_MODEL_DIR" \
-      "${debug_args[@]}"
-  local status=$?
-  echo "[$(date +%T)] done driver retrain $disease exit=$status log=$log"
-  return "$status"
-}
-
 run_driver_score_one() {
   local disease="$1"
   local slot="$2"
@@ -169,17 +137,48 @@ run_driver_score_one() {
   return "$status"
 }
 
-overall_status=0
-driver_diseases=("Influenza" "Covid19")
+check_presaved_checkpoint() {
+  local disease="$1"
+  local missing=0
+  local fold
+  local required=(
+    kmer_model.ubj
+    kmer_vectorizer.pkl
+    vj_model.ubj
+    vj_vectorizer.pkl
+    meta.json
+  )
 
-echo "[$(date +%T)] Starting driver retrain phase (${#driver_diseases[@]} jobs, parallel=$DRIVER_TRAIN_PARALLEL, n_jobs/job=$DRIVER_TRAIN_N_JOBS)"
-run_pool "$DRIVER_TRAIN_PARALLEL" run_driver_train_one "${driver_diseases[@]}" || overall_status=1
+  for fold in 0 1 2; do
+    local fold_dir="${DRIVER_MODEL_DIR}/${disease}/fold${fold}"
+    if [[ ! -d "$fold_dir" ]]; then
+      echo "Missing checkpoint fold directory: $fold_dir" >&2
+      missing=1
+      continue
+    fi
+    local filename
+    for filename in "${required[@]}"; do
+      if [[ ! -f "${fold_dir}/${filename}" ]]; then
+        echo "Missing checkpoint file: ${fold_dir}/${filename}" >&2
+        missing=1
+      fi
+    done
+  done
+
+  return "$missing"
+}
+
+overall_status=0
+driver_diseases=("HIV")
+
+echo "[$(date +%T)] Checking presaved HIV checkpoint in $DRIVER_MODEL_DIR"
+check_presaved_checkpoint "HIV" || overall_status=1
 
 if [[ "$overall_status" -eq 0 ]]; then
   echo "[$(date +%T)] Starting driver scoring phase (${#driver_diseases[@]} jobs, parallel=$DRIVER_SCORE_PARALLEL)"
   run_pool "$DRIVER_SCORE_PARALLEL" run_driver_score_one "${driver_diseases[@]}" || overall_status=1
 else
-  echo "[$(date +%T)] Skipping driver scoring because retraining failed." >&2
+  echo "[$(date +%T)] Skipping driver scoring because the HIV checkpoint is incomplete." >&2
 fi
 
 echo "[$(date +%T)] Done. status=$overall_status"
