@@ -1,6 +1,6 @@
 # AIRRBench
 
-> 🚧 **Under active construction** — interfaces, results, and documentation are still evolving.
+> 🚧 **Under active construction** 🚧
 
 A unified benchmark for TCRβ repertoire-based disease classification, harmonizing the Mal-ID cohort with three external immunoSEQ cohorts (T1D, TB, RA) into a single AIRR-compliant schema and evaluating a representative set of statistical, feature-engineered, and deep-learning methods on identical inputs and splits.
 
@@ -143,7 +143,7 @@ Other preprocessing utilities:
 
 - **Depth indices** (`preprocessing/generate_depth_indices.py`) — pre-generates reproducible nested subsampling indices for the depth-scaling experiment.
 - **Driver sequence matching** (`preprocessing/process_driver_sequences.py`) — matches VDJdb entries to Mal-ID repertoires via Levenshtein similarity.
-- **Demographic analysis** (`preprocessing/check_demographics.py`, `scripts/check_demographics_v2.py`) — summarizes demographic completeness per disease.
+- **Demographic analysis** (`preprocessing/check_demographics.py`) — summarizes demographic completeness per disease.
 
 ## Setup
 
