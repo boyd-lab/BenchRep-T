@@ -22,8 +22,8 @@ Participants with no qualifying specimen produce no output.
 
 Usage:
     python preprocessing/build_depth_subsampled_per_participant.py \\
-        --input-dir  /backups/chihoim/datasets/malid_tcr_airr/data_per_specimen \\
-        --output-dir /backups/chihoim/datasets/malid_tcr_airr/data_per_participant \\
+        --input-dir  <path/to/data_per_specimen> \\
+        --output-dir <path/to/data_per_participant> \\
         --indices    data/depth_indices_max75k.json.gz \\
         --workers    8
 """
@@ -86,12 +86,14 @@ def main() -> int:
     p.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("/backups/chihoim/datasets/malid_tcr_airr/data_per_specimen"),
+        required=True,
+        help="Directory containing per-specimen repertoire TSVs.",
     )
     p.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/backups/chihoim/datasets/malid_tcr_airr/data_per_participant"),
+        required=True,
+        help="Output directory for depth-subsampled per-participant files.",
     )
     p.add_argument(
         "--indices",
