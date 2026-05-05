@@ -49,7 +49,8 @@ class DeepRC2020Evaluator:
                  kernel_size=9, n_kernels=32,
                  max_seq_len=50,
                  device=None, results_dir='results/deeprc',
-                 indices_map=None, healthy_label=None):
+                 indices_map=None, healthy_label=None,
+                 debug=False, debug_repertoires=10):
         """
         Args:
             n_updates: Number of gradient updates for training.
@@ -71,6 +72,9 @@ class DeepRC2020Evaluator:
             results_dir: Base directory for DeepRC checkpoint/tensorboard files.
             indices_map: Dict mapping rep_id (filename without extension) to a
                          list of row indices for sequencing-depth experiments.
+            debug: If True, keep only a small number of repertoires per class.
+            debug_repertoires: Number of disease/control repertoires to keep
+                               when debug=True.
         """
         self.n_updates = n_updates
         self.evaluate_at = evaluate_at
@@ -86,6 +90,8 @@ class DeepRC2020Evaluator:
         self.max_seq_len = max_seq_len
         self.results_dir = results_dir
         self.indices_map = indices_map
+        self.debug = debug
+        self.debug_repertoires = debug_repertoires
         if healthy_label is not None:
             self.HEALTHY_LABEL = healthy_label
 
@@ -293,6 +299,13 @@ class DeepRC2020Evaluator:
                 healthy_label=self.HEALTHY_LABEL,
                 fold_col=fold_col, disease_col=disease_col,
             )
+
+        if self.debug:
+            disease_rows = metadata[metadata['label'] == 1].head(self.debug_repertoires)
+            healthy_rows = metadata[metadata['label'] == 0].head(self.debug_repertoires)
+            metadata = pd.concat([disease_rows, healthy_rows], ignore_index=True)
+            print(f"[DEBUG] Restricted to {len(metadata)} repertoires "
+                  f"({len(disease_rows)} disease, {len(healthy_rows)} healthy).")
 
         if allowed_participants is not None:
             before = len(metadata)
@@ -516,6 +529,10 @@ if __name__ == '__main__':
                         help='Sequences sampled per repertoire during training (default: 10000)')
     parser.add_argument('--max_seq_len', type=int, default=50,
                         help='Maximum CDR3 sequence length; must be >= longest sequence in data (default: 50)')
+    parser.add_argument('--debug', action='store_true',
+                        help='Debug mode: load only a small number of repertoires per class')
+    parser.add_argument('--debug_repertoires', type=int, default=10,
+                        help='Repertoires per class to load in debug mode (default: 10)')
     parser.add_argument('--covariate_adjust', action='store_true',
                         help='Residualize bag embeddings against demographics (age, sex, ancestry) '
                              'and train an L1 logistic regression head (requires complete demographics)')
@@ -543,6 +560,8 @@ if __name__ == '__main__':
         sample_n_sequences=args.sample_n_sequences,
         max_seq_len=args.max_seq_len,
         healthy_label=args.healthy_label,
+        debug=args.debug,
+        debug_repertoires=args.debug_repertoires,
     )
 
     if args.random_baseline_seeds:

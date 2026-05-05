@@ -37,6 +37,28 @@ ALL_METHODS = (
     "ostmeyer",
 )
 
+DEFAULT_METHOD_CONDA_ENVS = {
+    "deeprc": "deeprc",
+    "deeptcr": "deeptcr",
+    "abmil": "airr-bench",
+    "ensemble_xgboost": "airr-bench",
+    "ensemble_regression": "airr-bench",
+    "giana": "giana",
+    "emerson": "airr-bench",
+    "ostmeyer": "airr-bench",
+}
+
+METHOD_CONDA_ENV_VARS = {
+    "deeprc": "DEEPRC_CONDA_ENV",
+    "deeptcr": "DEEPTCR_CONDA_ENV",
+    "abmil": "ABMIL_CONDA_ENV",
+    "ensemble_xgboost": "XGBOOST_CONDA_ENV",
+    "ensemble_regression": "REGRESSION_CONDA_ENV",
+    "giana": "GIANA_CONDA_ENV",
+    "emerson": "EMERSON_CONDA_ENV",
+    "ostmeyer": "OSTMEYER_CONDA_ENV",
+}
+
 
 @dataclass
 class BenchmarkResult:
@@ -209,6 +231,18 @@ def _base_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     return metadata, repertoire_dir, output_dir
 
 
+def _python_command_prefix(method: str) -> list[str]:
+    env_var = METHOD_CONDA_ENV_VARS.get(method)
+    conda_env = os.environ.get(env_var, "") if env_var else ""
+    conda_env = conda_env or os.environ.get("METHOD_CONDA_ENV", "")
+    conda_env = conda_env or DEFAULT_METHOD_CONDA_ENVS.get(method, "")
+
+    if not conda_env:
+        return [sys.executable]
+    conda_exe = os.environ.get("CONDA_EXE", "conda")
+    return [conda_exe, "run", "--no-capture-output", "-n", conda_env, "python"]
+
+
 def _budget_flags(method: str, budget: str, args: argparse.Namespace) -> list[str]:
     if budget == "full":
         return []
@@ -216,7 +250,11 @@ def _budget_flags(method: str, budget: str, args: argparse.Namespace) -> list[st
     debug_reps = str(args.debug_repertoires)
     if method == "deeprc":
         if budget == "smoke":
-            return ["--n_updates", "100", "--evaluate_at", "50", "--sample_n_sequences", "1000"]
+            return [
+                "--debug", "--debug_repertoires", debug_reps,
+                "--n_updates", "100", "--evaluate_at", "50",
+                "--sample_n_sequences", "1000",
+            ]
         return ["--n_updates", str(args.deeprc_one_epoch_updates), "--evaluate_at", str(args.deeprc_one_epoch_updates)]
     if method == "deeptcr":
         if budget == "smoke":
@@ -256,7 +294,7 @@ def _method_command(
 
     if method == "deeprc":
         return [
-            sys.executable,
+            *_python_command_prefix(method),
             "-u",
             "-m",
             "evals.deeprc_2020_disease_classification",
@@ -269,7 +307,7 @@ def _method_command(
         ]
     if method == "deeptcr":
         return [
-            sys.executable,
+            *_python_command_prefix(method),
             "-u",
             "-m",
             "evals.deeptcr_2021_disease_classification",
@@ -284,7 +322,7 @@ def _method_command(
         ]
     if method == "abmil":
         return [
-            sys.executable,
+            *_python_command_prefix(method),
             "-u",
             "-m",
             "evals.ensemble_abmil_disease_classification",
@@ -297,7 +335,7 @@ def _method_command(
         ]
     if method == "ensemble_xgboost":
         command = [
-            sys.executable,
+            *_python_command_prefix(method),
             "-u",
             "-m",
             "evals.ensemble_xgboost_disease_classification",
@@ -319,7 +357,7 @@ def _method_command(
         return command
     if method == "ensemble_regression":
         command = [
-            sys.executable,
+            *_python_command_prefix(method),
             "-u",
             "-m",
             "evals.ensemble_regression_disease_classification",
@@ -335,7 +373,7 @@ def _method_command(
         return command
     if method == "giana":
         return [
-            sys.executable,
+            *_python_command_prefix(method),
             "-u",
             "-m",
             "evals.giana_2021_disease_classification",
@@ -353,7 +391,7 @@ def _method_command(
         ]
     if method == "emerson":
         return [
-            sys.executable,
+            *_python_command_prefix(method),
             "-u",
             "-m",
             "evals.emerson_2017_disease_classification",
@@ -361,7 +399,7 @@ def _method_command(
         ]
     if method == "ostmeyer":
         return [
-            sys.executable,
+            *_python_command_prefix(method),
             "-u",
             "-m",
             "evals.ostmeyer_2019_disease_classification",
