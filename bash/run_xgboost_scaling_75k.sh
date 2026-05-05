@@ -2,14 +2,14 @@
 set -uo pipefail
 
 # CPU-only Ensemble XGBoost scaling runner for depth 75000.
-# Runs Lupus and HIV in parallel.
+# Runs Lupus and HIV in parallel and splits all CPU cores across jobs.
 
 DRY_RUN=false
 SMOKE_TEST=false
 
 SCALING_DEPTH=${SCALING_DEPTH:-75000}
-SCALING_PARALLEL=2
-SCALING_N_JOBS=30
+SCALING_PARALLEL=${SCALING_PARALLEL:-2}
+SCALING_N_JOBS=${SCALING_N_JOBS:-auto}
 DEBUG_REPERTOIRES=0
 
 for arg in "$@"; do
@@ -30,6 +30,18 @@ for arg in "$@"; do
   esac
 done
 
+get_total_cores() {
+  if [[ -n "${SLURM_CPUS_ON_NODE:-}" ]]; then
+    echo "$SLURM_CPUS_ON_NODE"
+  elif [[ -n "${SLURM_CPUS_PER_TASK:-}" ]]; then
+    echo "$SLURM_CPUS_PER_TASK"
+  else
+    nproc
+  fi
+}
+
+TOTAL_CORES=$(get_total_cores)
+
 if $SMOKE_TEST; then
   SCALING_PARALLEL=1
   SCALING_N_JOBS=1
@@ -37,7 +49,20 @@ if $SMOKE_TEST; then
   if [[ "$DEBUG_REPERTOIRES" -eq 0 ]]; then
     DEBUG_REPERTOIRES=6
   fi
+else
+  if [[ "$SCALING_N_JOBS" == "auto" ]]; then
+    SCALING_N_JOBS=$(( TOTAL_CORES / SCALING_PARALLEL ))
+    if [[ "$SCALING_N_JOBS" -lt 1 ]]; then
+      SCALING_N_JOBS=1
+    fi
+  fi
 fi
+
+export OMP_NUM_THREADS="$SCALING_N_JOBS"
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT=${REPO_ROOT:-"$(cd "${SCRIPT_DIR}/.." && pwd)"}
@@ -150,6 +175,7 @@ run_scaling_one() {
 
   echo "[$(date +%T)] start scaling $disease depth=$SCALING_DEPTH slot=$slot"
   echo "[$(date +%T)] LOG_FILE ${disease} depth=${SCALING_DEPTH}: $log"
+
   local debug_args=()
   if [[ "$DEBUG_REPERTOIRES" -gt 0 ]]; then
     debug_args=(--debug --debug_repertoires "$DEBUG_REPERTOIRES")
@@ -166,6 +192,7 @@ run_scaling_one() {
       --xgboost_device cpu \
       --output_json "$output" \
       "${debug_args[@]}"
+
   local status=$?
   echo "[$(date +%T)] done scaling $disease depth=$SCALING_DEPTH exit=$status log=$log"
   return "$status"
@@ -175,7 +202,10 @@ overall_status=0
 scaling_diseases=("Lupus" "HIV")
 
 prepare_scaling_depth_indices || overall_status=1
-echo "[$(date +%T)] Starting depth ${SCALING_DEPTH} scaling (${#scaling_diseases[@]} jobs, parallel=$SCALING_PARALLEL, n_jobs/job=$SCALING_N_JOBS)"
+
+echo "[$(date +%T)] Starting depth ${SCALING_DEPTH} scaling"
+echo "[$(date +%T)] total_cores=$TOTAL_CORES parallel=$SCALING_PARALLEL n_jobs/job=$SCALING_N_JOBS estimated_threads=$((SCALING_PARALLEL * SCALING_N_JOBS))"
+
 if [[ "$overall_status" -eq 0 ]]; then
   run_pool "$SCALING_PARALLEL" run_scaling_one "${scaling_diseases[@]}" || overall_status=1
 fi
@@ -183,4 +213,5 @@ fi
 echo "[$(date +%T)] Done. status=$overall_status"
 echo "Logs:"
 echo "  scaling:     $SCALING_LOGDIR"
+
 exit "$overall_status"
