@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # CPU-only Ensemble XGBoost scaling runner for depth 75000.
-# Runs Lupus and HIV in parallel and splits all CPU cores across jobs.
+# Runs Lupus and HIV in parallel and automatically uses all available CPU cores.
 
 DRY_RUN=false
 SMOKE_TEST=false
@@ -20,9 +20,15 @@ for arg in "$@"; do
     --smoke_test)
       SMOKE_TEST=true
       ;;
-    --scaling_parallel=*) SCALING_PARALLEL="${arg#*=}" ;;
-    --scaling_n_jobs=*) SCALING_N_JOBS="${arg#*=}" ;;
-    --debug_repertoires=*) DEBUG_REPERTOIRES="${arg#*=}" ;;
+    --scaling_parallel=*)
+      SCALING_PARALLEL="${arg#*=}"
+      ;;
+    --scaling_n_jobs=*)
+      SCALING_N_JOBS="${arg#*=}"
+      ;;
+    --debug_repertoires=*)
+      DEBUG_REPERTOIRES="${arg#*=}"
+      ;;
     *)
       echo "Unknown argument: $arg" >&2
       exit 2
@@ -46,18 +52,21 @@ if $SMOKE_TEST; then
   SCALING_PARALLEL=1
   SCALING_N_JOBS=1
   DEBUG_REPERTOIRES="${DEBUG_REPERTOIRES:-6}"
+
   if [[ "$DEBUG_REPERTOIRES" -eq 0 ]]; then
     DEBUG_REPERTOIRES=6
   fi
 else
   if [[ "$SCALING_N_JOBS" == "auto" ]]; then
     SCALING_N_JOBS=$(( TOTAL_CORES / SCALING_PARALLEL ))
+
     if [[ "$SCALING_N_JOBS" -lt 1 ]]; then
       SCALING_N_JOBS=1
     fi
   fi
 fi
 
+# Prevent thread oversubscription
 export OMP_NUM_THREADS="$SCALING_N_JOBS"
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -66,9 +75,11 @@ export VECLIB_MAXIMUM_THREADS=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT=${REPO_ROOT:-"$(cd "${SCRIPT_DIR}/.." && pwd)"}
+
 METADATA=${REPO_ROOT}/data/malid_clean/metadata.tsv
 REPERTOIRE_DIR=${REPO_ROOT}/data/malid_clean/TCR
 DEPTH_INDICES=${REPO_ROOT}/data/depth_indices/depth_indices_max75k.json.gz
+
 RESULTS=${REPO_ROOT}/results
 PYTHON_BIN=${PYTHON_BIN:-python}
 
@@ -95,11 +106,13 @@ import sys
 src, dst, depth_arg = sys.argv[1:]
 keep = [int(depth_arg)]
 
-with (gzip.open(src, "rt", encoding="utf-8") if src.endswith(".gz") else open(src, "r", encoding="utf-8")) as f:
+with (gzip.open(src, "rt", encoding="utf-8") if src.endswith(".gz")
+      else open(src, "r", encoding="utf-8")) as f:
     data = json.load(f)
 
 available = set(data.get("depths", []))
 missing = [d for d in keep if d not in available]
+
 if missing:
     raise SystemExit(f"Requested depths not present in {src}: {missing}")
 
@@ -117,6 +130,7 @@ run_cmd() {
   shift
 
   echo "[$(date +%T)] log: $log"
+
   printf '[%s] command:' "$(date +%T)" >"$log"
   printf ' %q' "$@" >>"$log"
   printf '\n' >>"$log"
@@ -135,12 +149,14 @@ run_pool() {
   local max_parallel="$1"
   local job_func="$2"
   shift 2
+
   local specs=("$@")
   local fifo
   local status=0
 
   fifo=$(mktemp -u)
   mkfifo "$fifo"
+
   exec 3<>"$fifo"
   rm -f "$fifo"
 
@@ -150,9 +166,11 @@ run_pool() {
 
   for spec in "${specs[@]}"; do
     read -r slot <&3
+
     {
       "$job_func" "$spec" "$slot"
       job_status=$?
+
       echo "$slot" >&3
       exit "$job_status"
     } &
@@ -164,19 +182,23 @@ run_pool() {
 
   exec 3>&-
   exec 3<&-
+
   return "$status"
 }
 
 run_scaling_one() {
   local disease="$1"
   local slot="$2"
+
   local log="${SCALING_LOGDIR}/ensemble_xgboost_scaling_${disease}_depth${SCALING_DEPTH}_${RUN_TS}.log"
+
   local output="${RESULTS}/ensemble_xgboost_${disease}_scaling_depth${SCALING_DEPTH}_${RUN_TS}.json"
 
   echo "[$(date +%T)] start scaling $disease depth=$SCALING_DEPTH slot=$slot"
   echo "[$(date +%T)] LOG_FILE ${disease} depth=${SCALING_DEPTH}: $log"
 
   local debug_args=()
+
   if [[ "$DEBUG_REPERTOIRES" -gt 0 ]]; then
     debug_args=(--debug --debug_repertoires "$DEBUG_REPERTOIRES")
   fi
@@ -191,10 +213,12 @@ run_scaling_one() {
       --xgboost_n_jobs "$SCALING_N_JOBS" \
       --xgboost_device cpu \
       --output_json "$output" \
-      "${debug_args[@]}"
+      ${debug_args[@]+"${debug_args[@]}"}
 
   local status=$?
+
   echo "[$(date +%T)] done scaling $disease depth=$SCALING_DEPTH exit=$status log=$log"
+
   return "$status"
 }
 
