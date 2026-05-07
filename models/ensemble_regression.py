@@ -62,7 +62,8 @@ class Gapped_4mer_VJgene:
                  canonicalize_genes=False,
                  submodel='ensemble',
                  kmer_size=4,
-                 use_gaps=True):
+                 use_gaps=True,
+                 n_jobs=None):
         """
         Args:
             val_split: Fraction of training data held out internally for alpha tuning.
@@ -86,6 +87,7 @@ class Gapped_4mer_VJgene:
             kmer_size: Length of k-mers to extract (default: 4).
             use_gaps: If True, include single-position gapped variants of each
                       k-mer. If False, extract plain k-mers only (default: True).
+            n_jobs: Number of jobs to request for logistic-regression fits.
         """
         if submodel not in self.VALID_SUBMODELS:
             raise ValueError(f"Invalid submodel '{submodel}'. "
@@ -104,6 +106,7 @@ class Gapped_4mer_VJgene:
         self.indices_map = indices_map
         self.ignore_allele = ignore_allele
         self.canonicalize_genes = canonicalize_genes
+        self.n_jobs = n_jobs
 
         # Caches
         self._repertoire_cache = {}
@@ -254,7 +257,7 @@ class Gapped_4mer_VJgene:
                 X_tr = scaler.fit_transform(X[tr_idx])
                 X_vl = scaler.transform(X[vl_idx])
                 clf = LogisticRegression(C=c, penalty='l1', solver='liblinear',
-                                         max_iter=1000)
+                                         max_iter=1000, n_jobs=self.n_jobs)
                 clf.fit(X_tr, y[tr_idx])
                 probs = clf.predict_proba(X_vl)[:, 1]
                 # Skip fold if only one class present
@@ -338,7 +341,8 @@ class Gapped_4mer_VJgene:
             self.kmer_scaler = StandardScaler(with_mean=False)
             X_kmer_base_sc = self.kmer_scaler.fit_transform(X_kmer_base)
             self.kmer_model = LogisticRegression(C=best_c_kmer, penalty='l1',
-                                                  solver='liblinear', max_iter=1000)
+                                                  solver='liblinear', max_iter=1000,
+                                                  n_jobs=self.n_jobs)
             self.kmer_model.fit(X_kmer_base_sc, y_base)
             kmer_nonzero = np.flatnonzero(self.kmer_model.coef_.ravel())
             kmer_feature_names = self.kmer_vectorizer.get_feature_names_out()
@@ -356,7 +360,8 @@ class Gapped_4mer_VJgene:
             self.vj_scaler = StandardScaler(with_mean=False)
             X_vj_base_sc = self.vj_scaler.fit_transform(X_vj_base)
             self.vj_model = LogisticRegression(C=best_c_vj, penalty='l1',
-                                                solver='liblinear', max_iter=1000)
+                                                solver='liblinear', max_iter=1000,
+                                                n_jobs=self.n_jobs)
             self.vj_model.fit(X_vj_base_sc, y_base)
             vj_nonzero = np.flatnonzero(self.vj_model.coef_.ravel())
             vj_feature_names = self.vj_vectorizer.get_feature_names_out()

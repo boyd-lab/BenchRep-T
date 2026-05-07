@@ -41,7 +41,7 @@ class EnsembleRegressionEvaluator:
                  v_gene_col='v_call', j_gene_col='j_call',
                  subsample_fraction=1.0, subsample_seed=7,
                  indices_map=None, submodel='ensemble', debug=False,
-                 kmer_size=4, use_gaps=True):
+                 kmer_size=4, use_gaps=True, n_jobs=None):
         """
         Args:
             val_split: Internal val fraction used by the model for alpha tuning.
@@ -67,6 +67,7 @@ class EnsembleRegressionEvaluator:
         self.submodel = submodel
         self.kmer_size = kmer_size
         self.use_gaps = use_gaps
+        self.n_jobs = n_jobs
         self.model = None
         self.canonicalize_genes = False
         self.debug = debug
@@ -286,6 +287,7 @@ class EnsembleRegressionEvaluator:
                 submodel=self.submodel,
                 kmer_size=self.kmer_size,
                 use_gaps=self.use_gaps,
+                n_jobs=self.n_jobs,
             )
 
             train_result = self.model.train(train_files, train_labels)
@@ -382,6 +384,9 @@ if __name__ == "__main__":
                         help='Internal val fraction for alpha tuning (default: 0.2)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
                         help='CV folds for C tuning (default: 5)')
+    parser.add_argument('--max_folds', type=int, default=None,
+                        help='Limit the number of outer evaluation folds to run. '
+                             'Useful for full-data resource probes, e.g. --max_folds 1.')
     parser.add_argument('--submodel', type=str, default='ensemble',
                         choices=['ensemble', 'kmer_only', 'vj_only'],
                         help='Sub-model to evaluate: ensemble (default), '
@@ -414,6 +419,8 @@ if __name__ == "__main__":
     parser.add_argument('--no_gaps', action='store_true',
                         help='Disable single-position gapped k-mer variants; '
                              'extract plain k-mers only')
+    parser.add_argument('--n_jobs', type=int, default=None,
+                        help='Number of jobs to request for logistic-regression fits')
     parser.add_argument('--ext_metadata_path', type=str, default=None,
                         help='Optional external-cohort metadata TSV (MAL-ID column style). '
                              'When set, external samples are merged into the same fold-based '
@@ -425,6 +432,10 @@ if __name__ == "__main__":
                         default='{participant_label}_TCRB.tsv',
                         help='Filename template for external repertoires.')
     args = parser.parse_args()
+    if args.max_folds is not None and args.max_folds < 1:
+        parser.error('--max_folds must be >= 1')
+
+    n_outer_folds = args.max_folds if args.max_folds is not None else 3
 
     evaluator = EnsembleRegressionEvaluator(
         val_split=args.val_split,
@@ -433,6 +444,7 @@ if __name__ == "__main__":
         debug=args.debug,
         kmer_size=args.kmer_size,
         use_gaps=not args.no_gaps,
+        n_jobs=args.n_jobs,
     )
 
     if args.random_baseline_seeds:
@@ -450,6 +462,7 @@ if __name__ == "__main__":
                 random_baseline=True,
                 random_baseline_seed=seed,
                 debug_repertoires=args.debug_repertoires,
+                n_folds=n_outer_folds,
                 ext_metadata_path=args.ext_metadata_path,
                 ext_data_dir=args.ext_data_dir,
                 ext_file_template=args.ext_file_template,
@@ -484,6 +497,7 @@ if __name__ == "__main__":
             require_demographics=args.require_demographics,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             debug_repertoires=args.debug_repertoires,
+            n_folds=n_outer_folds,
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,
             ext_file_template=args.ext_file_template,
