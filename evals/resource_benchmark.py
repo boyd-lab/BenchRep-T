@@ -1,5 +1,5 @@
 """
-Wall-time and peak-memory benchmark wrapper for AIRR-Bench methods.
+Wall-time and peak-memory benchmark wrapper for BenchRep-T methods.
 
 This intentionally measures the existing command-line evals as black boxes, so
 the numbers include data loading, featurization, cross-validation training, and

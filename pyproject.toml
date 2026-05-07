@@ -1,5 +1,5 @@
 [project]
-name = "airr-bench"
+name = "benchrep-t"
 version = "0.1.0"
 description = "Benchmarking framework for TCR repertoire-based disease classification"
 requires-python = ">=3.10"
@@ -37,5 +37,5 @@ drivers = [
 ]
 # All optional dependencies
 all = [
-    "airr-bench[giana,abmil,deeptcr,drivers]",
+    "benchrep-t[giana,abmil,deeptcr,drivers]",
 ]

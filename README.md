@@ -1,4 +1,4 @@
-# AIRRBench
+# BenchRep-T
 
 > 🚧 **Under active construction** 🚧
 
@@ -6,7 +6,7 @@ A unified benchmark for TCRβ repertoire-based disease classification, harmonizi
 
 ## Overview
 
-AIRRBench covers seven diseases organized into three groups:
+BenchRep-T covers seven diseases organized into three groups:
 - **Mal-ID-only**: HIV, Lupus, Influenza, COVID-19
 - **Hybrid (Mal-ID + external)**: T1D (pooled with the Mitchell et al. cohort)
 - **External-only**: Tuberculosis progression, Rheumatoid Arthritis
