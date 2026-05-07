@@ -1,4 +1,4 @@
-# AIRRBench
+# BenchRep-T
 
 > 🚧 **Under active construction** 🚧
 
@@ -6,7 +6,7 @@ A unified benchmark for TCRβ repertoire-based disease classification, harmonizi
 
 ## Overview
 
-AIRRBench covers seven diseases organized into three groups:
+BenchRep-T covers seven diseases organized into three groups:
 - **Mal-ID-only**: HIV, Lupus, Influenza, COVID-19
 - **Hybrid (Mal-ID + external)**: T1D (pooled with the Mitchell et al. cohort)
 - **External-only**: Tuberculosis progression, Rheumatoid Arthritis
@@ -41,8 +41,8 @@ scripts/                         Misc analysis helpers
 
 ### Engineered repertoire-level features
 
-- **V/J + gkmer (LogReg)** — Each repertoire is summarized as two feature dictionaries: V/J gene usage and gapped 4-mer frequencies. An L1-penalized logistic regression is trained on each, and the two predictions are linearly combined with a tuned weight α.
-- **V/J + gkmer (XGBoost)** — Same feature decomposition as above, with each base learner replaced by a gradient-boosted tree classifier tuned via two-stage grid search with early stopping.
+- **V/J + gapped-kmer (LogReg)** — Each repertoire is summarized as two feature dictionaries: V/J gene usage and gapped 4-mer frequencies. An L1-penalized logistic regression is trained on each, and the two predictions are linearly combined with a tuned weight α.
+- **V/J + gapped-kmer (XGBoost)** — Same feature decomposition as above, with each base learner replaced by a gradient-boosted tree classifier tuned via two-stage grid search with early stopping.
 
 ### Similarity / clustering-based
 
@@ -115,19 +115,6 @@ File naming convention: `part_table_<participant>_<specimen>.tsv.gz`
 | `malid_cross_validation_fold_id_when_in_test_set` | Pre-assigned CV fold (0, 1, or 2) |
 | `age`, `sex`, `ancestry` | Demographics (Mal-ID; subset of specimens) |
 
-### Directory Layout
-
-```
-data/
-├── metadata_malid.tsv               Mal-ID annotations and CV fold assignments
-├── metadata_{T1D,RA,Tb}_final.tsv   immunoSEQ cohort metadata
-├── malid_clean/TCR/                 Mal-ID per-specimen repertoires (.tsv.gz)
-├── vdjdb_driver_seqs.csv            VDJdb ground truth driver sequences
-├── vdjdb_matches_expanded.csv       VDJdb-to-Mal-ID Levenshtein matches
-├── depth_indices_max75k.json.gz     Pre-computed nested subsampling indices
-├── external_raw/                    immunoSEQ repertoires (Adaptive format)
-└── external_processed/              immunoSEQ repertoires (converted to AIRR)
-```
 
 ## Preprocessing
 
