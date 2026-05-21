@@ -525,6 +525,8 @@ if __name__ == '__main__':
                         help='Directory for DeepRC checkpoints/tensorboard files')
     parser.add_argument('--batch_size', type=int, default=4,
                         help='Repertoires per mini-batch (default: 4)')
+    parser.add_argument('--n_worker_processes', type=int, default=4,
+                        help='DataLoader worker processes (default: 4)')
     parser.add_argument('--sample_n_sequences', type=int, default=int(1e4),
                         help='Sequences sampled per repertoire during training (default: 10000)')
     parser.add_argument('--max_seq_len', type=int, default=50,
@@ -557,6 +559,7 @@ if __name__ == '__main__':
         device=args.device,
         results_dir=args.results_dir,
         batch_size=args.batch_size,
+        n_worker_processes=args.n_worker_processes,
         sample_n_sequences=args.sample_n_sequences,
         max_seq_len=args.max_seq_len,
         healthy_label=args.healthy_label,

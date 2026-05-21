@@ -322,6 +322,8 @@ def _method_command(
             str(method_results_dir / "deeprc"),
             "--batch_size",
             str(args.deeprc_batch_size),
+            "--n_worker_processes",
+            str(args.n_jobs),
             *_budget_flags(method, args.budget, args),
         ]
     if method == "deeptcr":
@@ -337,6 +339,8 @@ def _method_command(
             str(args.deeptcr_batch_size),
             "--device",
             "0",
+            "--n_jobs",
+            str(args.n_jobs),
             *_budget_flags(method, args.budget, args),
         ]
     if method == "abmil":
@@ -487,6 +491,8 @@ def _run_one(method: str, args: argparse.Namespace) -> BenchmarkResult:
     command = _method_command(method, args, output_csv, metadata, repertoire_dir, result_dir)
 
     env = os.environ.copy()
+    for thread_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        env.setdefault(thread_var, str(args.n_threads))
     uses_gpu = _method_uses_gpu(method, args)
     if args.gpu is not None and uses_gpu:
         env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)

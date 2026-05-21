@@ -211,3 +211,6 @@ data/
 
 # bash/
 plots/
+bash/
+logs/
+results/
