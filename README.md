@@ -2,7 +2,7 @@
 
 > 🚧 **Under active construction** 🚧
 
-A unified benchmark for TCRβ repertoire-based disease classification, harmonizing the Mal-ID cohort with three external immunoSEQ cohorts (T1D, TB, RA) into a single AIRR-compliant schema and evaluating a representative set of statistical, feature-engineered, and deep-learning methods on identical inputs and splits.
+A unified benchmark for TCRβ repertoire-based disease classification, harmonizing the Mal-ID cohort (Zaslavsky et al. 2025) with three immunoSEQ cohorts (T1D, TB, RA) into a single AIRR-compliant schema and evaluating a representative set of statistical, feature-engineered, and deep-learning methods on identical inputs and splits.
 
 ## Overview
 
