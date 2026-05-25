@@ -311,6 +311,7 @@ def _method_command(
         str(output_csv),
     ]
 
+    max_folds_flags = ["--max_folds", str(args.max_folds)] if args.max_folds is not None else []
     if method == "deeprc":
         return [
             *_python_command_prefix(method),
@@ -324,6 +325,7 @@ def _method_command(
             str(args.deeprc_batch_size),
             "--n_worker_processes",
             str(args.n_jobs),
+            *max_folds_flags,
             *_budget_flags(method, args.budget, args),
         ]
     if method == "deeptcr":
@@ -341,6 +343,7 @@ def _method_command(
             "0",
             "--n_jobs",
             str(args.n_jobs),
+            *max_folds_flags,
             *_budget_flags(method, args.budget, args),
         ]
     if method == "abmil":
@@ -354,6 +357,7 @@ def _method_command(
             args.abmil_features,
             "--model_save_dir",
             str(method_results_dir / "abmil_models"),
+            *max_folds_flags,
             *_budget_flags(method, args.budget, args),
         ]
     if method == "ensemble_xgboost":
@@ -417,6 +421,7 @@ def _method_command(
             "--exact",
             "--threshold_iso",
             str(args.giana_threshold_iso),
+            *max_folds_flags,
             *_budget_flags(method, args.budget, args),
         ]
         if args.giana_use_gpu:
@@ -455,6 +460,8 @@ def _method_command(
             str(args.malid_batch_size),
             "--output-dir",
             str(method_results_dir / "malid_lite_outputs"),
+            *(["--fold-ids"] + [str(i) for i in range(args.max_folds)] if args.max_folds is not None else []),
+            *(["--retrain-base-models"] if args.malid_retrain_base_models else []),
         ]
     if method == "emerson":
         return [
@@ -463,6 +470,7 @@ def _method_command(
             "-m",
             "evals.emerson_2017_disease_classification",
             *common,
+            *max_folds_flags,
         ]
     if method == "ostmeyer":
         return [
@@ -473,6 +481,7 @@ def _method_command(
             *common,
             "--n_restarts",
             str(args.ostmeyer_n_restarts),
+            *max_folds_flags,
         ]
     raise ValueError(f"Unknown method: {method}")
 
@@ -492,7 +501,7 @@ def _run_one(method: str, args: argparse.Namespace) -> BenchmarkResult:
 
     env = os.environ.copy()
     for thread_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-        env.setdefault(thread_var, str(args.n_threads))
+        env[thread_var] = str(args.n_threads)
     uses_gpu = _method_uses_gpu(method, args)
     if args.gpu is not None and uses_gpu:
         env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
@@ -671,11 +680,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--regression_submodel", default="kmer_only", choices=["ensemble", "kmer_only", "vj_only"])
     parser.add_argument("--kmer_size", type=int, default=4)
     parser.add_argument("--no_gaps", action="store_true")
-    parser.add_argument("--n_jobs", type=int, default=10)
+    parser.add_argument("--n_jobs", type=int, default=50)
     parser.add_argument("--max_folds", type=int, default=None,
-                        help="Limit outer folds for ensemble_xgboost/ensemble_regression "
-                             "full-data resource probes, e.g. --max_folds 1.")
-    parser.add_argument("--n_threads", type=int, default=10)
+                        help="Limit cross-validation to this many folds for all methods. "
+                             "Useful for resource probes, e.g. --max_folds 1.")
+    parser.add_argument("--n_threads", type=int, default=50)
     parser.add_argument("--xgb_device", default="cpu", choices=["cpu", "cuda", "gpu"])
     parser.add_argument("--giana_max_seqs_per_specimen", type=int, default=10000)
     parser.add_argument("--giana_threshold_iso", type=float, default=7)
@@ -689,9 +698,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--malid_reference_class", default="Healthy/Background")
     parser.add_argument("--malid_model2_abstention_strategy", default="fill_models13_mean",
                         choices=["ensemble_abstain", "fill_0.5", "fill_models13_mean"])
-    parser.add_argument("--malid_n_jobs", type=int, default=10)
+    parser.add_argument("--malid_n_jobs", type=int, default=50)
     parser.add_argument("--malid_device", default="cuda")
     parser.add_argument("--malid_batch_size", type=int, default=64)
+    parser.add_argument("--malid_retrain_base_models", action="store_true",
+                        help="Force retrain all Mal-ID base models even when artifacts exist.")
     parser.add_argument("--ostmeyer_n_restarts", type=int, default=200)
     args = parser.parse_args()
     if args.max_folds is not None and args.max_folds < 1:

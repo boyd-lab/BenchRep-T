@@ -1093,7 +1093,14 @@ if __name__ == '__main__':
     parser.add_argument('--ext_file_template', type=str,
                         default='{participant_label}_TCRB.tsv',
                         help='Filename template for external repertoires.')
+    parser.add_argument('--max_folds', type=int, default=None,
+                        help='Limit cross-validation to this many folds (default: all 3). '
+                             'Useful for resource probes, e.g. --max_folds 1.')
     args = parser.parse_args()
+
+    if args.max_folds is not None and args.max_folds < 1:
+        parser.error('--max_folds must be >= 1')
+    n_outer_folds = args.max_folds if args.max_folds is not None else 3
 
     evaluator = GIANAEvaluator(
         use_v_gene=not args.no_v_gene,
@@ -1119,6 +1126,7 @@ if __name__ == '__main__':
         file_suffix=args.file_suffix,
         disease_col=args.disease_col,
         fold_col=args.fold_col,
+        n_folds=n_outer_folds,
         covariate_adjust=args.covariate_adjust,
         adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
         ext_metadata_path=args.ext_metadata_path,
