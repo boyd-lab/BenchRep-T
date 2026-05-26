@@ -8,8 +8,8 @@ A unified benchmark for TCRβ repertoire-based disease classification, harmonizi
 
 BenchRep-T covers seven diseases organized into three groups:
 - **Mal-ID-only**: HIV, Lupus, Influenza, COVID-19
-- **Hybrid (Mal-ID + external)**: T1D (pooled with the Mitchell et al. cohort)
-- **External-only**: Tuberculosis progression, Rheumatoid Arthritis
+- **Hybrid (Mal-ID + immunoSEQ)**: T1D (Zaslavsky et al. pooled with the Mitchell et al. cohort)
+- **immunoSEQ**: Tuberculosis progression, Rheumatoid Arthritis
 
 It defines four evaluation tasks: disease classification, driver-sequence identification, sequencing-depth scaling, and demographic-confounding analysis. All methods consume identical AIRR-formatted repertoire files and are scored on pre-assigned 3-fold cross-validation splits.
 
