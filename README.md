@@ -161,7 +161,7 @@ For GPU-accelerated models (ABMIL, DeepTCR), ensure CUDA-compatible versions of 
 
 ## Preprint
 
-If you use BenchRep-T, please cite:
+The BenchRep-T preprint is available [here](https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1.abstract) with accompanying citation:
 
 ```bibtex
 @article{im2026benchrep,
@@ -173,5 +173,3 @@ If you use BenchRep-T, please cite:
   publisher={Cold Spring Harbor Laboratory}
 }
 ```
-
-[https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1.abstract](https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1.abstract)
