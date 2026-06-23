@@ -1,4 +1,4 @@
-# BenchRep-T
+# BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics
 
 > 🚧 **Under active construction** 🚧
 
