@@ -18,13 +18,18 @@ Transformations applied:
   9.  Drop rows with "unresolved" v_call, j_call, or cdr3_aa
   10. Drop rows with missing/empty v_call, j_call, or cdr3_aa
   11. Drop rows whose CDR3 contains non-standard AA characters (*, X, gaps, etc.)
-  12. Add "sequence" column (copy of "nucleotide")
-  13. Add "num_reads" column (copy of "count (templates/reads)")
-  14. If --metadata_file is provided:
+  12. Drop rows lacking gene-level V/J resolution: family-only calls (e.g. TRBV20,
+      TRBJ2) and "unknown". A V call is gene-level if it has a subgroup hyphen
+      (TRBV7-2), is an orphon (TRBV20/OR9-2), or is a recognized singleton family
+      (TRBV28); a J call is gene-level if it has a subgroup (TRBJ2-3). Mirrors the
+      gene-level reference validation in preprocessing/clean_tcr_data.py.
+  13. Add "sequence" column (copy of "nucleotide")
+  14. Add "num_reads" column (copy of "count (templates/reads)")
+  15. If --metadata_file is provided:
       a. Add "repertoire_id" column derived from output filename (matches specimen_label
          in metadata)
       b. Add "participant_label" column looked up from metadata
-  15. If --strip_filename_TCRB_suffix is set, remove "_TCRB" from output filenames
+  16. If --strip_filename_TCRB_suffix is set, remove "_TCRB" from output filenames
 
 Arguments:
   --input_dir               Directory containing raw external repertoire TSV files
@@ -84,6 +89,22 @@ COLUMN_RENAME = {
     'aminoAcid': 'cdr3_aa',
     'vGeneName': 'v_call',
     'jGeneName': 'j_call',
+}
+
+# Some Adaptive/immunoSEQ exports use snake_case column names (the "v2" / sample
+# export variant, e.g. Rawat_T1D) instead of the camelCase names the rest of this
+# script expects. Normalize snake_case → camelCase up front (Step 0) so the
+# downstream pipeline is unchanged. Only applied when the camelCase target is
+# absent, so it is a no-op on the original camelCase exports.
+# For V/J we map the gene-level columns (v_gene/j_gene), matching how vGeneName/
+# jGeneName behave; alleles are stripped downstream regardless.
+INPUT_COLUMN_NORMALIZE = {
+    'amino_acid':    'aminoAcid',
+    'v_gene':        'vGeneName',
+    'j_gene':        'jGeneName',
+    'frame_type':    'sequenceStatus',
+    'rearrangement': 'nucleotide',
+    'templates':     'count (templates/reads)',
 }
 
 # Indistinguishable V genes due to FR3 primers — mirrors GENE_FIXES in
@@ -162,6 +183,28 @@ def cdr3_is_valid(seq):
     if not isinstance(seq, str) or seq == '':
         return False
     return set(seq.upper()).issubset(VALID_AMINO_ACIDS)
+
+
+def is_gene_level_v(gene_name):
+    """True if a harmonized v_call is resolved to a specific gene.
+
+    Gene-level V calls carry a subgroup hyphen (e.g. TRBV7-2), are an orphon
+    (e.g. TRBV20/OR9-2, which also contains a hyphen), or are a recognized
+    singleton family whose gene and family coincide (e.g. TRBV28, TRBV13).
+    Family-only calls (TRBV20, TRBV4, ...) and 'unknown' are not gene-level.
+    """
+    if not isinstance(gene_name, str):
+        return False
+    return '-' in gene_name or gene_name in SINGLETON_TRBV
+
+
+def is_gene_level_j(gene_name):
+    """True if a harmonized j_call is resolved to a specific gene.
+
+    All functional TRBJ genes carry a subgroup (TRBJ1-x / TRBJ2-x), so a call
+    without a hyphen (e.g. TRBJ2, 'unknown') is family-only / unresolved.
+    """
+    return isinstance(gene_name, str) and '-' in gene_name
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +301,17 @@ def preprocess_file(input_path, output_path, repertoire_id=None,
     df = pd.read_csv(input_path, sep='\t')
     n_in = len(df)
 
+    # --- Step 0: Normalize snake_case Adaptive columns to camelCase ---
+    # Handles the "v2" / sample-export variant (amino_acid/v_gene/j_gene/
+    # frame_type/rearrangement/templates). No-op for the camelCase export this
+    # script was originally written for. Only rename when the target is absent.
+    normalize_map = {
+        src: dst for src, dst in INPUT_COLUMN_NORMALIZE.items()
+        if src in df.columns and dst not in df.columns
+    }
+    if normalize_map:
+        df = df.rename(columns=normalize_map)
+
     # --- Step 1: Filter to productive sequences (sequenceStatus == "In") ---
     n_non_productive = 0
     if 'sequenceStatus' in df.columns:
@@ -314,14 +368,29 @@ def preprocess_file(input_path, output_path, repertoire_id=None,
         n_invalid_cdr3 = int((~mask).sum())
         df = df[mask]
 
-    # --- Step 12: Add "sequence" column (copy of "nucleotide") ---
+    # --- Step 12: Drop rows lacking gene-level V/J resolution ---
+    # Family-only calls (e.g. TRBV20, TRBJ2) and 'unknown' cannot be matched to a
+    # specific gene, so they are dropped — mirroring the gene-level reference
+    # validation in preprocessing/clean_tcr_data.py so external and internal
+    # cohorts share the same V/J vocabulary.
+    n_family_only = 0
+    if 'v_call' in df.columns:
+        mask = df['v_call'].apply(is_gene_level_v)
+        n_family_only += int((~mask).sum())
+        df = df[mask]
+    if 'j_call' in df.columns:
+        mask = df['j_call'].apply(is_gene_level_j)
+        n_family_only += int((~mask).sum())
+        df = df[mask]
+
+    # --- Step 13: Add "sequence" column (copy of "nucleotide") ---
     if 'nucleotide' in df.columns:
         df['sequence'] = df['nucleotide']
     else:
         print(f"  WARNING: 'nucleotide' column not found in {os.path.basename(input_path)}, "
               f"cannot create 'sequence' column")
 
-    # --- Step 13: Add "num_reads" column (copy of "count (templates/reads)") ---
+    # --- Step 14: Add "num_reads" column (copy of "count (templates/reads)") ---
     count_col = 'count (templates/reads)'
     if count_col in df.columns:
         df['num_reads'] = df[count_col]
@@ -329,7 +398,7 @@ def preprocess_file(input_path, output_path, repertoire_id=None,
         print(f"  WARNING: '{count_col}' column not found in {os.path.basename(input_path)}, "
               f"cannot create 'num_reads' column")
 
-    # --- Step 14: Add repertoire_id and participant_label ---
+    # --- Step 15: Add repertoire_id and participant_label ---
     if repertoire_id is not None:
         df['repertoire_id'] = repertoire_id
     if participant_label is not None:
@@ -346,6 +415,7 @@ def preprocess_file(input_path, output_path, repertoire_id=None,
         'n_unresolved': n_unresolved,
         'n_missing_field': n_missing,
         'n_invalid_cdr3': n_invalid_cdr3,
+        'n_family_only': n_family_only,
     }
 
 
@@ -533,6 +603,7 @@ def main():
     total_unresolved = sum(s['n_unresolved'] for s in all_stats)
     total_missing = sum(s['n_missing_field'] for s in all_stats)
     total_invalid = sum(s['n_invalid_cdr3'] for s in all_stats)
+    total_family_only = sum(s['n_family_only'] for s in all_stats)
     total_dropped = total_in - total_out
 
     print(f"\nDone. {len(all_stats)} files processed.")
@@ -542,6 +613,7 @@ def main():
     print(f"    unresolved v/j/cdr3:    {total_unresolved:,}")
     print(f"    missing v/j/cdr3:       {total_missing:,}")
     print(f"    invalid CDR3 chars:     {total_invalid:,}")
+    print(f"    family-only v/j (+unk): {total_family_only:,}")
 
     # --- Validate output files ---
     expected_outputs = [f['output_path'] for f in files_to_process]
