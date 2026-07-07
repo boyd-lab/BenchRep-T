@@ -1,15 +1,15 @@
-# BenchRep-T
+# BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics
 
 > 🚧 **Under active construction** 🚧
 
-A unified benchmark for TCRβ repertoire-based disease classification, harmonizing the Mal-ID cohort with three external immunoSEQ cohorts (T1D, TB, RA) into a single AIRR-compliant schema and evaluating a representative set of statistical, feature-engineered, and deep-learning methods on identical inputs and splits.
+A unified benchmark for TCRβ repertoire-based disease classification, harmonizing the Mal-ID cohort (Zaslavsky et al. 2025) with three immunoSEQ cohorts (T1D, TB, RA) into a single AIRR-compliant schema and evaluating a representative set of statistical, feature-engineered, and deep-learning methods on identical inputs and splits.
 
 ## Overview
 
 BenchRep-T covers seven diseases organized into three groups:
 - **Mal-ID-only**: HIV, Lupus, Influenza, COVID-19
-- **Hybrid (Mal-ID + external)**: T1D (pooled with the Mitchell et al. cohort)
-- **External-only**: Tuberculosis progression, Rheumatoid Arthritis
+- **Hybrid (Mal-ID + immunoSEQ)**: T1D (Zaslavsky et al. pooled with the Mitchell et al. cohort)
+- **immunoSEQ**: Tuberculosis progression, Rheumatoid Arthritis
 
 It defines four evaluation tasks: disease classification, driver-sequence identification, sequencing-depth scaling, and demographic-confounding analysis. All methods consume identical AIRR-formatted repertoire files and are scored on pre-assigned 3-fold cross-validation splits.
 
@@ -158,3 +158,18 @@ pip install -e ".[all]"      # all extras
 ```
 
 For GPU-accelerated models (ABMIL, DeepTCR), ensure CUDA-compatible versions of PyTorch or TensorFlow are installed for your system.
+
+## Preprint
+
+The BenchRep-T preprint is available [here](https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1.abstract) with accompanying citation:
+
+```bibtex
+@article{im2026benchrep,
+  title={BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics},
+  author={Im, Chiho and Cohen-Lavi, Liel and Buendia, Alejandro and Kundaje, Anshul and Boyd, Scott D},
+  journal={bioRxiv},
+  pages={2026--06},
+  year={2026},
+  publisher={Cold Spring Harbor Laboratory}
+}
+```

@@ -664,7 +664,13 @@ if __name__ == "__main__":
     parser.add_argument('--ext_file_template', type=str,
                         default='{participant_label}_TCRB.tsv',
                         help='Filename template for external repertoires.')
+    parser.add_argument('--max_folds', type=int, default=None,
+                        help='Limit cross-validation to this many folds (default: all 3). '
+                             'Useful for resource probes, e.g. --max_folds 1.')
     args = parser.parse_args()
+
+    if args.max_folds is not None and args.max_folds < 1:
+        parser.error('--max_folds must be >= 1')
 
     print("Ostmeyer 2019 Disease Classification Evaluation")
     print("=" * 60)
@@ -704,7 +710,7 @@ if __name__ == "__main__":
         file_suffix='.tsv.gz',
         disease_col='disease',
         fold_col='malid_cross_validation_fold_id_when_in_test_set',
-        n_folds=3,
+        n_folds=args.max_folds if args.max_folds is not None else 3,
         random_state=RANDOM_SEED,
         tune_parameters=True,
         abundance_method_candidates=['A', 'B'],

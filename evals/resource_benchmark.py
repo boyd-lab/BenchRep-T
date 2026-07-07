@@ -13,6 +13,8 @@ import csv
 import json
 import os
 import platform
+import select
+import signal
 import shlex
 import shutil
 import subprocess
@@ -33,6 +35,7 @@ ALL_METHODS = (
     "ensemble_xgboost",
     "ensemble_regression",
     "giana",
+    "malid",
     "emerson",
     "ostmeyer",
 )
@@ -44,6 +47,7 @@ DEFAULT_METHOD_CONDA_ENVS = {
     "ensemble_xgboost": "airr-bench",
     "ensemble_regression": "airr-bench",
     "giana": "giana",
+    "malid": "mal_id_lite",
     "emerson": "airr-bench",
     "ostmeyer": "airr-bench",
 }
@@ -55,6 +59,7 @@ METHOD_CONDA_ENV_VARS = {
     "ensemble_xgboost": "XGBOOST_CONDA_ENV",
     "ensemble_regression": "REGRESSION_CONDA_ENV",
     "giana": "GIANA_CONDA_ENV",
+    "malid": "MALID_CONDA_ENV",
     "emerson": "EMERSON_CONDA_ENV",
     "ostmeyer": "OSTMEYER_CONDA_ENV",
 }
@@ -152,7 +157,7 @@ def _query_gpu_memory_mb(gpu_ids: list[int] | None = None) -> dict[int, float]:
 
 
 class ResourceSampler:
-    def __init__(self, pid: int, interval_sec: float, gpu_ids: list[int]):
+    def __init__(self, pid: int, interval_sec: float, gpu_ids: list[int] | None):
         self.pid = pid
         self.interval_sec = interval_sec
         self.gpu_ids = gpu_ids
@@ -176,6 +181,8 @@ class ResourceSampler:
 
     def sample(self) -> None:
         self.peak_cpu_rss_mb = max(self.peak_cpu_rss_mb, _process_tree_rss_mb(self.pid))
+        if self.gpu_ids is None:
+            return
         gpu_values = _query_gpu_memory_mb(self.gpu_ids)
         if gpu_values:
             current_peak = max(gpu_values.values())
@@ -218,6 +225,18 @@ def _env_info() -> dict:
         pass
     info["gpus"] = _query_gpu_memory_mb()
     return info
+
+
+def _method_uses_gpu(method: str, args: argparse.Namespace) -> bool:
+    if method in {"deeprc", "deeptcr", "abmil"}:
+        return True
+    if method == "giana":
+        return bool(args.giana_use_gpu)
+    if method == "malid":
+        return str(args.malid_device).startswith("cuda")
+    if method == "ensemble_xgboost":
+        return args.xgb_device in {"cuda", "gpu"}
+    return False
 
 
 def _base_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
@@ -292,6 +311,7 @@ def _method_command(
         str(output_csv),
     ]
 
+    max_folds_flags = ["--max_folds", str(args.max_folds)] if args.max_folds is not None else []
     if method == "deeprc":
         return [
             *_python_command_prefix(method),
@@ -303,6 +323,9 @@ def _method_command(
             str(method_results_dir / "deeprc"),
             "--batch_size",
             str(args.deeprc_batch_size),
+            "--n_worker_processes",
+            str(args.n_jobs),
+            *max_folds_flags,
             *_budget_flags(method, args.budget, args),
         ]
     if method == "deeptcr":
@@ -318,6 +341,9 @@ def _method_command(
             str(args.deeptcr_batch_size),
             "--device",
             "0",
+            "--n_jobs",
+            str(args.n_jobs),
+            *max_folds_flags,
             *_budget_flags(method, args.budget, args),
         ]
     if method == "abmil":
@@ -331,9 +357,11 @@ def _method_command(
             args.abmil_features,
             "--model_save_dir",
             str(method_results_dir / "abmil_models"),
+            *max_folds_flags,
             *_budget_flags(method, args.budget, args),
         ]
     if method == "ensemble_xgboost":
+        xgb_device = "cuda" if args.xgb_device == "gpu" else args.xgb_device
         command = [
             *_python_command_prefix(method),
             "-u",
@@ -347,11 +375,13 @@ def _method_command(
             "--n_jobs",
             str(args.n_jobs),
             "--xgb_device",
-            args.xgb_device,
+            xgb_device,
             "--model_save_dir",
             str(method_results_dir / "ensemble_xgboost_models"),
             *_budget_flags(method, args.budget, args),
         ]
+        if args.max_folds is not None:
+            command.extend(["--max_folds", str(args.max_folds)])
         if args.no_gaps:
             command.append("--no_gaps")
         return command
@@ -366,13 +396,17 @@ def _method_command(
             args.regression_submodel,
             "--kmer_size",
             str(args.kmer_size),
+            "--n_jobs",
+            str(args.n_jobs),
             *_budget_flags(method, args.budget, args),
         ]
+        if args.max_folds is not None:
+            command.extend(["--max_folds", str(args.max_folds)])
         if args.no_gaps:
             command.append("--no_gaps")
         return command
     if method == "giana":
-        return [
+        command = [
             *_python_command_prefix(method),
             "-u",
             "-m",
@@ -387,7 +421,47 @@ def _method_command(
             "--exact",
             "--threshold_iso",
             str(args.giana_threshold_iso),
+            *max_folds_flags,
             *_budget_flags(method, args.budget, args),
+        ]
+        if args.giana_use_gpu:
+            command.append("--use_gpu")
+        return command
+    if method == "malid":
+        dataset_name = args.malid_dataset_name or f"{args.disease}_only"
+        cache_dir = Path(args.malid_cache_dir) if args.malid_cache_dir else method_results_dir / "malid_cache" / dataset_name
+        return [
+            *_python_command_prefix(method),
+            "-u",
+            str(Path(args.malid_lite_root) / "malid_lite/training/train_ensemble.py"),
+            "--data-dir",
+            str(repertoire_dir),
+            "--metadata-path",
+            str(metadata),
+            "--cache-dir",
+            str(cache_dir),
+            "--dataset-name",
+            dataset_name,
+            "--gene-locus",
+            args.malid_gene_locus,
+            "--classification-mode",
+            "binary",
+            "--diseases",
+            args.disease,
+            "--reference-class",
+            args.malid_reference_class,
+            "--model2-abstention-strategy",
+            args.malid_model2_abstention_strategy,
+            "--n-jobs",
+            str(args.malid_n_jobs),
+            "--model3-device",
+            args.malid_device,
+            "--model3-embedding-batch-size",
+            str(args.malid_batch_size),
+            "--output-dir",
+            str(method_results_dir / "malid_lite_outputs"),
+            *(["--fold-ids"] + [str(i) for i in range(args.max_folds)] if args.max_folds is not None else []),
+            *(["--retrain-base-models"] if args.malid_retrain_base_models else []),
         ]
     if method == "emerson":
         return [
@@ -396,6 +470,7 @@ def _method_command(
             "-m",
             "evals.emerson_2017_disease_classification",
             *common,
+            *max_folds_flags,
         ]
     if method == "ostmeyer":
         return [
@@ -406,6 +481,7 @@ def _method_command(
             *common,
             "--n_restarts",
             str(args.ostmeyer_n_restarts),
+            *max_folds_flags,
         ]
     raise ValueError(f"Unknown method: {method}")
 
@@ -424,15 +500,33 @@ def _run_one(method: str, args: argparse.Namespace) -> BenchmarkResult:
     command = _method_command(method, args, output_csv, metadata, repertoire_dir, result_dir)
 
     env = os.environ.copy()
-    if args.gpu is not None:
+    for thread_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        env[thread_var] = str(args.n_threads)
+    uses_gpu = _method_uses_gpu(method, args)
+    if args.gpu is not None and uses_gpu:
         env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
+    elif uses_gpu and env.get("CUDA_VISIBLE_DEVICES") == "":
+        raise RuntimeError(
+            f"{method} is configured to use GPU, but CUDA_VISIBLE_DEVICES is empty. "
+            "Pass --gpu or unset CUDA_VISIBLE_DEVICES."
+        )
+    elif not uses_gpu:
+        env["CUDA_VISIBLE_DEVICES"] = ""
     if method == "deeptcr":
         env.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    if method == "malid":
+        malid_root = str(Path(args.malid_lite_root))
+        env["PYTHONPATH"] = (
+            malid_root
+            if not env.get("PYTHONPATH")
+            else f"{malid_root}{os.pathsep}{env['PYTHONPATH']}"
+        )
 
-    gpu_ids = [args.gpu] if args.gpu is not None else []
-    gpu_baseline = _query_gpu_memory_mb(gpu_ids)
+    gpu_ids = ([args.gpu] if args.gpu is not None else []) if uses_gpu else None
+    gpu_baseline = _query_gpu_memory_mb(gpu_ids) if gpu_ids is not None else {}
     start_time = datetime.now(timezone.utc).isoformat()
     start = time.perf_counter()
+    timed_out = False
 
     print(f"\n=== Benchmarking {method} ({args.disease}, budget={args.budget}) ===")
     print("Command:", " ".join(shlex.quote(x) for x in command))
@@ -446,16 +540,49 @@ def _run_one(method: str, args: argparse.Namespace) -> BenchmarkResult:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         sampler = ResourceSampler(proc.pid, args.sample_interval_sec, gpu_ids)
         sampler.start()
         assert proc.stdout is not None
-        for line in proc.stdout:
-            log.write(line)
-            if args.echo:
-                print(line, end="")
-        returncode = proc.wait()
-        sampler.stop()
+        try:
+            while True:
+                if args.max_runtime_sec is not None and (time.perf_counter() - start) >= args.max_runtime_sec:
+                    timed_out = True
+                    msg = (
+                        f"\n[resource_benchmark] max_runtime_sec={args.max_runtime_sec} "
+                        "reached; terminating method and saving sampled peaks.\n"
+                    )
+                    log.write(msg)
+                    if args.echo:
+                        print(msg, end="")
+                    os.killpg(proc.pid, signal.SIGTERM)
+                    try:
+                        proc.wait(timeout=args.terminate_grace_sec)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                    break
+
+                ready, _, _ = select.select([proc.stdout], [], [], 0.2)
+                if ready:
+                    line = proc.stdout.readline()
+                    if line:
+                        log.write(line)
+                        if args.echo:
+                            print(line, end="")
+                    elif proc.poll() is not None:
+                        break
+                elif proc.poll() is not None:
+                    break
+
+            for line in proc.stdout:
+                log.write(line)
+                if args.echo:
+                    print(line, end="")
+            returncode = proc.wait()
+        finally:
+            sampler.stop()
 
     end = time.perf_counter()
     end_time = datetime.now(timezone.utc).isoformat()
@@ -478,9 +605,14 @@ def _run_one(method: str, args: argparse.Namespace) -> BenchmarkResult:
         command=command,
         log_path=str(log_path),
         output_csv=str(output_csv),
-        gpu_ids=gpu_ids,
+        gpu_ids=gpu_ids or [],
         sample_interval_sec=args.sample_interval_sec,
-        env_info=_env_info(),
+        env_info={
+            **_env_info(),
+            "timed_out": timed_out,
+            "max_runtime_sec": args.max_runtime_sec,
+            "terminate_grace_sec": args.terminate_grace_sec,
+        },
     )
     result_json = method_dir / "resource_benchmark.json"
     result_json.write_text(json.dumps(asdict(result), indent=2))
@@ -532,6 +664,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run_id", default=None)
     parser.add_argument("--gpu", type=int, default=None, help="Physical GPU id to expose via CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--sample_interval_sec", type=float, default=0.5)
+    parser.add_argument("--max_runtime_sec", type=float, default=None,
+                        help="Terminate each method after this many seconds but still write sampled peaks.")
+    parser.add_argument("--terminate_grace_sec", type=float, default=30.0,
+                        help="Seconds to wait after SIGTERM before SIGKILL when max_runtime_sec is reached.")
     parser.add_argument("--echo", action="store_true", help="Also stream method logs to the terminal.")
     parser.add_argument("--fail_fast", action="store_true")
 
@@ -544,13 +680,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--regression_submodel", default="kmer_only", choices=["ensemble", "kmer_only", "vj_only"])
     parser.add_argument("--kmer_size", type=int, default=4)
     parser.add_argument("--no_gaps", action="store_true")
-    parser.add_argument("--n_jobs", type=int, default=10)
-    parser.add_argument("--n_threads", type=int, default=10)
+    parser.add_argument("--n_jobs", type=int, default=50)
+    parser.add_argument("--max_folds", type=int, default=None,
+                        help="Limit cross-validation to this many folds for all methods. "
+                             "Useful for resource probes, e.g. --max_folds 1.")
+    parser.add_argument("--n_threads", type=int, default=50)
     parser.add_argument("--xgb_device", default="cpu", choices=["cpu", "cuda", "gpu"])
     parser.add_argument("--giana_max_seqs_per_specimen", type=int, default=10000)
     parser.add_argument("--giana_threshold_iso", type=float, default=7)
+    parser.add_argument("--giana_use_gpu", action="store_true", help="Use GPU FAISS for GIANA.")
+    parser.add_argument("--malid_lite_root", default=str(AIRR_ROOT.parent / "Mal-ID-Lite"))
+    parser.add_argument("--malid_cache_dir", default=None,
+                        help="Fresh Mal-ID cache directory. Default: run-specific method output cache.")
+    parser.add_argument("--malid_dataset_name", default=None,
+                        help="Mal-ID dataset name. Default: <disease>_only.")
+    parser.add_argument("--malid_gene_locus", default="TCR", choices=["TCR", "BCR"])
+    parser.add_argument("--malid_reference_class", default="Healthy/Background")
+    parser.add_argument("--malid_model2_abstention_strategy", default="fill_models13_mean",
+                        choices=["ensemble_abstain", "fill_0.5", "fill_models13_mean"])
+    parser.add_argument("--malid_n_jobs", type=int, default=50)
+    parser.add_argument("--malid_device", default="cuda")
+    parser.add_argument("--malid_batch_size", type=int, default=64)
+    parser.add_argument("--malid_retrain_base_models", action="store_true",
+                        help="Force retrain all Mal-ID base models even when artifacts exist.")
     parser.add_argument("--ostmeyer_n_restarts", type=int, default=200)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_folds is not None and args.max_folds < 1:
+        parser.error("--max_folds must be >= 1")
+    return args
 
 
 def main() -> int:

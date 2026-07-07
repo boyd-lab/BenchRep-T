@@ -396,6 +396,9 @@ if __name__ == '__main__':
     parser.add_argument('--submodel', type=str, default='ensemble',
                         choices=['ensemble', 'kmer_only', 'vj_only'])
     parser.add_argument('--n_cv_folds', type=int, default=3)
+    parser.add_argument('--max_folds', type=int, default=None,
+                        help='Limit the number of outer evaluation folds to run. '
+                             'Useful for full-data resource probes, e.g. --max_folds 1.')
     parser.add_argument('--val_split', type=float, default=0.2)
     parser.add_argument('--n_jobs', type=int, default=None)
     parser.add_argument('--xgb_device', type=str, default='cpu',
@@ -432,6 +435,10 @@ if __name__ == '__main__':
                         default='{participant_label}_TCRB.tsv',
                         help='Filename template for external repertoires.')
     args = parser.parse_args()
+    if args.max_folds is not None and args.max_folds < 1:
+        parser.error('--max_folds must be >= 1')
+
+    n_outer_folds = args.max_folds if args.max_folds is not None else 3
 
     evaluator = EnsembleXGBoostEvaluator(
         val_split=args.val_split,
@@ -459,6 +466,7 @@ if __name__ == '__main__':
                 file_suffix=args.file_suffix,
                 disease_col=args.disease_col,
                 fold_col=args.fold_col,
+                n_folds=n_outer_folds,
                 adjust_distribution_by_demographics=True,
                 random_baseline=True,
                 random_baseline_seed=seed,
@@ -504,6 +512,7 @@ if __name__ == '__main__':
             file_suffix=args.file_suffix,
             disease_col=args.disease_col,
             fold_col=args.fold_col,
+            n_folds=n_outer_folds,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             covariate_adjust=args.covariate_adjust,
             debug_repertoires=args.debug_repertoires,
