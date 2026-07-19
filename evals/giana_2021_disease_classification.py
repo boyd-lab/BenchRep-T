@@ -49,6 +49,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score, balanced_acc
 
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 from utils.cohort_adjustments import apply_cohort_adjustment
+from utils.fixed_split import outer_test_folds, split_metadata
 
 # GIANA source files live in models/GIANA/
 _GIANA_DIR = os.path.join(
@@ -662,6 +663,7 @@ class GIANAEvaluator:
                               p_value_candidates=None,
                               allowed_participants=None,
                               covariate_adjust=False,
+                              fixed_split=False,
                               adjust_distribution_by_demographics=False,
                               random_baseline=False, random_baseline_seed=7,
                               ext_metadata_path=None, ext_data_dir=None,
@@ -737,13 +739,15 @@ class GIANAEvaluator:
         fold_raw_scores = {}  # test_fold → {specimen → raw_giana_score}
         fold_raw_meta = {}    # test_fold → test_data DataFrame
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds, fixed_split):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
-            test_data = metadata[metadata[fold_col] == test_fold]
-            train_data = metadata[metadata[fold_col] != test_fold]
+            fixed_train, train_data, test_data = split_metadata(
+                metadata, fold_col, test_fold, fixed_split)
+            if fixed_split:
+                train_data = fixed_train
 
             print(f"Train: {len(train_data)}, Test: {len(test_data)}")
 
@@ -890,7 +894,7 @@ class GIANAEvaluator:
             cov_all_probs = []
             cov_all_labels = []
 
-            for test_fold in range(n_folds):
+            for test_fold in outer_test_folds(n_folds, fixed_split):
                 if test_fold not in fold_raw_scores:
                     continue
                 test_data_cov_raw = fold_raw_meta[test_fold]
@@ -1096,6 +1100,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit cross-validation to this many folds (default: all 3). '
                              'Useful for resource probes, e.g. --max_folds 1.')
+    parser.add_argument('--fixed_split', action='store_true',
+                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
     args = parser.parse_args()
 
     if args.max_folds is not None and args.max_folds < 1:
@@ -1127,6 +1133,7 @@ if __name__ == '__main__':
         disease_col=args.disease_col,
         fold_col=args.fold_col,
         n_folds=n_outer_folds,
+        fixed_split=args.fixed_split,
         covariate_adjust=args.covariate_adjust,
         adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
         ext_metadata_path=args.ext_metadata_path,

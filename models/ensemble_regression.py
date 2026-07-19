@@ -10,6 +10,7 @@ Implements the method from the AIRR-ML Kaggle competition:
 """
 
 import os
+import pickle
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -277,7 +278,7 @@ class Gapped_4mer_VJgene:
     # Main training and prediction
     # ------------------------------------------------------------------
 
-    def train(self, train_files, train_labels):
+    def train(self, train_files, train_labels, val_files=None, val_labels=None):
         """
         Train the model according to self.submodel.
 
@@ -294,6 +295,13 @@ class Gapped_4mer_VJgene:
         """
         train_files = list(train_files)
         train_labels = np.array(train_labels)
+        external_validation = val_files is not None
+        if external_validation:
+            if val_labels is None:
+                raise ValueError('val_labels is required when val_files is provided')
+            n_train = len(train_files)
+            train_files += list(val_files)
+            train_labels = np.concatenate([train_labels, np.asarray(val_labels)])
         use_kmer = self.submodel in ('ensemble', 'kmer_only')
         use_vj = self.submodel in ('ensemble', 'vj_only')
 
@@ -321,11 +329,12 @@ class Gapped_4mer_VJgene:
 
         # --- Internal train/val split ---
         indices = np.arange(len(train_files))
-        base_idx, val_idx = train_test_split(
-            indices, test_size=self.val_split,
-            random_state=self.subsample_seed,
-            stratify=train_labels
-        )
+        if external_validation:
+            base_idx, val_idx = indices[:n_train], indices[n_train:]
+        else:
+            base_idx, val_idx = train_test_split(
+                indices, test_size=self.val_split,
+                random_state=self.subsample_seed, stratify=train_labels)
         y_base = train_labels[base_idx]
         y_val = train_labels[val_idx]
 
@@ -501,3 +510,22 @@ class Gapped_4mer_VJgene:
             'best_alpha': self.best_alpha,
             'diagnosis': 'Diseased' if prob >= 0.5 else 'Healthy',
         }
+
+    def save(self, path):
+        """Persist fitted sklearn objects without cached training repertoires."""
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        state = self.__dict__.copy()
+        state['_repertoire_cache'] = {}
+        state['_kmer_features_cache'] = {}
+        state['_vj_features_cache'] = {}
+        with open(path, 'wb') as handle:
+            pickle.dump(state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @classmethod
+    def load(cls, path):
+        """Load a fitted model saved by :meth:`save` for inference."""
+        with open(path, 'rb') as handle:
+            state = pickle.load(handle)
+        obj = cls()
+        obj.__dict__.update(state)
+        return obj

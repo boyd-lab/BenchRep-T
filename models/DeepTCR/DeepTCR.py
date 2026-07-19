@@ -4156,7 +4156,10 @@ class DeepTCR_WF(DeepTCR_S_base):
                     GO.grads_and_vars = GO.opt.compute_gradients(GO.loss + tf.compat.v1.losses.get_regularization_loss(), var_train)
                     GO.gradients = tf.gradients(ys=GO.loss,xs=var_train)
                     GO.gradients,keep_ii = zip(*[(v,ii) for ii,v in enumerate(GO.gradients) if v is not None])
-                    var_train = list(np.asarray(var_train)[list(keep_ii)])
+                    # Keep this in Python: converting ResourceVariables through
+                    # NumPy calls variable.numpy(), which is unavailable in the
+                    # TF1-style graph mode used by DeepTCR.
+                    var_train = [var_train[ii] for ii in keep_ii]
                     GO.grads_accum = [tf.Variable(tf.zeros_like(v)) for v in GO.gradients]
                     GO.grads_and_vars = list(zip(GO.grads_accum,var_train))
                     GO.opt = GO.opt.apply_gradients(GO.grads_and_vars)
@@ -5202,7 +5205,6 @@ class DeepTCR_WF(DeepTCR_S_base):
                 return self.Inference_Pred[resort_idx], self.Inference_Pred_Dist[resort_idx]
             else:
                 return self.Inference_Pred[resort_idx]
-
 
 
 

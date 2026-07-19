@@ -15,6 +15,7 @@ from tqdm import tqdm
 from models.emerson_2017 import CMV_Immunosequencing_Model
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 from utils.cohort_adjustments import apply_cohort_adjustment
+from utils.fixed_split import outer_test_folds, split_metadata
 
 
 class Emerson2017Evaluator:
@@ -376,6 +377,7 @@ class Emerson2017Evaluator:
                               random_baseline=False,
                               random_baseline_seed=7,
                               covariate_adjust=False,
+                              fixed_split=False, model_save_dir=None,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -440,25 +442,20 @@ class Emerson2017Evaluator:
         all_labels = []
         fold_results = []
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds, fixed_split):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
             # Split data by fold
-            test_mask = metadata[fold_col] == test_fold
-            train_val_mask = ~test_mask
-
-            test_data = metadata[test_mask]
-            train_val_data = metadata[train_val_mask]
-
-            # Further split train_val into train and validation
-            train_data, val_data = train_test_split(
-                train_val_data,
-                train_size=self.train_val_ratio,
-                random_state=random_state,
-                stratify=train_val_data['label']  # Use binary label column
-            )
+            fixed_train, train_val_data, test_data = split_metadata(
+                metadata, fold_col, test_fold, fixed_split)
+            if fixed_split:
+                train_data, val_data = fixed_train, train_val_data
+            else:
+                train_data, val_data = train_test_split(
+                    train_val_data, train_size=self.train_val_ratio,
+                    random_state=random_state, stratify=train_val_data['label'])
 
             print(f"Train: {len(train_data)}, Validation: {len(val_data)}, Test: {len(test_data)}")
 
@@ -561,6 +558,10 @@ class Emerson2017Evaluator:
 
             print(f"\nFinal Validation AUROC: {val_auroc:.4f}, AUPR: {val_aupr:.4f}, "
                   f"Balanced Acc: {val_balanced_acc:.4f}, F1: {val_f1:.4f}")
+
+            if model_save_dir is not None and self.model is not None:
+                self.model.save(os.path.join(model_save_dir, target_disease,
+                                             f'fold{test_fold}', 'model.pkl'))
 
             if covariate_adjust:
                 # ----------------------------------------------------------
@@ -722,6 +723,11 @@ if __name__ == "__main__":
                         help='Root directory containing repertoire data files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Target disease to classify (e.g., Lupus, T1D, HIV)')
+    parser.add_argument('--participant_col', default='participant_label')
+    parser.add_argument('--disease_col', default='disease')
+    parser.add_argument('--fold_col', default='malid_cross_validation_fold_id_when_in_test_set')
+    parser.add_argument('--file_prefix', default='part_table_')
+    parser.add_argument('--file_suffix', default='.tsv.gz')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV')
     parser.add_argument('--covariate_adjust', action='store_true',
@@ -755,6 +761,10 @@ if __name__ == "__main__":
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit cross-validation to this many folds (default: all 3). '
                              'Useful for resource probes, e.g. --max_folds 1.')
+    parser.add_argument('--fixed_split', action='store_true',
+                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
+    parser.add_argument('--model_save_dir', type=str, default=None,
+                        help='Directory for reusable fitted model artifacts.')
     args = parser.parse_args()
 
     if args.max_folds is not None and args.max_folds < 1:
@@ -788,12 +798,14 @@ if __name__ == "__main__":
         metadata_path=metadata_path,
         target_disease=args.target_disease,
         data_dir=repertoire_data_dir,  # Root directory with data files
-        participant_col='participant_label',
-        file_prefix='part_table_',
-        file_suffix='.tsv.gz',
-        disease_col='disease',
-        fold_col='malid_cross_validation_fold_id_when_in_test_set',
+        participant_col=args.participant_col,
+        file_prefix=args.file_prefix,
+        file_suffix=args.file_suffix,
+        disease_col=args.disease_col,
+        fold_col=args.fold_col,
         n_folds=args.max_folds if args.max_folds is not None else 3,
+        fixed_split=args.fixed_split,
+        model_save_dir=args.model_save_dir,
         random_state=RANDOM_SEED,
         tune_parameters=True,
         p_value_candidates=[1e-2, 1e-3, 1e-4, 1e-5, 1e-6],

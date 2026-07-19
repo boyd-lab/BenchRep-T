@@ -27,6 +27,7 @@ from data_processing import Process_Seq
 from Layers import make_test_pred_object
 
 from utils.cohort_adjustments import apply_cohort_adjustment
+from utils.fixed_split import outer_test_folds, split_metadata
 
 
 class DeepTCREvaluator:
@@ -59,6 +60,7 @@ class DeepTCREvaluator:
                  train_loss_min=None,
                  combine_train_valid=False,
                  batch_size=25,
+                 batch_size_update=None,
                  n_jobs=4,
                  device=0,
                  results_dir='results/deeptcr',
@@ -88,6 +90,10 @@ class DeepTCREvaluator:
             combine_train_valid: Combine train+val into training set and use
                                   train_loss_min as stopping criterion.
             batch_size: Repertoires per mini-batch.
+            batch_size_update: Effective repertoire batch size for gradient
+                               updates. When larger than batch_size, DeepTCR
+                               accumulates gradients across memory-safe
+                               mini-batches before applying an update.
             n_jobs: Parallel processes for DeepTCR data loading.
             device: GPU index (0-based) for TensorFlow; CPU is used
                     automatically if no GPU is available.
@@ -115,6 +121,7 @@ class DeepTCREvaluator:
         self.train_loss_min = train_loss_min
         self.combine_train_valid = combine_train_valid
         self.batch_size = batch_size
+        self.batch_size_update = batch_size_update
         self.n_jobs = n_jobs
         self.device = device
         self.results_dir = results_dir
@@ -338,6 +345,7 @@ class DeepTCREvaluator:
                               p_value_candidates=None,
                               allowed_participants=None,
                               require_demographics=False,
+                              fixed_split=False,
                               adjust_distribution_by_demographics=False,
                               random_baseline=False, random_baseline_seed=7,
                               ext_metadata_path=None, ext_data_dir=None,
@@ -423,21 +431,19 @@ class DeepTCREvaluator:
         all_labels = []
         fold_results = []
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds, fixed_split):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
-            test_mask = metadata[fold_col] == test_fold
-            test_data = metadata[test_mask]
-            train_val_data = metadata[~test_mask]
-
-            train_data, val_data = train_test_split(
-                train_val_data,
-                train_size=self.train_val_ratio,
-                random_state=rng,
-                stratify=train_val_data['label'],
-            )
+            fixed_train, train_val_data, test_data = split_metadata(
+                metadata, fold_col, test_fold, fixed_split)
+            if fixed_split:
+                train_data, val_data = fixed_train, train_val_data
+            else:
+                train_data, val_data = train_test_split(
+                    train_val_data, train_size=self.train_val_ratio,
+                    random_state=rng, stratify=train_val_data['label'])
             print(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
             # Unique name per fold so checkpoints don't collide
@@ -484,21 +490,21 @@ class DeepTCREvaluator:
                 return np.array(idx, dtype=int)
 
             test_idx = _get_indices(test_data)
-            train_val_idx = _get_indices(
-                pd.concat([train_data, val_data], ignore_index=True)
-            )
+            train_val_idx = _get_indices(pd.concat([train_data, val_data], ignore_index=True))
 
             if len(test_idx) == 0:
                 print(f"Warning: no test samples found for fold {test_fold}, skipping.")
                 continue
 
             # Split train_val into train / val for early stopping
-            train_idx, val_idx = train_test_split(
-                train_val_idx,
-                train_size=self.train_val_ratio,
-                random_state=rng,
-                stratify=Y[train_val_idx].argmax(axis=1),
-            )
+            if fixed_split:
+                train_idx = _get_indices(train_data)
+                val_idx = _get_indices(val_data)
+            else:
+                train_idx, val_idx = train_test_split(
+                    train_val_idx, train_size=self.train_val_ratio,
+                    random_state=rng,
+                    stratify=Y[train_val_idx].argmax(axis=1))
 
             dtcr.train, dtcr.valid, dtcr.test = Get_Train_Valid_Test_KFold(
                 Vars=Vars,
@@ -528,10 +534,15 @@ class DeepTCREvaluator:
                 train_loss_min=self.train_loss_min if self.combine_train_valid else None,
                 convergence='training' if self.combine_train_valid else 'validation',
                 batch_size=self.batch_size,
+                batch_size_update=self.batch_size_update,
                 suppress_output=False,
             )
             dtcr.test_pred = make_test_pred_object()
-            dtcr._train(write=False, batch_seed=None, iteration=test_fold)
+            # DeepTCR's inference bundle (TensorFlow checkpoint plus the
+            # sequence/gene encoders it needs at prediction time) is only
+            # emitted when write=True.  Keep one final bundle per outer fold
+            # so inference can be run later without retraining.
+            dtcr._train(write=True, batch_seed=None, iteration=test_fold)
 
             id_to_row = {
                 row['specimen_label']: row
@@ -672,6 +683,9 @@ if __name__ == '__main__':
                         help='Stop training when training loss < this (default: 0.1)')
     parser.add_argument('--batch_size', type=int, default=25,
                         help='Repertoires per mini-batch (default: 25)')
+    parser.add_argument('--batch_size_update', type=int, default=None,
+                        help='Accumulate gradients to this effective repertoire batch size. '
+                             'Useful with a small --batch_size for large repertoires.')
     parser.add_argument('--n_jobs', type=int, default=4,
                         help='Parallel data-loading processes (default: 4)')
     parser.add_argument('--debug', action='store_true',
@@ -698,6 +712,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit cross-validation to this many folds (default: all 3). '
                              'Useful for resource probes, e.g. --max_folds 1.')
+    parser.add_argument('--fixed_split', action='store_true',
+                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
     args = parser.parse_args()
 
     if args.max_folds is not None and args.max_folds < 1:
@@ -713,6 +729,7 @@ if __name__ == '__main__':
         hinge_loss_t=args.hinge_loss_t,
         train_loss_min=args.train_loss_min,
         batch_size=args.batch_size,
+        batch_size_update=args.batch_size_update,
         n_jobs=args.n_jobs,
         device=args.device,
         results_dir=args.results_dir,
@@ -737,6 +754,7 @@ if __name__ == '__main__':
                 disease_col=args.disease_col,
                 fold_col=args.fold_col,
                 n_folds=n_outer_folds,
+                fixed_split=args.fixed_split,
                 require_demographics=args.require_demographics,
                 adjust_distribution_by_demographics=True,
                 random_baseline=True,
@@ -759,6 +777,7 @@ if __name__ == '__main__':
             disease_col=args.disease_col,
             fold_col=args.fold_col,
             n_folds=n_outer_folds,
+            fixed_split=args.fixed_split,
             require_demographics=args.require_demographics,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             ext_metadata_path=args.ext_metadata_path,

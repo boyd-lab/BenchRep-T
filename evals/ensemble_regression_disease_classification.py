@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
 from utils.cohort_adjustments import apply_cohort_adjustment
+from utils.fixed_split import outer_test_folds, split_metadata
 
 
 SUBMODEL_SUFFIXES = {
@@ -184,6 +185,7 @@ class EnsembleRegressionEvaluator:
                               random_baseline=False,
                               random_baseline_seed=7,
                               debug_repertoires=0,
+                              fixed_split=False, model_save_dir=None,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -257,14 +259,16 @@ class EnsembleRegressionEvaluator:
         all_labels = []
         fold_results = []
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds, fixed_split):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
-            test_mask = metadata[fold_col] == test_fold
-            test_data = metadata[test_mask]
-            train_data = metadata[~test_mask]
+            fixed_train, train_data, test_data = split_metadata(
+                metadata, fold_col, test_fold, fixed_split)
+            val_data = train_data if fixed_split else None
+            if fixed_split:
+                train_data = fixed_train
 
             print(f"Train: {len(train_data)}, Test: {len(test_data)}")
 
@@ -290,7 +294,13 @@ class EnsembleRegressionEvaluator:
                 n_jobs=self.n_jobs,
             )
 
-            train_result = self.model.train(train_files, train_labels)
+            train_result = self.model.train(
+                train_files, train_labels,
+                None if val_data is None else val_data['file_path'].tolist(),
+                None if val_data is None else val_data['label'].tolist())
+            if model_save_dir is not None:
+                self.model.save(os.path.join(model_save_dir, target_disease,
+                                             f'fold{test_fold}', 'model.pkl'))
 
             test_probs = np.array([
                 self.model.predict_diagnosis(fp)['probability_positive']
@@ -380,6 +390,11 @@ if __name__ == "__main__":
                         help='Directory containing repertoire .tsv.gz files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Disease to classify (e.g. Lupus, T1D, HIV)')
+    parser.add_argument('--participant_col', default='participant_label')
+    parser.add_argument('--disease_col', default='disease')
+    parser.add_argument('--fold_col', default='malid_cross_validation_fold_id_when_in_test_set')
+    parser.add_argument('--file_prefix', default='part_table_')
+    parser.add_argument('--file_suffix', default='.tsv.gz')
     parser.add_argument('--val_split', type=float, default=0.2,
                         help='Internal val fraction for alpha tuning (default: 0.2)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
@@ -387,6 +402,10 @@ if __name__ == "__main__":
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit the number of outer evaluation folds to run. '
                              'Useful for full-data resource probes, e.g. --max_folds 1.')
+    parser.add_argument('--fixed_split', action='store_true',
+                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
+    parser.add_argument('--model_save_dir', type=str, default=None,
+                        help='Directory for reusable fitted model artifacts.')
     parser.add_argument('--submodel', type=str, default='ensemble',
                         choices=['ensemble', 'kmer_only', 'vj_only'],
                         help='Sub-model to evaluate: ensemble (default), '
@@ -457,12 +476,19 @@ if __name__ == "__main__":
                 metadata_path=args.metadata_path,
                 target_disease=args.target_disease,
                 data_dir=args.repertoire_data_dir,
+                participant_col=args.participant_col,
+                file_prefix=args.file_prefix,
+                file_suffix=args.file_suffix,
+                disease_col=args.disease_col,
+                fold_col=args.fold_col,
                 require_demographics=args.require_demographics,
                 adjust_distribution_by_demographics=True,
                 random_baseline=True,
                 random_baseline_seed=seed,
                 debug_repertoires=args.debug_repertoires,
                 n_folds=n_outer_folds,
+                fixed_split=args.fixed_split,
+                model_save_dir=args.model_save_dir,
                 ext_metadata_path=args.ext_metadata_path,
                 ext_data_dir=args.ext_data_dir,
                 ext_file_template=args.ext_file_template,
@@ -494,10 +520,17 @@ if __name__ == "__main__":
             metadata_path=args.metadata_path,
             target_disease=args.target_disease,
             data_dir=args.repertoire_data_dir,
+            participant_col=args.participant_col,
+            file_prefix=args.file_prefix,
+            file_suffix=args.file_suffix,
+            disease_col=args.disease_col,
+            fold_col=args.fold_col,
             require_demographics=args.require_demographics,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             debug_repertoires=args.debug_repertoires,
             n_folds=n_outer_folds,
+            fixed_split=args.fixed_split,
+            model_save_dir=args.model_save_dir,
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,
             ext_file_template=args.ext_file_template,

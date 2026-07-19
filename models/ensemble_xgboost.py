@@ -249,19 +249,29 @@ class XGBoostKmer:
     # Training and prediction
     # ------------------------------------------------------------------
 
-    def train(self, train_files, train_labels):
+    def train(self, train_files, train_labels, val_files=None, val_labels=None):
         train_files = list(train_files)
         train_labels = np.array(train_labels)
+        external_validation = val_files is not None
+        if external_validation:
+            if val_labels is None:
+                raise ValueError('val_labels is required when val_files is provided')
+            n_train = len(train_files)
+            train_files += list(val_files)
+            train_labels = np.concatenate([train_labels, np.asarray(val_labels)])
 
         use_kmer = self.submodel in ('ensemble', 'kmer_only')
         use_vj = self.submodel in ('ensemble', 'vj_only')
 
         self.preload_repertoires(train_files)
 
-        base_idx, val_idx = train_test_split(
-            np.arange(len(train_files)), test_size=self.val_split,
-            random_state=self.subsample_seed, stratify=train_labels,
-        )
+        all_idx = np.arange(len(train_files))
+        if external_validation:
+            base_idx, val_idx = all_idx[:n_train], all_idx[n_train:]
+        else:
+            base_idx, val_idx = train_test_split(
+                all_idx, test_size=self.val_split,
+                random_state=self.subsample_seed, stratify=train_labels)
         y_base = train_labels[base_idx]
         y_val = train_labels[val_idx]
 

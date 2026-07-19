@@ -17,6 +17,7 @@ from sklearn.model_selection import train_test_split
 
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 from utils.cohort_adjustments import apply_cohort_adjustment
+from utils.fixed_split import outer_test_folds, split_metadata
 
 # Allow imports from models/DeepRC (no __init__.py there)
 _DEEPRC_MODELS_DIR = os.path.join(
@@ -245,6 +246,7 @@ class DeepRC2020Evaluator:
                               allowed_participants=None,
                               raw_file_cache=None,
                               covariate_adjust=False,
+                              fixed_split=False,
                               adjust_distribution_by_demographics=False,
                               random_baseline=False, random_baseline_seed=7,
                               ext_metadata_path=None, ext_data_dir=None,
@@ -322,21 +324,20 @@ class DeepRC2020Evaluator:
         all_labels = []
         fold_results = []
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds, fixed_split):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
-            test_mask = metadata[fold_col] == test_fold
-            test_data = metadata[test_mask]
-            train_val_data = metadata[~test_mask]
-
-            train_data, val_data = train_test_split(
-                train_val_data,
-                train_size=self.train_val_ratio,
-                random_state=random_state if random_state is not None else self.random_state,
-                stratify=train_val_data['label'],
-            )
+            fixed_train, train_val_data, test_data = split_metadata(
+                metadata, fold_col, test_fold, fixed_split)
+            if fixed_split:
+                train_data, val_data = fixed_train, train_val_data
+            else:
+                train_data, val_data = train_test_split(
+                    train_val_data, train_size=self.train_val_ratio,
+                    random_state=random_state if random_state is not None else self.random_state,
+                    stratify=train_val_data['label'])
             print(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
             trainingset, trainingset_eval, validationset_eval, testset_eval = \
@@ -554,6 +555,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit cross-validation to this many folds (default: all 3). '
                              'Useful for resource probes, e.g. --max_folds 1.')
+    parser.add_argument('--fixed_split', action='store_true',
+                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
     args = parser.parse_args()
 
     if args.max_folds is not None and args.max_folds < 1:
@@ -590,6 +593,7 @@ if __name__ == '__main__':
                 disease_col=args.disease_col,
                 fold_col=args.fold_col,
                 n_folds=n_outer_folds,
+                fixed_split=args.fixed_split,
                 raw_file_cache={},
                 covariate_adjust=args.covariate_adjust,
                 adjust_distribution_by_demographics=True,
@@ -613,6 +617,7 @@ if __name__ == '__main__':
             disease_col=args.disease_col,
             fold_col=args.fold_col,
             n_folds=n_outer_folds,
+            fixed_split=args.fixed_split,
             raw_file_cache={},
             covariate_adjust=args.covariate_adjust,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,

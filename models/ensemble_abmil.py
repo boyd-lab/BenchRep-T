@@ -433,7 +433,7 @@ class ABMIL(_RepertoireBase):
             torch.from_numpy(j_arr).long().to(self.device),
         )
 
-    def train(self, train_files, train_labels):
+    def train(self, train_files, train_labels, val_files=None, val_labels=None):
         """
         Train the ABMIL model end-to-end.
 
@@ -446,6 +446,15 @@ class ABMIL(_RepertoireBase):
         """
         train_files = list(train_files)
         train_labels = np.array(train_labels)
+        vocabulary_files = train_files
+        external_validation = val_files is not None
+        if external_validation:
+            val_files = list(val_files)
+            if val_labels is None:
+                raise ValueError('val_labels is required when val_files is provided')
+            n_train = len(train_files)
+            train_files = train_files + val_files
+            train_labels = np.concatenate([train_labels, np.asarray(val_labels)])
 
         self.device = torch.device(
             "cuda" if self.use_gpu and torch.cuda.is_available() else "cpu"
@@ -454,7 +463,7 @@ class ABMIL(_RepertoireBase):
         # --- Build V/J gene vocabularies from training data ---
         print("Scanning training bags for gene vocabulary...")
         v_genes, j_genes = set(), set()
-        for fp in tqdm(train_files, desc="Scanning bags"):
+        for fp in tqdm(vocabulary_files, desc="Scanning bags"):
             df = self.load_repertoire(fp, apply_subsampling=True)
             if self.v_gene_col in df.columns:
                 for g in df[self.v_gene_col].dropna():
@@ -488,12 +497,13 @@ class ABMIL(_RepertoireBase):
 
         # --- Train / val split by bag ---
         n = len(train_files)
-        tr_idx, val_idx = train_test_split(
-            np.arange(n),
-            test_size=self.val_split,
-            random_state=self.seed,
-            stratify=train_labels,
-        )
+        if external_validation:
+            tr_idx = np.arange(n_train)
+            val_idx = np.arange(n_train, n)
+        else:
+            tr_idx, val_idx = train_test_split(
+                np.arange(n), test_size=self.val_split,
+                random_state=self.seed, stratify=train_labels)
 
         n_pos = int(train_labels[tr_idx].sum())
         n_neg = len(tr_idx) - n_pos

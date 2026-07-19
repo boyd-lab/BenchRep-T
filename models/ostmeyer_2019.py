@@ -14,6 +14,7 @@ This module contains the core model for:
 """
 
 import os
+import pickle
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
@@ -171,6 +172,24 @@ class MIL_TCR_Classifier:
         """Clear all caches to free memory."""
         self._repertoire_cache = {}
         self._features_cache = {}
+
+    def save(self, path):
+        """Save fitted weights and configuration without repertoire caches."""
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        state = self.__dict__.copy()
+        state['_repertoire_cache'] = {}
+        state['_features_cache'] = {}
+        with open(path, 'wb') as handle:
+            pickle.dump(state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @classmethod
+    def load(cls, path):
+        """Load a fitted model saved by :meth:`save` for inference."""
+        with open(path, 'rb') as handle:
+            state = pickle.load(handle)
+        obj = cls()
+        obj.__dict__.update(state)
+        return obj
 
     def _build_fourmer_data(self, file_path):
         """

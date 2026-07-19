@@ -12,6 +12,7 @@ This module contains the core model for:
 """
 
 import os
+import pickle
 import pandas as pd
 import numpy as np
 from scipy.stats import fisher_exact
@@ -140,6 +141,24 @@ class CMV_Immunosequencing_Model:
         """Clear the repertoire cache to free memory."""
         self._repertoire_cache = {}
         self._tcr_stats_cache = None
+
+    def save(self, path):
+        """Save the fitted model without its potentially large input cache."""
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        state = self.__dict__.copy()
+        state['_repertoire_cache'] = {}
+        state['_tcr_stats_cache'] = None
+        with open(path, 'wb') as handle:
+            pickle.dump(state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @classmethod
+    def load(cls, path):
+        """Load a fitted model saved by :meth:`save` for inference."""
+        with open(path, 'rb') as handle:
+            state = pickle.load(handle)
+        obj = cls()
+        obj.__dict__.update(state)
+        return obj
     
     def compute_tcr_statistics(self, training_files, training_labels):
         """
