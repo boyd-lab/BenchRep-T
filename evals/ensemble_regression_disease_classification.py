@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
 from utils.cohort_adjustments import apply_cohort_adjustment
-from utils.fixed_split import outer_test_folds, split_metadata
+from utils.outer_fold import outer_test_folds, split_metadata
 
 
 SUBMODEL_SUFFIXES = {
@@ -185,7 +185,7 @@ class EnsembleRegressionEvaluator:
                               random_baseline=False,
                               random_baseline_seed=7,
                               debug_repertoires=0,
-                              fixed_split=False, model_save_dir=None,
+                              model_save_dir=None,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -259,16 +259,14 @@ class EnsembleRegressionEvaluator:
         all_labels = []
         fold_results = []
 
-        for test_fold in outer_test_folds(n_folds, fixed_split):
+        for test_fold in outer_test_folds(n_folds):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
-            fixed_train, train_data, test_data = split_metadata(
-                metadata, fold_col, test_fold, fixed_split)
-            val_data = train_data if fixed_split else None
-            if fixed_split:
-                train_data = fixed_train
+            train_data, test_data = split_metadata(
+                metadata, fold_col, test_fold)
+            val_data = None
 
             print(f"Train: {len(train_data)}, Test: {len(test_data)}")
 
@@ -402,8 +400,6 @@ if __name__ == "__main__":
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit the number of outer evaluation folds to run. '
                              'Useful for full-data resource probes, e.g. --max_folds 1.')
-    parser.add_argument('--fixed_split', action='store_true',
-                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
     parser.add_argument('--model_save_dir', type=str, default=None,
                         help='Directory for reusable fitted model artifacts.')
     parser.add_argument('--submodel', type=str, default='ensemble',
@@ -487,7 +483,6 @@ if __name__ == "__main__":
                 random_baseline_seed=seed,
                 debug_repertoires=args.debug_repertoires,
                 n_folds=n_outer_folds,
-                fixed_split=args.fixed_split,
                 model_save_dir=args.model_save_dir,
                 ext_metadata_path=args.ext_metadata_path,
                 ext_data_dir=args.ext_data_dir,
@@ -529,7 +524,6 @@ if __name__ == "__main__":
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             debug_repertoires=args.debug_repertoires,
             n_folds=n_outer_folds,
-            fixed_split=args.fixed_split,
             model_save_dir=args.model_save_dir,
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,

@@ -15,7 +15,7 @@ from tqdm import tqdm
 from models.ostmeyer_2019 import MIL_TCR_Classifier
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 from utils.cohort_adjustments import apply_cohort_adjustment
-from utils.fixed_split import outer_test_folds, split_metadata
+from utils.outer_fold import outer_test_folds, split_metadata
 
 
 class Ostmeyer2019Evaluator:
@@ -351,7 +351,7 @@ class Ostmeyer2019Evaluator:
                               random_baseline=False,
                               random_baseline_seed=7,
                               covariate_adjust=False,
-                              fixed_split=False, model_save_dir=None,
+                              model_save_dir=None,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -417,20 +417,17 @@ class Ostmeyer2019Evaluator:
         all_labels = []
         fold_results = []
 
-        for test_fold in outer_test_folds(n_folds, fixed_split):
+        for test_fold in outer_test_folds(n_folds):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
             # Split data by fold
-            fixed_train, train_val_data, test_data = split_metadata(
-                metadata, fold_col, test_fold, fixed_split)
-            if fixed_split:
-                train_data, val_data = fixed_train, train_val_data
-            else:
-                train_data, val_data = train_test_split(
-                    train_val_data, train_size=self.train_val_ratio,
-                    random_state=random_state, stratify=train_val_data['label'])
+            train_val_data, test_data = split_metadata(
+                metadata, fold_col, test_fold)
+            train_data, val_data = train_test_split(
+                train_val_data, train_size=self.train_val_ratio,
+                random_state=random_state, stratify=train_val_data['label'])
 
             print(f"Train: {len(train_data)}, Validation: {len(val_data)}, Test: {len(test_data)}")
 
@@ -673,8 +670,6 @@ if __name__ == "__main__":
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit cross-validation to this many folds (default: all 3). '
                              'Useful for resource probes, e.g. --max_folds 1.')
-    parser.add_argument('--fixed_split', action='store_true',
-                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
     parser.add_argument('--model_save_dir', type=str, default=None,
                         help='Directory for reusable fitted model artifacts.')
     args = parser.parse_args()
@@ -721,7 +716,6 @@ if __name__ == "__main__":
         disease_col=args.disease_col,
         fold_col=args.fold_col,
         n_folds=args.max_folds if args.max_folds is not None else 3,
-        fixed_split=args.fixed_split,
         model_save_dir=args.model_save_dir,
         random_state=RANDOM_SEED,
         tune_parameters=True,

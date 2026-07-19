@@ -27,7 +27,7 @@ from data_processing import Process_Seq
 from Layers import make_test_pred_object
 
 from utils.cohort_adjustments import apply_cohort_adjustment
-from utils.fixed_split import outer_test_folds, split_metadata
+from utils.outer_fold import outer_test_folds, split_metadata
 
 
 class DeepTCREvaluator:
@@ -345,7 +345,6 @@ class DeepTCREvaluator:
                               p_value_candidates=None,
                               allowed_participants=None,
                               require_demographics=False,
-                              fixed_split=False,
                               adjust_distribution_by_demographics=False,
                               random_baseline=False, random_baseline_seed=7,
                               ext_metadata_path=None, ext_data_dir=None,
@@ -431,19 +430,16 @@ class DeepTCREvaluator:
         all_labels = []
         fold_results = []
 
-        for test_fold in outer_test_folds(n_folds, fixed_split):
+        for test_fold in outer_test_folds(n_folds):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
-            fixed_train, train_val_data, test_data = split_metadata(
-                metadata, fold_col, test_fold, fixed_split)
-            if fixed_split:
-                train_data, val_data = fixed_train, train_val_data
-            else:
-                train_data, val_data = train_test_split(
-                    train_val_data, train_size=self.train_val_ratio,
-                    random_state=rng, stratify=train_val_data['label'])
+            train_val_data, test_data = split_metadata(
+                metadata, fold_col, test_fold)
+            train_data, val_data = train_test_split(
+                train_val_data, train_size=self.train_val_ratio,
+                random_state=rng, stratify=train_val_data['label'])
             print(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
             # Unique name per fold so checkpoints don't collide
@@ -497,14 +493,10 @@ class DeepTCREvaluator:
                 continue
 
             # Split train_val into train / val for early stopping
-            if fixed_split:
-                train_idx = _get_indices(train_data)
-                val_idx = _get_indices(val_data)
-            else:
-                train_idx, val_idx = train_test_split(
-                    train_val_idx, train_size=self.train_val_ratio,
-                    random_state=rng,
-                    stratify=Y[train_val_idx].argmax(axis=1))
+            train_idx, val_idx = train_test_split(
+                train_val_idx, train_size=self.train_val_ratio,
+                random_state=rng,
+                stratify=Y[train_val_idx].argmax(axis=1))
 
             dtcr.train, dtcr.valid, dtcr.test = Get_Train_Valid_Test_KFold(
                 Vars=Vars,
@@ -712,8 +704,6 @@ if __name__ == '__main__':
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit cross-validation to this many folds (default: all 3). '
                              'Useful for resource probes, e.g. --max_folds 1.')
-    parser.add_argument('--fixed_split', action='store_true',
-                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
     args = parser.parse_args()
 
     if args.max_folds is not None and args.max_folds < 1:
@@ -754,7 +744,6 @@ if __name__ == '__main__':
                 disease_col=args.disease_col,
                 fold_col=args.fold_col,
                 n_folds=n_outer_folds,
-                fixed_split=args.fixed_split,
                 require_demographics=args.require_demographics,
                 adjust_distribution_by_demographics=True,
                 random_baseline=True,
@@ -777,7 +766,6 @@ if __name__ == '__main__':
             disease_col=args.disease_col,
             fold_col=args.fold_col,
             n_folds=n_outer_folds,
-            fixed_split=args.fixed_split,
             require_demographics=args.require_demographics,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             ext_metadata_path=args.ext_metadata_path,

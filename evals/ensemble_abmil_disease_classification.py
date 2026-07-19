@@ -19,7 +19,7 @@ from tqdm import tqdm
 from models.ensemble_abmil import ABMIL
 from utils.covariate_residualization import covariate_adjusted_predict, filter_complete_demographics
 from utils.cohort_adjustments import apply_cohort_adjustment
-from utils.fixed_split import outer_test_folds, split_metadata
+from utils.outer_fold import outer_test_folds, split_metadata
 
 
 class ABMILEvaluator:
@@ -231,7 +231,6 @@ class ABMILEvaluator:
                               random_baseline=False, random_baseline_seed=7,
                               covariate_adjust=False,
                               model_save_dir=None,
-                              fixed_split=False,
                               ext_metadata_path=None, ext_data_dir=None,
                               ext_file_template='{participant_label}_TCRB.tsv'):
         """
@@ -304,16 +303,14 @@ class ABMILEvaluator:
         if random_baseline:
             base_method += '_RandomBaseline'
 
-        for test_fold in outer_test_folds(n_folds, fixed_split):
+        for test_fold in outer_test_folds(n_folds):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
-            fixed_train, train_data, test_data = split_metadata(
-                metadata, fold_col, test_fold, fixed_split)
-            val_data = train_data if fixed_split else None
-            if fixed_split:
-                train_data = fixed_train
+            train_data, test_data = split_metadata(
+                metadata, fold_col, test_fold)
+            val_data = None
 
             print(f"Train: {len(train_data)}, Test: {len(test_data)}")
 
@@ -575,8 +572,6 @@ if __name__ == "__main__":
     parser.add_argument('--max_folds', type=int, default=None,
                         help='Limit cross-validation to this many folds (default: all 3). '
                              'Useful for resource probes, e.g. --max_folds 1.')
-    parser.add_argument('--fixed_split', action='store_true',
-                        help='Use fold 0=train, fold 1=validation, fold 2=test only.')
     args = parser.parse_args()
 
     if args.max_folds is not None and args.max_folds < 1:
@@ -642,7 +637,6 @@ if __name__ == "__main__":
                 random_baseline_seed=seed,
                 covariate_adjust=args.covariate_adjust,
                 model_save_dir=args.model_save_dir,
-                fixed_split=args.fixed_split,
                 ext_metadata_path=args.ext_metadata_path,
                 ext_data_dir=args.ext_data_dir,
                 ext_file_template=args.ext_file_template,
@@ -683,7 +677,6 @@ if __name__ == "__main__":
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             covariate_adjust=args.covariate_adjust,
             model_save_dir=args.model_save_dir,
-            fixed_split=args.fixed_split,
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,
             ext_file_template=args.ext_file_template,
@@ -713,7 +706,6 @@ if __name__ == "__main__":
                 adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
                 covariate_adjust=args.covariate_adjust,
                 model_save_dir=feature_model_save_dir(feature),
-                fixed_split=args.fixed_split,
                 ext_metadata_path=args.ext_metadata_path,
                 ext_data_dir=args.ext_data_dir,
                 ext_file_template=args.ext_file_template,
