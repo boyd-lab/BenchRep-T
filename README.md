@@ -1,4 +1,4 @@
-# BenchRep-T
+# BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics
 
 > 🚧 **Under active construction** 🚧
 
@@ -158,3 +158,18 @@ pip install -e ".[all]"      # all extras
 ```
 
 For GPU-accelerated models (ABMIL, DeepTCR), ensure CUDA-compatible versions of PyTorch or TensorFlow are installed for your system.
+
+## Preprint
+
+The BenchRep-T preprint is available [here](https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1.abstract) with accompanying citation:
+
+```bibtex
+@article{im2026benchrep,
+  title={BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics},
+  author={Im, Chiho and Cohen-Lavi, Liel and Buendia, Alejandro and Kundaje, Anshul and Boyd, Scott D},
+  journal={bioRxiv},
+  pages={2026--06},
+  year={2026},
+  publisher={Cold Spring Harbor Laboratory}
+}
+```
