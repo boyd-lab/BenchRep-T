@@ -44,6 +44,10 @@ def _load_metadata(args):
         metadata[args.disease_col].isin(healthy_values)
     )
     metadata = metadata.loc[keep].copy()
+    if args.evaluation_folds is not None:
+        metadata = metadata[
+            metadata[args.fold_col].isin(args.evaluation_folds)
+        ].copy()
     metadata["label"] = (
         metadata[args.disease_col] == args.target_disease
     ).astype(int)
@@ -286,6 +290,10 @@ def main():
     parser.add_argument("--specimen_col", default="specimen_label")
     parser.add_argument("--disease_col", default="disease")
     parser.add_argument("--fold_col", default="fold")
+    parser.add_argument(
+        "--evaluation_folds", type=int, nargs="+",
+        help="Optional target fold IDs to evaluate (default: all folds).",
+    )
     parser.add_argument("--n_workers", type=int, default=4)
     parser.add_argument("--allow_missing", action="store_true")
     parser.add_argument("--no_gpu", action="store_true")

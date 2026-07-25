@@ -4160,7 +4160,19 @@ class DeepTCR_WF(DeepTCR_S_base):
                     # NumPy calls variable.numpy(), which is unavailable in the
                     # TF1-style graph mode used by DeepTCR.
                     var_train = [var_train[ii] for ii in keep_ii]
-                    GO.grads_accum = [tf.Variable(tf.zeros_like(v)) for v in GO.gradients]
+                    # These tensors receive the averaged gradients assembled in
+                    # Run_Graph_WF.  They must be placeholders: feeding a
+                    # ResourceVariable overrides its handle rather than the
+                    # value consumed by apply_gradients, which silently applies
+                    # zeros and leaves the model at random initialization.
+                    GO.grads_accum = [
+                        tf.compat.v1.placeholder(
+                            dtype=v.dtype,
+                            shape=v.shape,
+                            name=f'accumulated_gradient_{i}',
+                        )
+                        for i, v in enumerate(GO.gradients)
+                    ]
                     GO.grads_and_vars = list(zip(GO.grads_accum,var_train))
                     GO.opt = GO.opt.apply_gradients(GO.grads_and_vars)
 
@@ -5205,7 +5217,6 @@ class DeepTCR_WF(DeepTCR_S_base):
                 return self.Inference_Pred[resort_idx], self.Inference_Pred_Dist[resort_idx]
             else:
                 return self.Inference_Pred[resort_idx]
-
 
 
 
