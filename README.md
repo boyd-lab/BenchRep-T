@@ -159,6 +159,8 @@ pip install -e ".[all]"      # all extras
 
 For GPU-accelerated models (ABMIL, DeepTCR), ensure CUDA-compatible versions of PyTorch or TensorFlow are installed for your system.
 
+
+<!-- removing for anonymity
 ## Preprint
 
 The BenchRep-T preprint is available [here](https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1.abstract) with accompanying citation:
@@ -173,3 +175,4 @@ The BenchRep-T preprint is available [here](https://www.biorxiv.org/content/10.6
   publisher={Cold Spring Harbor Laboratory}
 }
 ```
+-->
