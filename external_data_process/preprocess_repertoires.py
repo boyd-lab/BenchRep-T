@@ -3,28 +3,24 @@ Preprocess external ImmunoSEQ repertoire files so they match internal (AIRR/IMGT
 used by Mal-ID and Mal-ID-Lite.
 
 Transformations applied:
-  1.  Filter to productive sequences: keep only rows with sequenceStatus == "In"
-  2.  Rename columns: aminoAcid → cdr3_aa, vGeneName → v_call, jGeneName → j_call
-  3.  Remap V/J gene names from Adaptive to AIRR format (e.g. TCRBV07-02 → TRBV7-2)
-  4.  Strip alleles from V/J gene names (e.g. TRBV7-2*01 → TRBV7-2)
-  5.  Collapse indistinguishable V genes (TRBV12-4 → TRBV12-3, TRBV6-3 → TRBV6-2),
+  1.  Normalize camelCase and snake_case immunoSEQ export schemas.
+  2.  Filter to productive sequences: keep only rows with sequenceStatus == "In".
+  3.  Rename columns: aminoAcid → cdr3_aa, vGeneName → v_call, jGeneName → j_call.
+  4.  Drop rows with "unresolved" v_call, j_call, or cdr3_aa (case-insensitive).
+  5.  Remap V/J gene names from Adaptive to AIRR and strip alleles.
+  6.  Harmonize orphon names: "-or9_2" → "/OR9-2".
+  7.  Collapse indistinguishable V genes (TRBV12-4 → TRBV12-3, TRBV6-3 → TRBV6-2),
       mirroring preprocessing/clean_tcr_data.py
-  6.  Collapse singleton TRBV families: strip "-1" suffix on families with only one
-      functional member (e.g. TRBV13-1 → TRBV13), matching IMGT/Mal-ID convention.
-      Derived from IMGT reference (tcrb_v_gene_cdrs.generated.tsv).
-  7.  Harmonize orphon gene names: convert Adaptive "-or9_2" suffix to IMGT "/OR9-2"
-      format (e.g. TRBV20-or9_2 → TRBV20/OR9-2)
-  8.  Trim CDR3 sequences: remove first and last amino acid (conserved C and F/W)
-  9.  Drop rows with "unresolved" v_call, j_call, or cdr3_aa
-  10. Drop rows with missing/empty v_call, j_call, or cdr3_aa
-  11. Drop rows whose CDR3 contains non-standard AA characters (*, X, gaps, etc.)
+  8.  Call collapse_imgt_singleton() to strip "-1" from singleton TRBV families
+      (e.g. TRBV13-1 → TRBV13), matching the IgBLAST/Mal-ID convention.
+  9.  Trim CDR3 sequences: remove first and last amino acid (conserved C and F/W).
+  10. Drop rows with missing/empty v_call, j_call, or cdr3_aa.
+  11. Drop rows whose CDR3 contains non-standard AA characters (*, X, gaps, etc.).
   12. Drop rows lacking gene-level V/J resolution: family-only calls (e.g. TRBV20,
       TRBJ2) and "unknown". A V call is gene-level if it has a subgroup hyphen
       (TRBV7-2), is an orphon (TRBV20/OR9-2), or is a recognized singleton family
-      (TRBV28); a J call is gene-level if it has a subgroup (TRBJ2-3). Mirrors the
-      gene-level reference validation in preprocessing/clean_tcr_data.py.
-  13. Add "sequence" column (copy of "nucleotide")
-  14. Add "num_reads" column (copy of "count (templates/reads)")
+      (TRBV28); a J call is gene-level if it has a subgroup (TRBJ2-3).
+  13. Add "sequence" and "num_reads" standardized columns.
   15. If --metadata_file is provided:
       a. Add "repertoire_id" column derived from output filename (matches specimen_label
          in metadata)
@@ -42,6 +38,9 @@ Arguments:
                             Unmatched files get empty repertoire_id/participant_label.
                             No effect if --metadata_file is not provided.
   --strip_filename_TCRB_suffix  Remove "_TCRB" from output filenames (for T1D)
+  --emerson_cmv             Apply the memory-safe Emerson CMV preset.
+  --read_chunksize          Bound input rows held in memory at once.
+  --compare_gene_dir        Compare processed V/J names with a reference dataset.
   --n_jobs                  Number of parallel processes (default: 4). Set to 1
                             for serial execution.
 
@@ -65,6 +64,14 @@ Usage examples for each disease:
       --input_dir data/external_raw/tuberculosis/ \\
       --file_glob "*_TCRB.tsv" \\
       --metadata_file data/external_metadata/metadata_Tb_final.tsv
+
+  # Emerson CMV (memory-safe preset; IDs are derived from each filename):
+  python external_data_process/preprocess_repertoires.py --emerson_cmv
+
+  # Emerson CMV plus a V/J vocabulary comparison against Mal-ID:
+  python external_data_process/preprocess_repertoires.py \\
+      --emerson_cmv \\
+      --compare_gene_dir data/malid_clean/TCR
 """
 
 import os
@@ -77,7 +84,12 @@ import pandas as pd
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from utils.gene_harmonization import adaptive_to_airr, strip_allele
+from utils.gene_harmonization import (
+    IMGT_SINGLETON_TRBV,
+    adaptive_to_airr,
+    collapse_imgt_singleton,
+    strip_allele,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -114,17 +126,32 @@ GENE_COLLAPSES = {
     'TRBV6-3': 'TRBV6-2',
 }
 
-# IMGT TRBV singleton families: families with only one functional gene member.
-# Adaptive/immunoSEQ names these as "TRBV<N>-1"; IMGT/Mal-ID drops the "-1".
-# Derived from IMGT reference file tcrb_v_gene_cdrs.generated.tsv: these are
-# all v_gene entries that have no hyphen-number suffix (excluding orphon genes).
-SINGLETON_TRBV = {
-    'TRBV1', 'TRBV2', 'TRBV9', 'TRBV13', 'TRBV14', 'TRBV15',
-    'TRBV16', 'TRBV17', 'TRBV18', 'TRBV19', 'TRBV26', 'TRBV27',
-    'TRBV28', 'TRBV30',
+VALID_AMINO_ACIDS = set('ACDEFGHIKLMNPQRSTVWY')
+
+# The Emerson immuneACCESS files repeat dozens of sample-level fields on every
+# clonotype row and total hundreds of GB. The preset reads only fields needed
+# by the repertoire models and writes the compact standardized schema.
+MODEL_INPUT_COLUMNS = {
+    # Camel-case Adaptive schema.
+    'aminoAcid', 'vGeneName', 'jGeneName', 'sequenceStatus',
+    'nucleotide', 'count (templates/reads)',
+    # Snake-case/sample-export schema used by Emerson.
+    'amino_acid', 'v_gene', 'j_gene', 'frame_type',
+    'rearrangement', 'templates',
 }
 
-VALID_AMINO_ACIDS = set('ACDEFGHIKLMNPQRSTVWY')
+COMPACT_OUTPUT_COLUMNS = [
+    'cdr3_aa', 'v_call', 'j_call', 'sequence', 'num_reads',
+    'repertoire_id', 'participant_label',
+]
+
+REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+EMERSON_CMV_INPUT_DIR = os.path.join(
+    REPO_DIR, 'data', 'external_datasets', 'CMV', 'raw'
+)
+EMERSON_CMV_OUTPUT_DIR = os.path.join(
+    REPO_DIR, 'data', 'external_datasets', 'CMV', 'processed'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -150,20 +177,6 @@ def collapse_indistinguishable_v(gene_name):
     return GENE_COLLAPSES.get(gene_name, gene_name)
 
 
-def collapse_singleton_v(gene_name):
-    """Strip "-1" suffix on IMGT singleton TRBV families.
-
-    Examples:
-        TRBV13-1 → TRBV13   (singleton family)
-        TRBV2-1  → TRBV2    (singleton family)
-        TRBV7-1  → TRBV7-1  (multi-member family, untouched)
-    """
-    if not isinstance(gene_name, str) or not gene_name.endswith('-1'):
-        return gene_name
-    base = gene_name[:-2]
-    return base if base in SINGLETON_TRBV else gene_name
-
-
 def harmonize_orphon(gene_name):
     """Convert Adaptive orphon naming to IMGT format.
 
@@ -175,7 +188,9 @@ def harmonize_orphon(gene_name):
     """
     if not isinstance(gene_name, str):
         return gene_name
-    return re.sub(r'-or9_2$', '/OR9-2', gene_name)
+    return re.sub(
+        r'-or9[_-]2$', '/OR9-2', gene_name, flags=re.IGNORECASE
+    )
 
 
 def cdr3_is_valid(seq):
@@ -183,6 +198,11 @@ def cdr3_is_valid(seq):
     if not isinstance(seq, str) or seq == '':
         return False
     return set(seq.upper()).issubset(VALID_AMINO_ACIDS)
+
+
+def is_unresolved(value):
+    """True for an unresolved sentinel, ignoring whitespace and case."""
+    return isinstance(value, str) and value.strip().casefold() == 'unresolved'
 
 
 def is_gene_level_v(gene_name):
@@ -195,7 +215,7 @@ def is_gene_level_v(gene_name):
     """
     if not isinstance(gene_name, str):
         return False
-    return '-' in gene_name or gene_name in SINGLETON_TRBV
+    return '-' in gene_name or gene_name in IMGT_SINGLETON_TRBV
 
 
 def is_gene_level_j(gene_name):
@@ -280,31 +300,14 @@ def derive_specimen_label(filename):
 # Core preprocessing
 # ---------------------------------------------------------------------------
 
-def preprocess_file(input_path, output_path, repertoire_id=None,
-                    participant_label=None):
-    """Preprocess a single repertoire file.
-
-    Reads a tab-separated Adaptive-format file, applies filtering, column
-    renaming, V/J gene remapping, CDR3 trimming, quality filtering, and
-    adds extra columns. Writes the result as TSV.
-
-    Args:
-        input_path: Path to input TSV file.
-        output_path: Path to write output TSV file.
-        repertoire_id: If provided, added as 'repertoire_id' column.
-            Should match the specimen_label from metadata.
-        participant_label: If provided, added as 'participant_label' column.
-
-    Returns:
-        Stats dict with per-step row counts.
-    """
-    df = pd.read_csv(input_path, sep='\t')
+def preprocess_dataframe(df, input_basename, repertoire_id=None,
+                         participant_label=None, compact_output=False):
+    """Apply the repertoire transformations to one in-memory dataframe/chunk."""
     n_in = len(df)
 
     # --- Step 0: Normalize snake_case Adaptive columns to camelCase ---
     # Handles the "v2" / sample-export variant (amino_acid/v_gene/j_gene/
-    # frame_type/rearrangement/templates). No-op for the camelCase export this
-    # script was originally written for. Only rename when the target is absent.
+    # frame_type/rearrangement/templates). No-op for camelCase exports.
     normalize_map = {
         src: dst for src, dst in INPUT_COLUMN_NORMALIZE.items()
         if src in df.columns and dst not in df.columns
@@ -319,96 +322,104 @@ def preprocess_file(input_path, output_path, repertoire_id=None,
         n_non_productive = int((~mask).sum())
         df = df[mask].copy()
     else:
-        print(f"  WARNING: 'sequenceStatus' column not found in {os.path.basename(input_path)}, "
+        print(f"  WARNING: 'sequenceStatus' column not found in {input_basename}, "
               f"skipping productive filter")
 
     # --- Step 2: Rename columns ---
     rename_map = {k: v for k, v in COLUMN_RENAME.items() if k in df.columns}
     df = df.rename(columns=rename_map)
 
-    # --- Steps 3-4: Remap V/J gene names (Adaptive → AIRR, strip alleles) ---
-    # --- Step 5: Collapse indistinguishable V genes ---
-    # --- Step 6: Collapse singleton V gene families ---
-    # --- Step 7: Harmonize orphon gene names ---
-    if 'v_call' in df.columns:
-        df['v_call'] = (
-            df['v_call']
-            .apply(harmonize_gene)
-            .apply(collapse_indistinguishable_v)
-            .apply(collapse_singleton_v)
-            .apply(harmonize_orphon)
+    required = {'cdr3_aa', 'v_call', 'j_call'}
+    missing_required = sorted(required - set(df.columns))
+    if missing_required:
+        raise ValueError(
+            f"{input_basename} is missing required repertoire columns after "
+            f"schema normalization: {missing_required}. Available columns: "
+            f"{list(df.columns)}"
         )
-    if 'j_call' in df.columns:
-        df['j_call'] = df['j_call'].apply(harmonize_gene)
+
+    # --- Step 3: Drop unresolved calls before transforming their strings ---
+    # This is case-insensitive and row-based, so a row with both unresolved V
+    # and J calls is counted once. Doing this before CDR3 trimming also avoids
+    # turning a literal "unresolved" CDR3 into "nresolve".
+    unresolved_mask = pd.Series(False, index=df.index)
+    for col in ('v_call', 'j_call', 'cdr3_aa'):
+        unresolved_mask |= df[col].apply(is_unresolved)
+    n_unresolved = int(unresolved_mask.sum())
+    if n_unresolved:
+        df = df[~unresolved_mask].copy()
+
+    # --- Steps 4-7: Harmonize V/J calls ---
+    # Orphon conversion happens first so both Adaptive TRBV20-or9_2 and already
+    # canonical TRBV20/OR9-2 survive adaptive_to_airr(). The shared
+    # collapse_imgt_singleton() helper is called explicitly to keep this logic
+    # identical across preprocessing entry points.
+    df['v_call'] = (
+        df['v_call']
+        .apply(harmonize_orphon)
+        .apply(harmonize_gene)
+        .apply(collapse_indistinguishable_v)
+        .apply(collapse_imgt_singleton)
+    )
+    df['j_call'] = df['j_call'].apply(harmonize_gene)
 
     # --- Step 8: Trim CDR3 sequences (strip conserved C and F/W) ---
-    if 'cdr3_aa' in df.columns:
-        df['cdr3_aa'] = df['cdr3_aa'].apply(trim_cdr3)
+    df['cdr3_aa'] = df['cdr3_aa'].apply(trim_cdr3)
 
-    # --- Step 9: Drop rows with "unresolved" v_call, j_call, or cdr3_aa ---
-    n_unresolved = 0
-    for col in ('v_call', 'j_call', 'cdr3_aa'):
-        if col in df.columns:
-            mask = df[col] != 'unresolved'
-            n_unresolved += int((~mask).sum())
-            df = df[mask]
-
-    # --- Step 10: Drop rows with missing/empty required fields ---
-    n_missing = 0
+    # --- Step 9: Drop rows with missing/empty required fields ---
+    missing_mask = pd.Series(False, index=df.index)
     for col in ('cdr3_aa', 'v_call', 'j_call'):
-        if col in df.columns:
-            mask = df[col].notna() & (df[col].astype(str).str.len() > 0)
-            n_missing += int((~mask).sum())
-            df = df[mask]
+        missing_mask |= df[col].isna() | (df[col].astype(str).str.strip() == '')
+    n_missing = int(missing_mask.sum())
+    if n_missing:
+        df = df[~missing_mask].copy()
 
-    # --- Step 11: Drop rows whose CDR3 contains non-standard AA characters ---
-    n_invalid_cdr3 = 0
-    if 'cdr3_aa' in df.columns:
-        mask = df['cdr3_aa'].apply(cdr3_is_valid)
-        n_invalid_cdr3 = int((~mask).sum())
-        df = df[mask]
+    # --- Step 10: Drop rows whose CDR3 contains non-standard AA characters ---
+    mask = df['cdr3_aa'].apply(cdr3_is_valid)
+    n_invalid_cdr3 = int((~mask).sum())
+    df = df[mask].copy()
 
-    # --- Step 12: Drop rows lacking gene-level V/J resolution ---
-    # Family-only calls (e.g. TRBV20, TRBJ2) and 'unknown' cannot be matched to a
-    # specific gene, so they are dropped — mirroring the gene-level reference
-    # validation in preprocessing/clean_tcr_data.py so external and internal
-    # cohorts share the same V/J vocabulary.
+    # --- Step 11: Drop rows lacking gene-level V/J resolution ---
+    # Family-only calls (e.g. TRBV20, TRBJ2) and unknown calls cannot be
+    # matched to a specific gene. Recognized singleton V families are valid.
     n_family_only = 0
-    if 'v_call' in df.columns:
-        mask = df['v_call'].apply(is_gene_level_v)
-        n_family_only += int((~mask).sum())
-        df = df[mask]
-    if 'j_call' in df.columns:
-        mask = df['j_call'].apply(is_gene_level_j)
-        n_family_only += int((~mask).sum())
-        df = df[mask]
+    mask = df['v_call'].apply(is_gene_level_v)
+    n_family_only += int((~mask).sum())
+    df = df[mask].copy()
+    mask = df['j_call'].apply(is_gene_level_j)
+    n_family_only += int((~mask).sum())
+    df = df[mask].copy()
 
-    # --- Step 13: Add "sequence" column (copy of "nucleotide") ---
+    # --- Step 12: Add standardized sequence/read columns ---
     if 'nucleotide' in df.columns:
         df['sequence'] = df['nucleotide']
     else:
-        print(f"  WARNING: 'nucleotide' column not found in {os.path.basename(input_path)}, "
+        print(f"  WARNING: 'nucleotide' column not found in {input_basename}, "
               f"cannot create 'sequence' column")
 
-    # --- Step 14: Add "num_reads" column (copy of "count (templates/reads)") ---
     count_col = 'count (templates/reads)'
     if count_col in df.columns:
         df['num_reads'] = df[count_col]
     else:
-        print(f"  WARNING: '{count_col}' column not found in {os.path.basename(input_path)}, "
+        print(f"  WARNING: '{count_col}' column not found in {input_basename}, "
               f"cannot create 'num_reads' column")
 
-    # --- Step 15: Add repertoire_id and participant_label ---
+    # --- Step 13: Add repertoire_id and participant_label ---
     if repertoire_id is not None:
         df['repertoire_id'] = repertoire_id
     if participant_label is not None:
         df['participant_label'] = participant_label
 
-    df.to_csv(output_path, sep='\t', index=False)
+    if compact_output:
+        missing_compact = [c for c in COMPACT_OUTPUT_COLUMNS if c not in df.columns]
+        if missing_compact:
+            raise ValueError(
+                f"{input_basename} cannot produce compact output; missing "
+                f"standardized columns: {missing_compact}"
+            )
+        df = df[COMPACT_OUTPUT_COLUMNS]
 
-    return {
-        'file': os.path.basename(input_path),
-        'output_file': os.path.basename(output_path),
+    return df, {
         'n_in': n_in,
         'n_out': len(df),
         'n_non_productive': n_non_productive,
@@ -419,6 +430,179 @@ def preprocess_file(input_path, output_path, repertoire_id=None,
     }
 
 
+def preprocess_file(input_path, output_path, repertoire_id=None,
+                    participant_label=None, read_chunksize=None,
+                    model_columns_only=False, compact_output=False):
+    """Preprocess a single repertoire file.
+
+    Reads a tab-separated Adaptive-format file, applies filtering, column
+    renaming, V/J gene remapping, CDR3 trimming, quality filtering, and
+    adds extra columns. Writes the result as TSV.
+
+    Args:
+        input_path: Path to input TSV file.
+        output_path: Path to write output TSV file.
+        repertoire_id: If provided, added as 'repertoire_id' column.
+            Should match the specimen_label from metadata.
+        participant_label: If provided, added as 'participant_label' column.
+        read_chunksize: Optional number of input rows per chunk. This bounds
+            memory use for very large immuneACCESS files.
+        model_columns_only: Read only the raw columns needed by repertoire
+            models instead of retaining all source/export metadata columns.
+        compact_output: Write only the standardized model columns.
+
+    Returns:
+        Stats dict with per-step row counts.
+    """
+    read_kwargs = {'sep': '\t'}
+    if model_columns_only:
+        read_kwargs['usecols'] = lambda column: column in MODEL_INPUT_COLUMNS
+    if read_chunksize is not None:
+        read_kwargs['chunksize'] = read_chunksize
+
+    data = pd.read_csv(input_path, **read_kwargs)
+    chunks = data if read_chunksize is not None else [data]
+    input_basename = os.path.basename(input_path)
+    temp_output = f"{output_path}.tmp.{os.getpid()}"
+    totals = {
+        'file': os.path.basename(input_path),
+        'output_file': os.path.basename(output_path),
+        'n_in': 0,
+        'n_out': 0,
+        'n_non_productive': 0,
+        'n_unresolved': 0,
+        'n_missing_field': 0,
+        'n_invalid_cdr3': 0,
+        'n_family_only': 0,
+    }
+    first_chunk = True
+
+    try:
+        for chunk in chunks:
+            processed, stats = preprocess_dataframe(
+                chunk,
+                input_basename=input_basename,
+                repertoire_id=repertoire_id,
+                participant_label=participant_label,
+                compact_output=compact_output,
+            )
+            processed.to_csv(
+                temp_output,
+                sep='\t',
+                index=False,
+                mode='w' if first_chunk else 'a',
+                header=first_chunk,
+            )
+            first_chunk = False
+            for key in (
+                'n_in', 'n_out', 'n_non_productive', 'n_unresolved',
+                'n_missing_field', 'n_invalid_cdr3', 'n_family_only',
+            ):
+                totals[key] += stats[key]
+
+        if first_chunk:
+            raise ValueError(f"{input_basename} contained no readable rows")
+        os.replace(temp_output, output_path)
+    except Exception:
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+        raise
+
+    return totals
+
+
+# ---------------------------------------------------------------------------
+# Gene-vocabulary comparison
+# ---------------------------------------------------------------------------
+
+def collect_gene_vocabulary(paths, chunksize=250_000):
+    """Collect canonical allele-free V/J names from processed TSV/TSV.GZ files."""
+    vocabulary = {'V': set(), 'J': set()}
+    for path in paths:
+        try:
+            chunks = pd.read_csv(
+                path,
+                sep='\t',
+                usecols=['v_call', 'j_call'],
+                chunksize=chunksize,
+            )
+            for chunk in chunks:
+                v_calls = (
+                    chunk['v_call'].dropna().astype(str)
+                    .map(harmonize_orphon)
+                    .map(harmonize_gene)
+                    .map(collapse_indistinguishable_v)
+                    .map(collapse_imgt_singleton)
+                )
+                j_calls = (
+                    chunk['j_call'].dropna().astype(str)
+                    .map(harmonize_gene)
+                )
+                vocabulary['V'].update(
+                    gene for gene in v_calls
+                    if gene and not is_unresolved(gene)
+                )
+                vocabulary['J'].update(
+                    gene for gene in j_calls
+                    if gene and not is_unresolved(gene)
+                )
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"Could not collect v_call/j_call vocabulary from {path}: {exc}"
+            ) from exc
+    return vocabulary
+
+
+def compare_gene_vocabularies(external_paths, reference_paths, output_path,
+                              chunksize=250_000):
+    """Write shared/external-only/reference-only V/J gene names to a TSV."""
+    external = collect_gene_vocabulary(external_paths, chunksize=chunksize)
+    reference = collect_gene_vocabulary(reference_paths, chunksize=chunksize)
+    rows = []
+    summaries = {}
+
+    for locus in ('V', 'J'):
+        shared = external[locus] & reference[locus]
+        external_only = external[locus] - reference[locus]
+        reference_only = reference[locus] - external[locus]
+        summaries[locus] = {
+            'shared': sorted(shared),
+            'external_only': sorted(external_only),
+            'reference_only': sorted(reference_only),
+        }
+        for gene in sorted(external[locus] | reference[locus]):
+            if gene in shared:
+                status = 'shared'
+            elif gene in external_only:
+                status = 'external_only'
+            else:
+                status = 'reference_only'
+            rows.append({
+                'locus': locus,
+                'gene': gene,
+                'status': status,
+                'in_external': gene in external[locus],
+                'in_reference': gene in reference[locus],
+            })
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    pd.DataFrame(rows).to_csv(output_path, sep='\t', index=False)
+
+    print("\nGene vocabulary comparison:")
+    for locus in ('V', 'J'):
+        summary = summaries[locus]
+        print(
+            f"  {locus}: {len(summary['shared'])} shared, "
+            f"{len(summary['external_only'])} external-only, "
+            f"{len(summary['reference_only'])} reference-only"
+        )
+        print(f"    external-only: {summary['external_only']}")
+        print(f"    reference-only: {summary['reference_only']}")
+    print(f"  Full shared/unique report: {output_path}")
+
+    return summaries
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -427,13 +611,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="Preprocess external repertoire files to AIRR/IMGT conventions."
     )
-    parser.add_argument('--input_dir', type=str, required=True,
-                        help='Directory containing raw external repertoire files')
-    parser.add_argument('--output_dir', type=str, default='data/external_processed_v2/',
+    parser.add_argument('--input_dir', type=str, default=None,
+                        help='Directory containing raw external repertoire files. '
+                             'Optional with --emerson_cmv.')
+    parser.add_argument('--output_dir', type=str, default=None,
                         help='Directory to write processed files '
                              '(default: data/external_processed_v2/)')
-    parser.add_argument('--file_glob', type=str, default='*_TCRB.tsv',
+    parser.add_argument('--file_glob', type=str, default=None,
                         help='Glob pattern for repertoire files (default: *_TCRB.tsv)')
+    parser.add_argument('--emerson_cmv', action='store_true', default=False,
+                        help='Use the Emerson CMV preset: default raw/processed CMV '
+                             'directories, *.tsv input, filename-derived participant '
+                             'and repertoire IDs, 100,000-row chunked reads, and '
+                             'compact model columns.')
     parser.add_argument('--metadata_file', type=str, default=None,
                         help='Path to metadata TSV file with specimen_label and '
                              'participant_label columns. If provided, adds '
@@ -450,14 +640,60 @@ def main():
                         help='Remove "_TCRB" suffix from output filenames '
                              '(e.g. 310101_TCRB.tsv → 310101.tsv). Use for T1D '
                              'to match specimen_label in metadata.')
+    parser.add_argument('--participant_from_filename', action='store_true', default=False,
+                        help='Set both repertoire_id and participant_label from the '
+                             'output filename stem. Used automatically by '
+                             '--emerson_cmv, where each file is one subject.')
+    parser.add_argument('--read_chunksize', type=int, default=None,
+                        help='Read each input file in chunks of this many rows. '
+                             'Recommended for large immuneACCESS exports; '
+                             '--emerson_cmv defaults to 100000.')
+    parser.add_argument('--model_columns_only', action='store_true', default=False,
+                        help='Read only raw sequence, V/J, productivity, and count '
+                             'columns. Used automatically by --emerson_cmv.')
+    parser.add_argument('--compact_output', action='store_true', default=False,
+                        help='Write only cdr3_aa, v_call, j_call, sequence, '
+                             'num_reads, repertoire_id, and participant_label. '
+                             'Used automatically by --emerson_cmv.')
+    parser.add_argument('--compare_gene_dir', type=str, default=None,
+                        help='Optional processed reference repertoire directory '
+                             '(for example data/malid_clean/TCR). After processing, '
+                             'write shared/external-only/reference-only V/J names.')
+    parser.add_argument('--compare_gene_glob', type=str, default='*.tsv*',
+                        help='Glob within --compare_gene_dir (default: *.tsv*).')
+    parser.add_argument('--gene_comparison_output', type=str, default=None,
+                        help='Gene comparison TSV path (default: '
+                             '<output_dir>/gene_vocabulary_comparison.tsv).')
     parser.add_argument('--n_jobs', type=int, default=4,
                         help='Number of parallel processes (default: 4). '
                              'Set to 1 for serial execution.')
 
     args = parser.parse_args()
 
+    if args.emerson_cmv:
+        args.input_dir = args.input_dir or EMERSON_CMV_INPUT_DIR
+        args.output_dir = args.output_dir or EMERSON_CMV_OUTPUT_DIR
+        args.file_glob = args.file_glob or '*.tsv'
+        args.read_chunksize = args.read_chunksize or 100_000
+        args.participant_from_filename = True
+        args.model_columns_only = True
+        args.compact_output = True
+    else:
+        if args.input_dir is None:
+            parser.error("--input_dir is required unless --emerson_cmv is used")
+        args.output_dir = args.output_dir or 'data/external_processed_v2/'
+        args.file_glob = args.file_glob or '*_TCRB.tsv'
+
     if args.n_jobs < 1:
         raise ValueError(f"--n_jobs must be >= 1, got {args.n_jobs}")
+    if args.read_chunksize is not None and args.read_chunksize < 1:
+        raise ValueError(
+            f"--read_chunksize must be >= 1, got {args.read_chunksize}"
+        )
+    if args.metadata_file is not None and args.participant_from_filename:
+        parser.error(
+            "--metadata_file and --participant_from_filename are mutually exclusive"
+        )
 
     # --- Discover input files ---
     input_files = sorted(glob.glob(os.path.join(args.input_dir, args.file_glob)))
@@ -518,6 +754,9 @@ def main():
                 # --process_all is True but file has no metadata match
                 repertoire_id = ''
                 participant_label = ''
+        elif args.participant_from_filename:
+            repertoire_id = specimen_label
+            participant_label = specimen_label
 
         output_path = os.path.join(args.output_dir, output_filename)
         files_to_process.append({
@@ -571,6 +810,9 @@ def main():
                 file_info['output_path'],
                 repertoire_id=file_info['repertoire_id'],
                 participant_label=file_info['participant_label'],
+                read_chunksize=args.read_chunksize,
+                model_columns_only=args.model_columns_only,
+                compact_output=args.compact_output,
             )
             all_stats.append(stats)
             if i % 10 == 0 or i == n_total:
@@ -586,6 +828,9 @@ def main():
                     file_info['output_path'],
                     repertoire_id=file_info['repertoire_id'],
                     participant_label=file_info['participant_label'],
+                    read_chunksize=args.read_chunksize,
+                    model_columns_only=args.model_columns_only,
+                    compact_output=args.compact_output,
                 ): file_info
                 for file_info in files_to_process
             }
@@ -637,6 +882,30 @@ def main():
                 print(f"      ... and {len(empty_files) - 10} more")
     else:
         print(f"\n  Validation: all {len(expected_outputs)} output files exist and are non-empty.")
+
+    if args.compare_gene_dir is not None:
+        if missing_files or empty_files:
+            raise RuntimeError(
+                "Skipping gene vocabulary comparison because output validation failed"
+            )
+        reference_files = sorted(glob.glob(os.path.join(
+            args.compare_gene_dir, args.compare_gene_glob
+        )))
+        if not reference_files:
+            raise FileNotFoundError(
+                f"No reference files matching '{args.compare_gene_glob}' found "
+                f"in {args.compare_gene_dir}"
+            )
+        comparison_output = (
+            args.gene_comparison_output
+            or os.path.join(args.output_dir, 'gene_vocabulary_comparison.tsv')
+        )
+        compare_gene_vocabularies(
+            expected_outputs,
+            reference_files,
+            comparison_output,
+            chunksize=args.read_chunksize or 250_000,
+        )
 
 
 if __name__ == '__main__':

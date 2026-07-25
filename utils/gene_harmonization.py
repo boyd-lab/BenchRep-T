@@ -34,8 +34,11 @@ def adaptive_to_airr(gene_name):
 
     name = gene_name.strip()
 
-    # Take the first gene for ambiguous calls (e.g. TCRBV03-01/03-02)
-    if '/' in name:
+    # Take the first gene for Adaptive ambiguous calls (e.g.
+    # TCRBV03-01/03-02), but preserve canonical IMGT orphon names such as
+    # TRBV20/OR9-2. Treating every slash as ambiguity used to truncate those
+    # valid orphon calls to the family-only value "TRBV20".
+    if '/' in name and not re.search(r'/OR\d', name, flags=re.IGNORECASE):
         name = name.split('/')[0]
 
     # Remove the extra 'C': TCRBV → TRBV, TCRBJ → TRBJ
@@ -68,13 +71,15 @@ def strip_allele(gene_name):
     return gene_name.split('*')[0]
 
 
-# IMGT TRBV families with a single functional member. The Adaptive convention
-# names these as "TRBV<N>-1"; IMGT canonical drops the "-1". Required when
-# merging cohorts processed under each convention (e.g. internal MAL-ID vs
-# external Adaptive-derived T1D files).
-_IMGT_SINGLETON_TRBV = {
-    'TRBV2', 'TRBV9', 'TRBV13', 'TRBV14', 'TRBV15',
-    'TRBV18', 'TRBV19', 'TRBV27', 'TRBV28', 'TRBV30',
+# IMGT TRBV families with a single gene-level member in the reference used by
+# Mal-ID. Adaptive names these as "TRBV<N>-1"; IgBLAST/Mal-ID uses the family
+# name without "-1". This set intentionally includes non-functional singleton
+# entries because they occur in immunoSEQ exports and the goal here is naming
+# parity with Mal-ID before downstream gene/reference filtering.
+IMGT_SINGLETON_TRBV = {
+    'TRBV1', 'TRBV2', 'TRBV9', 'TRBV13', 'TRBV14', 'TRBV15',
+    'TRBV16', 'TRBV17', 'TRBV18', 'TRBV19', 'TRBV26', 'TRBV27',
+    'TRBV28', 'TRBV30',
 }
 
 
@@ -90,7 +95,7 @@ def collapse_imgt_singleton(gene_name):
     if not isinstance(gene_name, str) or not gene_name.endswith('-1'):
         return gene_name
     base = gene_name[:-2]
-    return base if base in _IMGT_SINGLETON_TRBV else gene_name
+    return base if base in IMGT_SINGLETON_TRBV else gene_name
 
 
 def canonicalize_gene(gene_name):
