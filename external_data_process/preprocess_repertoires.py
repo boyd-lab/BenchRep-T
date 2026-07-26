@@ -375,7 +375,10 @@ def preprocess_dataframe(df, input_basename, repertoire_id=None,
         df = df[~missing_mask].copy()
 
     # --- Step 10: Drop rows whose CDR3 contains non-standard AA characters ---
-    mask = df['cdr3_aa'].apply(cdr3_is_valid)
+    # Explicit bool conversion is required for empty chunks. With pandas 3,
+    # Series.apply() can preserve the empty source column's string dtype, whose
+    # sum is "", causing int((~mask).sum()) to fail.
+    mask = df['cdr3_aa'].map(cdr3_is_valid).astype(bool)
     n_invalid_cdr3 = int((~mask).sum())
     df = df[mask].copy()
 
@@ -383,10 +386,10 @@ def preprocess_dataframe(df, input_basename, repertoire_id=None,
     # Family-only calls (e.g. TRBV20, TRBJ2) and unknown calls cannot be
     # matched to a specific gene. Recognized singleton V families are valid.
     n_family_only = 0
-    mask = df['v_call'].apply(is_gene_level_v)
+    mask = df['v_call'].map(is_gene_level_v).astype(bool)
     n_family_only += int((~mask).sum())
     df = df[mask].copy()
-    mask = df['j_call'].apply(is_gene_level_j)
+    mask = df['j_call'].map(is_gene_level_j).astype(bool)
     n_family_only += int((~mask).sum())
     df = df[mask].copy()
 
@@ -454,7 +457,12 @@ def preprocess_file(input_path, output_path, repertoire_id=None,
     Returns:
         Stats dict with per-step row counts.
     """
-    read_kwargs = {'sep': '\t'}
+    # pandas 3's C parser can raise IndexError in _concatenate_chunks while
+    # performing its own low-memory type-inference passes with callable
+    # usecols (observed in Emerson Keck0080_MC1.tsv). Our explicit outer
+    # chunksize already bounds memory, so disable the parser's nested
+    # low-memory pass.
+    read_kwargs = {'sep': '\t', 'low_memory': False}
     if model_columns_only:
         read_kwargs['usecols'] = lambda column: column in MODEL_INPUT_COLUMNS
     if read_chunksize is not None:
@@ -655,6 +663,10 @@ def main():
                         help='Write only cdr3_aa, v_call, j_call, sequence, '
                              'num_reads, repertoire_id, and participant_label. '
                              'Used automatically by --emerson_cmv.')
+    parser.add_argument('--skip_existing', action='store_true', default=False,
+                        help='Resume a prior run by skipping non-empty output '
+                             'files. Outputs are written atomically, so non-empty '
+                             'files from this script are complete.')
     parser.add_argument('--compare_gene_dir', type=str, default=None,
                         help='Optional processed reference repertoire directory '
                              '(for example data/malid_clean/TCR). After processing, '
@@ -719,6 +731,9 @@ def main():
     # For each input file, compute the output filename and specimen_label
     files_to_process = []
     files_skipped = []
+    files_skipped_existing = []
+    expected_outputs = []
+    expected_output_sources = {}
     for input_path in input_files:
         input_filename = os.path.basename(input_path)
 
@@ -759,6 +774,22 @@ def main():
             participant_label = specimen_label
 
         output_path = os.path.join(args.output_dir, output_filename)
+        if output_path in expected_output_sources:
+            raise ValueError(
+                f"Output filename collision: '{output_filename}' would be "
+                f"produced by both "
+                f"'{os.path.basename(expected_output_sources[output_path])}' and "
+                f"'{input_filename}'. Check --strip_filename_TCRB_suffix and "
+                f"input files."
+            )
+        expected_output_sources[output_path] = input_path
+        expected_outputs.append(output_path)
+
+        if (args.skip_existing and os.path.exists(output_path)
+                and os.path.getsize(output_path) > 0):
+            files_skipped_existing.append(output_path)
+            continue
+
         files_to_process.append({
             'input_path': input_path,
             'output_path': output_path,
@@ -766,31 +797,22 @@ def main():
             'participant_label': participant_label,
         })
 
-    if not files_to_process:
+    if not files_to_process and not files_skipped_existing:
         print("No files to process after metadata filtering.")
         if files_skipped:
             print(f"  {len(files_skipped)} files skipped (no metadata match)")
         return
-
-    # Check for duplicate output filenames (e.g. both FOO_TCRB.tsv and FOO.tsv
-    # mapping to FOO.tsv when --strip_filename_TCRB_suffix is set)
-    output_filenames = [os.path.basename(f['output_path']) for f in files_to_process]
-    seen = {}
-    for i, name in enumerate(output_filenames):
-        if name in seen:
-            raise ValueError(
-                f"Output filename collision: '{name}' would be produced by both "
-                f"'{os.path.basename(files_to_process[seen[name]]['input_path'])}' and "
-                f"'{os.path.basename(files_to_process[i]['input_path'])}'. "
-                f"Check --strip_filename_TCRB_suffix and input files."
-            )
-        seen[name] = i
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Processing {len(files_to_process)} files from {args.input_dir}")
     if files_skipped:
         print(f"  Skipping {len(files_skipped)} files (no metadata match)")
+    if files_skipped_existing:
+        print(
+            f"  Resuming: skipping {len(files_skipped_existing)} existing "
+            f"non-empty outputs"
+        )
     print(f"Output directory: {args.output_dir}")
     if args.strip_filename_TCRB_suffix:
         print("  Stripping '_TCRB' suffix from output filenames")
@@ -802,7 +824,9 @@ def main():
     # --- Process files ---
     n_total = len(files_to_process)
     all_stats = []
-    if args.n_jobs == 1:
+    if n_total == 0:
+        print("  No new files need processing.")
+    elif args.n_jobs == 1:
         # Serial execution
         for i, file_info in enumerate(files_to_process, 1):
             stats = preprocess_file(
@@ -861,7 +885,6 @@ def main():
     print(f"    family-only v/j (+unk): {total_family_only:,}")
 
     # --- Validate output files ---
-    expected_outputs = [f['output_path'] for f in files_to_process]
     missing_files = [p for p in expected_outputs if not os.path.exists(p)]
     empty_files = [p for p in expected_outputs
                    if os.path.exists(p) and os.path.getsize(p) == 0]
