@@ -142,7 +142,8 @@ class Emerson2017Evaluator:
         return diseases
     
     def construct_file_path(self, participant_label, specimen_label, data_dir,
-                            file_prefix='part_table_', file_suffix='.tsv.gz'):
+                            file_prefix='part_table_', file_suffix='.tsv.gz',
+                            file_template=None):
         """
         Construct the full file path from a participant and specimen label.
 
@@ -152,15 +153,25 @@ class Emerson2017Evaluator:
             data_dir: Root directory containing the data files
             file_prefix: Prefix to add before participant label (default: 'part_table_')
             file_suffix: Suffix to add after specimen label (default: '.tsv.gz')
+            file_template: Format string over '{participant_label}' and
+                '{specimen_label}' (e.g. '{participant_label}.tsv'). Takes
+                precedence over file_prefix/file_suffix when provided; needed
+                for cohorts whose files are not named
+                '<prefix><participant>_<specimen><suffix>'.
 
         Returns:
             Full file path (e.g., '/path/to/data/part_table_BFI-0003052_S001.tsv.gz')
         """
-        filename = f"{file_prefix}{participant_label}_{specimen_label}{file_suffix}"
+        if file_template:
+            filename = file_template.format(participant_label=participant_label,
+                                            specimen_label=specimen_label)
+        else:
+            filename = f"{file_prefix}{participant_label}_{specimen_label}{file_suffix}"
         return os.path.join(data_dir, filename)
 
     def add_file_paths(self, metadata, data_dir, participant_col='participant_label',
-                       file_prefix='part_table_', file_suffix='.tsv.gz'):
+                       file_prefix='part_table_', file_suffix='.tsv.gz',
+                       file_template=None):
         """
         Add a 'file_path' column to metadata by constructing paths from participant and
         specimen labels.
@@ -171,6 +182,7 @@ class Emerson2017Evaluator:
             participant_col: Column name containing participant labels (default: 'participant_label')
             file_prefix: Prefix to add before participant label (default: 'part_table_')
             file_suffix: Suffix to add after specimen label (default: '.tsv.gz')
+            file_template: Optional filename format string; see construct_file_path.
 
         Returns:
             DataFrame with added 'file_path' column
@@ -178,7 +190,8 @@ class Emerson2017Evaluator:
         metadata = metadata.copy()
         metadata['file_path'] = metadata.apply(
             lambda row: self.construct_file_path(
-                row[participant_col], row['specimen_label'], data_dir, file_prefix, file_suffix
+                row[participant_col], row['specimen_label'], data_dir, file_prefix, file_suffix,
+                file_template
             ), axis=1
         )
         return metadata
@@ -368,6 +381,7 @@ class Emerson2017Evaluator:
     def run_cross_validation(self, metadata_path, target_disease, data_dir,
                               participant_col='participant_label',
                               file_prefix='part_table_', file_suffix='.tsv.gz',
+                              file_template=None,
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7,
@@ -390,6 +404,9 @@ class Emerson2017Evaluator:
             participant_col: Column name containing participant labels (default: 'participant_label')
             file_prefix: Prefix for file names (default: 'part_table_')
             file_suffix: Suffix for file names (default: '.tsv.gz')
+            file_template: Optional filename format string over
+                '{participant_label}'/'{specimen_label}'; overrides
+                file_prefix/file_suffix. See construct_file_path.
             disease_col: Column name containing disease labels (default: 'disease')
             fold_col: Column name containing fold assignments 
                      (default: 'malid_cross_validation_fold_id_when_in_test_set')
@@ -413,7 +430,7 @@ class Emerson2017Evaluator:
 
         # Add file paths
         metadata = self.add_file_paths(
-            metadata, data_dir, participant_col, file_prefix, file_suffix
+            metadata, data_dir, participant_col, file_prefix, file_suffix, file_template
         )
         
         # Filter to only include files that exist
@@ -725,6 +742,12 @@ if __name__ == "__main__":
     parser.add_argument('--fold_col', default='malid_cross_validation_fold_id_when_in_test_set')
     parser.add_argument('--file_prefix', default='part_table_')
     parser.add_argument('--file_suffix', default='.tsv.gz')
+    parser.add_argument('--file_template', default=None,
+                        help='Filename format string over {participant_label} and '
+                             '{specimen_label}, e.g. "{participant_label}.tsv". '
+                             'Overrides --file_prefix/--file_suffix. Use for cohorts '
+                             'whose files are not named '
+                             '<prefix><participant>_<specimen><suffix>.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV')
     parser.add_argument('--covariate_adjust', action='store_true',
@@ -796,6 +819,7 @@ if __name__ == "__main__":
         participant_col=args.participant_col,
         file_prefix=args.file_prefix,
         file_suffix=args.file_suffix,
+        file_template=args.file_template,
         disease_col=args.disease_col,
         fold_col=args.fold_col,
         n_folds=args.max_folds if args.max_folds is not None else 3,
