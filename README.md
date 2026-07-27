@@ -115,6 +115,10 @@ File naming convention: `part_table_<participant>_<specimen>.tsv.gz`
 | `malid_cross_validation_fold_id_when_in_test_set` | Pre-assigned CV fold (0, 1, or 2) |
 | `age`, `sex`, `ancestry` | Demographics (Mal-ID; subset of specimens) |
 
+### HuggingFace
+
+Pre-processed repertoire files are hosted on (HuggingFace)[https://huggingface.co/datasets/lordim/BenchRep-T]
+
 
 ## Preprocessing
 
