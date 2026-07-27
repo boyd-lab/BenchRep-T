@@ -117,7 +117,7 @@ File naming convention: `part_table_<participant>_<specimen>.tsv.gz`
 
 ### HuggingFace
 
-Pre-processed repertoire files are hosted on (HuggingFace)[https://huggingface.co/datasets/lordim/BenchRep-T]
+Pre-processed repertoire files are hosted on [HuggingFace](https://huggingface.co/datasets/lordim/BenchRep-T)
 
 
 ## Preprocessing
