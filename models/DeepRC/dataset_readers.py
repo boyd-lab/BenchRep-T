@@ -518,6 +518,7 @@ class AIRRRepertoireDataset(Dataset):
                  prebuilt_cache: list = None,
                  indices_map: dict = None,
                  raw_file_cache: dict = None,
+                 rng_seed: int = 7,
                  verbose: bool = False):
         """
         Parameters
@@ -578,6 +579,8 @@ class AIRRRepertoireDataset(Dataset):
         self.sequence_counts_scaling_fn = sequence_counts_scaling_fn
         self.indices_map = indices_map
         self.raw_file_cache = raw_file_cache
+        self.rng_seed = int(rng_seed)
+        self._rng = None
         self.verbose = verbose
 
         # AA alphabet + 3 positional tokens (identical to RepertoireDataset)
@@ -699,8 +702,12 @@ class AIRRRepertoireDataset(Dataset):
 
         n_seq = len(seq_lens)
         if sample_n_sequences and sample_n_sequences < n_seq:
-            rnd = np.random.RandomState()
-            chosen = np.unique(rnd.randint(0, n_seq, size=sample_n_sequences))
+            if self._rng is None:
+                worker = torch.utils.data.get_worker_info()
+                worker_id = 0 if worker is None else worker.id
+                self._rng = np.random.RandomState(self.rng_seed + worker_id)
+            chosen = np.unique(self._rng.randint(
+                0, n_seq, size=sample_n_sequences))
             encoded = encoded[chosen]
             seq_lens = seq_lens[chosen]
             counts = counts[chosen]
@@ -753,6 +760,7 @@ def make_dataloaders_from_airr(
         keep_in_ram: bool = True,
         indices_map: dict = None,
         raw_file_cache: dict = None,
+        rng_seed: int = 7,
         verbose: bool = True,
 ) -> Tuple[DataLoader, DataLoader, DataLoader, DataLoader]:
     """Create DataLoaders directly from AIRR .tsv/.tsv.gz files (no HDF5 needed).
@@ -821,6 +829,7 @@ def make_dataloaders_from_airr(
             prebuilt_cache=prebuilt_cache,
             indices_map=indices_map,
             raw_file_cache=raw_file_cache,
+            rng_seed=rng_seed,
             verbose=verbose,
         )
 
@@ -836,9 +845,12 @@ def make_dataloaders_from_airr(
     val_ds        = _build_dataset(val_metadata,   None)
     test_ds       = _build_dataset(test_metadata,  None)
 
+    train_generator = torch.Generator()
+    train_generator.manual_seed(int(rng_seed))
     trainingset_dataloader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=n_worker_processes, collate_fn=no_stack_collate_fn)
+        num_workers=n_worker_processes, collate_fn=no_stack_collate_fn,
+        generator=train_generator)
     trainingset_eval_dataloader = DataLoader(
         train_eval_ds, batch_size=1, shuffle=False,
         num_workers=1, collate_fn=no_stack_collate_fn)

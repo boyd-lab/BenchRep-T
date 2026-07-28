@@ -24,6 +24,21 @@ from scipy.stats import spearmanr,gaussian_kde
 from distinctipy import distinctipy
 from tqdm import tqdm
 
+
+def _deep_tcr_session_config():
+    """Build a TF1 session config, with an opt-in Hopper compatibility mode."""
+    config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
+    config.gpu_options.allow_growth = True
+    if os.environ.get('DEEPTCR_DISABLE_TF_LAYOUT_OPTIMIZER', '0') == '1':
+        # TensorFlow 2.12 has no native sm_90 kernels. On Hopper it can crash
+        # while executing the Grappler-inserted NHWC/NCHW shuffle kernel.
+        from tensorflow.core.protobuf import rewriter_config_pb2
+        config.graph_options.rewrite_options.layout_optimizer = (
+            rewriter_config_pb2.RewriterConfig.OFF
+        )
+    return config
+
+
 class DeepTCR_base(object):
 
     def __init__(self,Name,max_length=40,device=0,tf_verbosity=3):
@@ -2159,8 +2174,7 @@ class DeepTCR_U(DeepTCR_base,feature_analytics_class,vis_class):
 
             self._reset_models()
             tf.compat.v1.reset_default_graph()
-            config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
-            config.gpu_options.allow_growth = True
+            config = _deep_tcr_session_config()
 
             with tf.compat.v1.Session(graph=graph_model_AE,config=config) as sess:
                 sess.run(tf.compat.v1.global_variables_initializer())
@@ -3423,8 +3437,7 @@ class DeepTCR_SS(DeepTCR_S_base):
 
         #Initialize Training
         tf.compat.v1.reset_default_graph()
-        config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
-        config.gpu_options.allow_growth = True
+        config = _deep_tcr_session_config()
         with tf.compat.v1.Session(graph=graph_model,config=config) as sess:
             sess.run(tf.compat.v1.global_variables_initializer())
 
@@ -4211,8 +4224,7 @@ class DeepTCR_WF(DeepTCR_S_base):
         multisample_dropout_rate = train_params.multisample_dropout_rate
 
         tf.compat.v1.reset_default_graph()
-        config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
-        config.gpu_options.allow_growth = True
+        config = _deep_tcr_session_config()
         with tf.compat.v1.Session(graph=graph_model,config=config) as sess:
             sess.run(tf.compat.v1.global_variables_initializer())
 
@@ -4882,8 +4894,7 @@ class DeepTCR_WF(DeepTCR_S_base):
         get = data.get
 
         tf.compat.v1.reset_default_graph()
-        config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
-        config.gpu_options.allow_growth = True
+        config = _deep_tcr_session_config()
         with tf.device(self.device):
             saver = tf.compat.v1.train.import_meta_graph(os.path.join(self.Name, 'models', model, 'model.ckpt.meta'),clear_devices=True)
         graph = tf.compat.v1.get_default_graph()
@@ -5217,7 +5228,6 @@ class DeepTCR_WF(DeepTCR_S_base):
                 return self.Inference_Pred[resort_idx], self.Inference_Pred_Dist[resort_idx]
             else:
                 return self.Inference_Pred[resort_idx]
-
 
 
 

@@ -8,6 +8,7 @@ Immune Repertoire Classification"
 import os
 import sys
 import argparse
+import random
 
 import numpy as np
 import pandas as pd
@@ -42,13 +43,17 @@ class DeepRC2020Evaluator:
 
     HEALTHY_LABEL = "Healthy/Background"
 
-    def __init__(self, n_updates=int(1e4), evaluate_at=int(1e3),
+    def __init__(self, n_updates=int(1e5), evaluate_at=int(5e3),
                  sequence_col='cdr3_aa', count_col='duplicate_count',
                  train_val_ratio=0.9, random_state=7,
                  n_worker_processes=4, batch_size=32,
                  sample_n_sequences=int(1e4),
                  kernel_size=9, n_kernels=32,
                  max_seq_len=50,
+                 training_seed=7,
+                 learning_rate=1e-4,
+                 l1_weight_decay=0.0,
+                 l2_weight_decay=0.0,
                  device=None, results_dir='results/deeprc',
                  indices_map=None, healthy_label=None,
                  debug=False, debug_repertoires=10):
@@ -89,6 +94,10 @@ class DeepRC2020Evaluator:
         self.kernel_size = kernel_size
         self.n_kernels = n_kernels
         self.max_seq_len = max_seq_len
+        self.training_seed = training_seed
+        self.learning_rate = learning_rate
+        self.l1_weight_decay = l1_weight_decay
+        self.l2_weight_decay = l2_weight_decay
         self.results_dir = results_dir
         self.indices_map = indices_map
         self.debug = debug
@@ -328,6 +337,16 @@ class DeepRC2020Evaluator:
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
+            run_seed = int(self.training_seed)
+            random.seed(run_seed)
+            np.random.seed(run_seed)
+            torch.manual_seed(run_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(run_seed)
+            if torch.backends.cudnn.is_available():
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+
             train_val_data, test_data = split_metadata(
                 metadata, fold_col, test_fold)
             train_data, val_data = train_test_split(
@@ -353,6 +372,7 @@ class DeepRC2020Evaluator:
                     sequence_counts_scaling_fn=no_sequence_count_scaling,
                     indices_map=self.indices_map,
                     raw_file_cache=raw_file_cache,
+                    rng_seed=run_seed,
                     verbose=True,
                 )
 
@@ -368,6 +388,9 @@ class DeepRC2020Evaluator:
                 validationset_eval_dataloader=validationset_eval,
                 n_updates=self.n_updates,
                 evaluate_at=self.evaluate_at,
+                learning_rate=self.learning_rate,
+                l1_weight_decay=self.l1_weight_decay,
+                l2_weight_decay=self.l2_weight_decay,
                 device=self.device,
                 results_directory=fold_results_dir,
             )
@@ -512,10 +535,10 @@ if __name__ == '__main__':
                         help='Internal cohort file suffix.')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
-    parser.add_argument('--n_updates', type=int, default=int(1e4),
-                        help='Number of gradient updates (default: 10000)')
-    parser.add_argument('--evaluate_at', type=int, default=int(1e3),
-                        help='Evaluate every N updates (default: 1000)')
+    parser.add_argument('--n_updates', type=int, default=int(1e5),
+                        help='Number of gradient updates (default: 100000)')
+    parser.add_argument('--evaluate_at', type=int, default=int(5e3),
+                        help='Evaluate every N updates (default: 5000)')
     parser.add_argument('--device', type=str, default=None,
                         help='Torch device string, e.g. "cuda:0" or "cpu"')
     parser.add_argument('--results_dir', type=str, default='results/deeprc',
@@ -528,6 +551,20 @@ if __name__ == '__main__':
                         help='Sequences sampled per repertoire during training (default: 10000)')
     parser.add_argument('--max_seq_len', type=int, default=50,
                         help='Maximum CDR3 sequence length; must be >= longest sequence in data (default: 50)')
+    parser.add_argument('--training_seed', type=int, default=7,
+                        help='Seed for initialization and training sampling (default: 7)')
+    parser.add_argument('--split_seed', type=int, default=7,
+                        help='Fixed seed for the internal train/validation split (default: 7)')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                        help='Adam learning rate (default: 1e-4)')
+    parser.add_argument('--l1_weight_decay', type=float, default=0.0,
+                        help='L1 penalty coefficient (default: 0)')
+    parser.add_argument('--l2_weight_decay', type=float, default=0.0,
+                        help='L2 penalty coefficient (default: 0)')
+    parser.add_argument('--kernel_size', type=int, default=9,
+                        help='Sequence CNN kernel size (default: 9)')
+    parser.add_argument('--n_kernels', type=int, default=32,
+                        help='Number of sequence CNN kernels (default: 32)')
     parser.add_argument('--debug', action='store_true',
                         help='Debug mode: load only a small number of repertoires per class')
     parser.add_argument('--debug_repertoires', type=int, default=10,
@@ -566,6 +603,13 @@ if __name__ == '__main__':
         n_worker_processes=args.n_worker_processes,
         sample_n_sequences=args.sample_n_sequences,
         max_seq_len=args.max_seq_len,
+        kernel_size=args.kernel_size,
+        n_kernels=args.n_kernels,
+        training_seed=args.training_seed,
+        random_state=args.split_seed,
+        learning_rate=args.learning_rate,
+        l1_weight_decay=args.l1_weight_decay,
+        l2_weight_decay=args.l2_weight_decay,
         healthy_label=args.healthy_label,
         debug=args.debug,
         debug_repertoires=args.debug_repertoires,

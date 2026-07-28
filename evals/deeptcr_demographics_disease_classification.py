@@ -62,6 +62,7 @@ class DeepTCRDemographicsEvaluator:
                  train_loss_min=None,
                  combine_train_valid=False,
                  batch_size=25,
+                 batch_size_update=None,
                  n_jobs=4,
                  device=0,
                  results_dir='results/deeptcr_demographic',
@@ -85,6 +86,7 @@ class DeepTCRDemographicsEvaluator:
         self.train_loss_min = train_loss_min
         self.combine_train_valid = combine_train_valid
         self.batch_size = batch_size
+        self.batch_size_update = batch_size_update
         self.n_jobs = n_jobs
         self.device = device
         self.results_dir = results_dir
@@ -321,12 +323,26 @@ class DeepTCRDemographicsEvaluator:
                               random_baseline=False,
                               random_baseline_seed=7,
                               ext_metadata_path=None, ext_data_dir=None,
-                              ext_file_template='{participant_label}_TCRB.tsv'):
+                              ext_file_template='{participant_label}_TCRB.tsv',
+                              test_fold=None):
         """
         Run k-fold CV. Per fold: train DeepTCR on non-test samples, extract
         sample-level embeddings, hstack with demographic features, tune C,
         fit L1 logistic regression, evaluate on held-out test fold.
+
+        If ``test_fold`` is provided, run only that fold. This supports
+        distributing the three independent outer-fold fits across machines.
         """
+        if test_fold is None:
+            test_folds = range(n_folds)
+        else:
+            if test_fold < 0 or test_fold >= n_folds:
+                raise ValueError(
+                    f"test_fold must be between 0 and {n_folds - 1}; "
+                    f"received {test_fold}"
+                )
+            test_folds = [test_fold]
+
         raw_metadata = self.load_metadata(metadata_path)
         metadata = self.prepare_disease_data(
             raw_metadata,
@@ -371,7 +387,7 @@ class DeepTCRDemographicsEvaluator:
         all_test_rows = []
         fold_results = []
 
-        for test_fold in range(n_folds):
+        for test_fold in test_folds:
             print(f"\n{'='*60}")
             print(f"DeepTCR + DEMO FOLD {test_fold}")
             print(f"{'='*60}")
@@ -456,6 +472,7 @@ class DeepTCRDemographicsEvaluator:
                 train_loss_min=self.train_loss_min if self.combine_train_valid else None,
                 convergence='training' if self.combine_train_valid else 'validation',
                 batch_size=self.batch_size,
+                batch_size_update=self.batch_size_update,
                 suppress_output=False,
             )
             dtcr.test_pred = make_test_pred_object()
@@ -651,9 +668,22 @@ if __name__ == '__main__':
     parser.add_argument('--hinge_loss_t', type=float, default=0.1)
     parser.add_argument('--train_loss_min', type=float, default=0.1)
     parser.add_argument('--batch_size', type=int, default=25)
+    parser.add_argument(
+        '--batch_size_update', type=int, default=None,
+        help='Effective repertoire batch size when accumulating gradients '
+             'across memory-safe mini-batches.',
+    )
     parser.add_argument('--n_jobs', type=int, default=4)
     parser.add_argument('--n_cv_folds', type=int, default=5,
                         help='Inner CV folds for C tuning (default: 5)')
+    parser.add_argument(
+        '--test_fold',
+        type=int,
+        choices=[0, 1, 2],
+        default=None,
+        help='Run only the specified outer test fold. By default, run all '
+             'three folds sequentially.',
+    )
     parser.add_argument('--debug', action='store_true')
     parser.add_argument('--debug_repertoires', type=int, default=10)
     parser.add_argument('--adjust_distribution_by_demographics', action='store_true',
@@ -677,6 +707,7 @@ if __name__ == '__main__':
         hinge_loss_t=args.hinge_loss_t,
         train_loss_min=args.train_loss_min,
         batch_size=args.batch_size,
+        batch_size_update=args.batch_size_update,
         n_jobs=args.n_jobs,
         device=args.device,
         results_dir=args.results_dir,
@@ -701,6 +732,7 @@ if __name__ == '__main__':
                 ext_metadata_path=args.ext_metadata_path,
                 ext_data_dir=args.ext_data_dir,
                 ext_file_template=args.ext_file_template,
+                test_fold=args.test_fold,
             )
             seed_df['random_baseline_seed'] = int(seed)
             seed_dfs.append(seed_df)
@@ -733,6 +765,7 @@ if __name__ == '__main__':
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,
             ext_file_template=args.ext_file_template,
+            test_fold=args.test_fold,
         )
 
     if args.output_csv:

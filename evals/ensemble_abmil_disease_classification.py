@@ -54,6 +54,7 @@ class ABMILEvaluator:
         patience=10,
         val_split=0.2,
         seed=7,
+        split_seed=7,
         subsample_fraction=1.0,
         subsample_seed=7,
         use_gpu=True,
@@ -82,7 +83,8 @@ class ABMILEvaluator:
             weight_decay: Adam weight decay.
             patience: Early-stopping patience in epochs.
             val_split: Fraction of training bags held out for early stopping.
-            seed: Random seed for val split and subsampling.
+            seed: Random seed for model initialization and training stochasticity.
+            split_seed: Fixed random seed for the internal early-stopping split.
             subsample_fraction: Fraction of reads to sample per repertoire.
             subsample_seed: Random seed for repertoire subsampling.
             use_gpu: Use CUDA if available.
@@ -107,6 +109,7 @@ class ABMILEvaluator:
         self.patience = patience
         self.val_split = val_split
         self.seed = seed
+        self.split_seed = split_seed
         self.subsample_fraction = subsample_fraction
         self.subsample_seed = subsample_seed
         self.use_gpu = use_gpu
@@ -330,6 +333,7 @@ class ABMILEvaluator:
                 patience=self.patience,
                 val_split=self.val_split,
                 seed=self.seed,
+                split_seed=self.split_seed,
                 sequence_col=self.sequence_col,
                 v_gene_col=self.v_gene_col,
                 j_gene_col=self.j_gene_col,
@@ -501,6 +505,10 @@ if __name__ == "__main__":
                         help='Early-stopping patience in epochs (default: 10)')
     parser.add_argument('--val_split', type=float, default=0.2,
                         help='Fraction of train bags held out for early stopping (default: 0.2)')
+    parser.add_argument('--training_seed', type=int, default=7,
+                        help='Seed for initialization, dropout, and training sampling (default: 7)')
+    parser.add_argument('--split_seed', type=int, default=7,
+                        help='Fixed seed for the internal early-stopping split (default: 7)')
     parser.add_argument('--max_length', type=int, default=40,
                         help='Maximum CDR3 length; longer sequences are truncated (default: 40)')
     parser.add_argument('--embedding_dim_aa', type=int, default=64,
@@ -595,6 +603,9 @@ if __name__ == "__main__":
             weight_decay=args.weight_decay,
             patience=args.patience,
             val_split=args.val_split,
+            seed=args.training_seed,
+            split_seed=args.split_seed,
+            subsample_seed=args.training_seed,
             use_gpu=not args.no_gpu,
             max_repertoires_per_class=args.max_repertoires_per_class,
             dropout=args.dropout,

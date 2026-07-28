@@ -11,6 +11,7 @@ Learning" (https://arxiv.org/abs/1802.04712).
 
 import json
 import os
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -275,6 +276,7 @@ class ABMIL(_RepertoireBase):
         patience=10,
         val_split=0.2,
         seed=7,
+        split_seed=None,
         sequence_col="cdr3_aa",
         v_gene_col="v_call",
         j_gene_col="j_call",
@@ -305,7 +307,9 @@ class ABMIL(_RepertoireBase):
             dropout: Dropout probability in both the conv encoder and ABMIL encoder.
             patience: Early-stopping patience (epochs without val-loss improvement).
             val_split: Fraction of training bags held out for early stopping.
-            seed: Random seed for val split and epoch subsampling.
+            seed: Random seed for model initialization, dropout, and epoch subsampling.
+            split_seed: Random seed for the internal early-stopping split. Defaults
+                to ``seed`` for backward compatibility.
             sequence_col: Column containing CDR3 amino-acid sequences.
             v_gene_col: Column containing V gene calls.
             j_gene_col: Column containing J gene calls.
@@ -344,6 +348,7 @@ class ABMIL(_RepertoireBase):
         self.patience = patience
         self.val_split = val_split
         self.seed = seed
+        self.split_seed = seed if split_seed is None else split_seed
         self.use_gpu = use_gpu
         self.dropout = dropout
         self.max_length = max_length
@@ -444,6 +449,18 @@ class ABMIL(_RepertoireBase):
         Returns:
             Dict with 'best_val_loss' and 'epochs_trained'.
         """
+        # Seed before model construction so initialization, dropout, and bag
+        # subsampling are repeatable and can be varied independently of the
+        # internal early-stopping split.
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.seed)
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
         train_files = list(train_files)
         train_labels = np.array(train_labels)
         vocabulary_files = train_files
@@ -503,7 +520,7 @@ class ABMIL(_RepertoireBase):
         else:
             tr_idx, val_idx = train_test_split(
                 np.arange(n), test_size=self.val_split,
-                random_state=self.seed, stratify=train_labels)
+                random_state=self.split_seed, stratify=train_labels)
 
         n_pos = int(train_labels[tr_idx].sum())
         n_neg = len(tr_idx) - n_pos

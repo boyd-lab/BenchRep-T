@@ -8,6 +8,7 @@ revealing sequence concepts within T-cell repertoires"
 import os
 import sys
 import argparse
+import random
 
 import numpy as np
 import pandas as pd
@@ -57,6 +58,9 @@ class DeepTCREvaluator:
                  epochs_min=25,
                  epochs_max=None,
                  hinge_loss_t=0.1,
+                 learning_rate=0.001,
+                 drop_out_rate=0.0,
+                 training_seed=7,
                  train_loss_min=None,
                  combine_train_valid=False,
                  batch_size=25,
@@ -118,6 +122,9 @@ class DeepTCREvaluator:
         self.epochs_min = epochs_min
         self.epochs_max = epochs_max
         self.hinge_loss_t = hinge_loss_t
+        self.learning_rate = learning_rate
+        self.drop_out_rate = drop_out_rate
+        self.training_seed = training_seed
         self.train_loss_min = train_loss_min
         self.combine_train_valid = combine_train_valid
         self.batch_size = batch_size
@@ -435,6 +442,10 @@ class DeepTCREvaluator:
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")
 
+            run_seed = int(self.training_seed)
+            random.seed(run_seed)
+            np.random.seed(run_seed)
+
             train_val_data, test_data = split_metadata(
                 metadata, fold_col, test_fold)
             train_data, val_data = train_test_split(
@@ -523,6 +534,9 @@ class DeepTCREvaluator:
                 epochs_min=self.epochs_min,
                 epochs_max=self.epochs_max,
                 hinge_loss_t=self.hinge_loss_t,
+                learning_rate=self.learning_rate,
+                drop_out_rate=self.drop_out_rate,
+                graph_seed=run_seed,
                 train_loss_min=self.train_loss_min if self.combine_train_valid else None,
                 convergence='training' if self.combine_train_valid else 'validation',
                 batch_size=self.batch_size,
@@ -534,7 +548,7 @@ class DeepTCREvaluator:
             # sequence/gene encoders it needs at prediction time) is only
             # emitted when write=True.  Keep one final bundle per outer fold
             # so inference can be run later without retraining.
-            dtcr._train(write=True, batch_seed=None, iteration=test_fold)
+            dtcr._train(write=True, batch_seed=run_seed, iteration=test_fold)
 
             id_to_row = {
                 row['specimen_label']: row
@@ -671,6 +685,14 @@ if __name__ == '__main__':
                         help='Maximum training epochs; None means no cap (default: None)')
     parser.add_argument('--hinge_loss_t', type=float, default=0.1,
                         help='Per-sample hinge loss threshold (default: 0.1)')
+    parser.add_argument('--learning_rate', type=float, default=0.001,
+                        help='Adam learning rate (default: 0.001)')
+    parser.add_argument('--dropout', type=float, default=0.0,
+                        help='Dropout probability (default: 0)')
+    parser.add_argument('--training_seed', type=int, default=7,
+                        help='Seed for graph initialization and training batches (default: 7)')
+    parser.add_argument('--split_seed', type=int, default=7,
+                        help='Fixed seed for the internal train/validation split (default: 7)')
     parser.add_argument('--train_loss_min', type=float, default=0.1,
                         help='Stop training when training loss < this (default: 0.1)')
     parser.add_argument('--batch_size', type=int, default=25,
@@ -717,6 +739,10 @@ if __name__ == '__main__':
         epochs_min=args.epochs_min,
         epochs_max=args.epochs_max,
         hinge_loss_t=args.hinge_loss_t,
+        learning_rate=args.learning_rate,
+        drop_out_rate=args.dropout,
+        training_seed=args.training_seed,
+        random_state=args.split_seed,
         train_loss_min=args.train_loss_min,
         batch_size=args.batch_size,
         batch_size_update=args.batch_size_update,
