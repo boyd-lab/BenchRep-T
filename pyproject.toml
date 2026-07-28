@@ -1,35 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "benchrep-t"
 version = "0.1.0"
 description = "Benchmarking framework for TCR repertoire-based disease classification"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy",
-    "pandas",
-    "scipy",
-    "scikit-learn",
-    "tqdm",
-    "biopython",
-    "matplotlib",
-    "seaborn",
+    "numpy>=1.23.5,<3",
+    "pandas>=1.5,<4",
+    "scipy>=1.10,<2",
+    "scikit-learn>=1.2,<2",
+    "tqdm>=4.66,<5",
 ]
 
 [project.optional-dependencies]
+# Statistical, feature-engineered, and ABMIL methods
+simple = [
+    "biopython>=1.83,<2",
+    "matplotlib>=3.7,<4",
+    "seaborn>=0.12,<1",
+    "torch>=2.3,<3",
+    "xgboost>=2,<4",
+]
 # GIANA clustering model
 giana = [
-    "faiss-cpu",
+    "biopython>=1.83,<2",
+    "faiss-cpu==1.7.4",
 ]
 # Attention-based MIL model (requires PyTorch)
 abmil = [
-    "torch",
+    "torch>=2.3,<3",
+]
+# DeepRC model and its upstream utilities
+deeprc = [
+    "deeprc==0.0.6",
+    "widis-lstm-tools==0.4",
+    "torch>=2.3,<3",
+    "h5py>=3.8,<4",
+    "tensorboard>=2.12,<3",
+    "dill>=0.3.6,<1",
+    "matplotlib>=3.7,<4",
 ]
 # DeepTCR model (requires TensorFlow)
 deeptcr = [
-    "tensorflow",
-    "umap-learn",
-    "logomaker",
-    "distinctipy",
-    "h5py",
+    "tensorflow==2.12.0",
+    "numpy==1.23.5",
+    "pandas==1.5.3",
+    "scipy==1.10.1",
+    "scikit-learn==1.2.2",
+    "umap-learn==0.5.5",
+    "logomaker==0.8",
+    "distinctipy==1.2.1",
+    "h5py==3.8.0",
+    "biopython==1.76",
+    "matplotlib==3.7.2",
+    "seaborn==0.12.2",
 ]
 # Driver sequence identification experiment
 drivers = [
@@ -37,5 +64,10 @@ drivers = [
 ]
 # All optional dependencies
 all = [
-    "benchrep-t[giana,abmil,deeptcr,drivers]",
+    "benchrep-t[simple,giana,deeprc,deeptcr,drivers]",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["evals*", "models*", "utils*"]
+namespaces = true
