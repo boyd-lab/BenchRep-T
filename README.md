@@ -160,8 +160,7 @@ The harmonized metadata tables use the following common columns:
 
 ### HuggingFace
 
-Preprocessed BenchRep-T repertoires and metadata, including Rawat T1D and
-Emerson CMV, are hosted at:
+Preprocessed BenchRep-T repertoires and metadata are hosted on Hugging Face at:
 
 **[https://huggingface.co/datasets/lordim/BenchRep-T](https://huggingface.co/datasets/lordim/BenchRep-T)**
 
