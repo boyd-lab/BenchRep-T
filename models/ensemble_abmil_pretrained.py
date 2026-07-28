@@ -1,0 +1,927 @@
+"""
+ABMIL wrapper for TCR repertoire classification.
+
+Per-sequence features are produced by a frozen pretrained protein/TCR encoder
+(ESM-2, TCR-BERT, or TCR-VALID), optionally concatenated with learned V/J gene
+embeddings, and then aggregated by TCRGatedAttentionMIL.
+
+Reference architecture: Ilse et al. 2018, "Attention-based Deep Multiple Instance
+Learning" (https://arxiv.org/abs/1802.04712).
+"""
+
+import json
+import hashlib
+import os
+import random
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+
+from utils.repertoire_io import load_raw_repertoire
+from models.pretrained_tcr_encoders import build_pretrained_sequence_encoder
+
+# 20 standard amino acids (alphabetical); index 0 is reserved for padding / unknown.
+_AA_VOCAB = "ACDEFGHIKLMNPQRSTVWY"
+_AA_IDX = {aa: i + 1 for i, aa in enumerate(_AA_VOCAB)}
+
+
+class _RepertoireBase:
+    def __init__(
+        self,
+        sequence_col,
+        v_gene_col,
+        j_gene_col,
+        subsample_fraction,
+        subsample_seed,
+        subsample_n,
+        indices_map,
+        ignore_allele,
+        canonicalize_genes=False,
+    ):
+        self.sequence_col = sequence_col
+        self.v_gene_col = v_gene_col
+        self.j_gene_col = j_gene_col
+        self.subsample_fraction = subsample_fraction
+        self.subsample_seed = subsample_seed
+        self.subsample_n = subsample_n
+        self.indices_map = indices_map
+        self.ignore_allele = ignore_allele
+        self.canonicalize_genes = canonicalize_genes
+        self._repertoire_cache = {}
+
+    def load_repertoire(self, file_path, use_cache=True, apply_subsampling=True):
+        cache_key = (file_path, apply_subsampling)
+        if use_cache and cache_key in self._repertoire_cache:
+            return self._repertoire_cache[cache_key]
+
+        indices = None
+        if self.indices_map is not None:
+            rep_id = os.path.basename(file_path).replace(".tsv.gz", "").replace(".tsv", "")
+            indices = self.indices_map.get(rep_id)
+
+        if apply_subsampling:
+            subsample_n = self.subsample_n
+            subsample_fraction = self.subsample_fraction
+            subsample_seed = self.subsample_seed
+        else:
+            subsample_n = None
+            subsample_fraction = 1.0
+            subsample_seed = self.subsample_seed
+
+        df = load_raw_repertoire(
+            file_path,
+            subsample_n,
+            subsample_fraction,
+            subsample_seed,
+            subsample_indices=indices,
+        )
+
+        if use_cache:
+            self._repertoire_cache[cache_key] = df
+        return df
+
+    def _normalize_gene(self, gene):
+        if not isinstance(gene, str):
+            return gene
+        if self.canonicalize_genes:
+            from utils.gene_harmonization import canonicalize_gene
+            return canonicalize_gene(gene)
+        if self.ignore_allele:
+            return gene.split("*")[0]
+        return gene
+
+
+class TCRGatedAttentionMIL(nn.Module):
+    """
+    Gated Attention MIL for TCR repertoire classification.
+
+    Input to forward():
+        H: FloatTensor of shape (K, input_dim) — K sequence-level feature vectors.
+
+    Architecture:
+        encoder:     Linear(input_dim, M) → ReLU → Dropout
+        attention:   gated mechanism (tanh branch × sigmoid branch → Linear → softmax)
+        classifier:  Linear(M, 1) → Sigmoid
+    """
+
+    def __init__(self, input_dim, M=128, L=64, dropout=0.25):
+        super().__init__()
+        self.M = M
+        self.L = L
+        self._dropout_p = dropout
+
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, M),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.attention_V = nn.Sequential(nn.Linear(M, L), nn.Tanh())
+        self.attention_U = nn.Sequential(nn.Linear(M, L), nn.Sigmoid())
+        self.attention_w = nn.Linear(L, 1)
+        self.classifier = nn.Sequential(nn.Linear(M, 1), nn.Sigmoid())
+
+    def forward(self, H):
+        H = self.encoder(H)  # (K, M)
+        A = self.attention_w(self.attention_V(H) * self.attention_U(H))  # (K, 1)
+        A = F.softmax(A.transpose(1, 0), dim=1)  # (1, K)
+        Z = torch.mm(A, H)  # (1, M)
+        Y_prob = self.classifier(Z)  # (1, 1)
+        Y_hat = torch.ge(Y_prob, 0.5).float()
+        return Y_prob, Y_hat, A
+
+    def calculate_classification_error(self, H, Y):
+        Y = Y.float()
+        _, Y_hat, _ = self.forward(H)
+        error = 1.0 - Y_hat.eq(Y).cpu().float().mean().item()
+        return error, Y_hat
+
+    def calculate_objective(self, H, Y, pos_weight=1.0):
+        Y = Y.float()
+        Y_prob, _, A = self.forward(H)
+        Y_prob = torch.clamp(Y_prob, min=1e-5, max=1.0 - 1e-5)
+        neg_log_likelihood = -1.0 * (
+            pos_weight * Y * torch.log(Y_prob) + (1.0 - Y) * torch.log(1.0 - Y_prob)
+        )
+        return neg_log_likelihood, A
+
+
+class TCRSeqEncoder(nn.Module):
+    """
+    Per-sequence feature extractor for TCR repertoire classification.
+
+    Sequence branch (used when features is 'full' or 'cdr3_only'):
+        aa_idx (0=pad, 1-20=standard AA letters) → Embedding(21, embedding_dim_aa)
+        → Conv1d(embedding_dim_aa, C0, kernel_size=kernel, padding=kernel//2) → LeakyReLU → dropout
+        → Conv1d(C0, C1, kernel_size=3, stride=3, padding=1)                 → LeakyReLU → dropout
+        → Conv1d(C1, C2, kernel_size=3, stride=3, padding=1)                 → LeakyReLU → dropout
+        → global max-pool over positions → (K, C2)
+
+    Gene branches (used when features is 'full' or 'vj_only'):
+        v_idx → Embedding(n_v_genes, embedding_dim_genes) → (K, embedding_dim_genes)
+        j_idx → Embedding(n_j_genes, embedding_dim_genes) → (K, embedding_dim_genes)
+
+    Output (output_dim varies by features mode):
+        'full':      concat(seq_features, v_features, j_features)  → C2 + 2*embedding_dim_genes
+        'cdr3_only': seq_features                                   → C2
+        'vj_only':   concat(v_features, j_features)                → 2*embedding_dim_genes
+
+    AA encoding uses _AA_IDX (20 standard AAs → 1-20; 0 = pad/unknown).
+    """
+
+    def __init__(
+        self,
+        n_v_genes,
+        n_j_genes,
+        embedding_dim_aa=64,
+        embedding_dim_genes=48,
+        kernel=5,
+        dropout=0.25,
+        conv_units=(32, 64, 128),
+        features="full",
+    ):
+        super().__init__()
+        self.dropout_p = dropout
+        self.features = features
+
+        if features not in ("full", "cdr3_only", "vj_only"):
+            raise ValueError(f"features must be 'full', 'cdr3_only', or 'vj_only'; got '{features}'")
+
+        if features in ("full", "cdr3_only"):
+            # +1 because indices are 0..20 inclusive:
+            # 0 = padding/unknown, 1..20 = standard amino acids
+            self.aa_embedding = nn.Embedding(len(_AA_IDX) + 1, embedding_dim_aa, padding_idx=0)
+            self.conv1 = nn.Conv1d(
+                embedding_dim_aa,
+                conv_units[0],
+                kernel_size=kernel,
+                padding=kernel // 2,
+            )
+            self.conv2 = nn.Conv1d(
+                conv_units[0],
+                conv_units[1],
+                kernel_size=3,
+                stride=3,
+                padding=1,
+            )
+            self.conv3 = nn.Conv1d(
+                conv_units[1],
+                conv_units[2],
+                kernel_size=3,
+                stride=3,
+                padding=1,
+            )
+
+        if features in ("full", "vj_only"):
+            self.v_embedding = nn.Embedding(n_v_genes, embedding_dim_genes)
+            self.j_embedding = nn.Embedding(n_j_genes, embedding_dim_genes)
+
+        if features == "full":
+            self.output_dim = conv_units[2] + embedding_dim_genes * 2
+        elif features == "cdr3_only":
+            self.output_dim = conv_units[2]
+        else:  # vj_only
+            self.output_dim = embedding_dim_genes * 2
+
+    def forward(self, seq_idx, v_idx, j_idx):
+        """
+        Args:
+            seq_idx: LongTensor (K, max_length)
+            v_idx:   LongTensor (K,)
+            j_idx:   LongTensor (K,)
+
+        Returns:
+            FloatTensor (K, output_dim)
+        """
+        parts = []
+
+        if self.features in ("full", "cdr3_only"):
+            x = self.aa_embedding(seq_idx).transpose(1, 2)  # (K, embedding_dim_aa, L)
+            x = F.dropout(F.leaky_relu(self.conv1(x)), p=self.dropout_p, training=self.training)
+            x = F.dropout(F.leaky_relu(self.conv2(x)), p=self.dropout_p, training=self.training)
+            x = F.dropout(F.leaky_relu(self.conv3(x)), p=self.dropout_p, training=self.training)
+            parts.append(x.max(dim=2).values)  # (K, C2)
+
+        if self.features in ("full", "vj_only"):
+            parts.append(self.v_embedding(v_idx))
+            parts.append(self.j_embedding(j_idx))
+
+        return torch.cat(parts, dim=1)
+
+
+class PretrainedTCRSeqEncoder(nn.Module):
+    """Combine frozen sequence representations with learned V/J embeddings."""
+
+    def __init__(self, sequence_dim, n_v_genes, n_j_genes,
+                 embedding_dim_genes=48, features="full"):
+        super().__init__()
+        if features not in ("full", "cdr3_only"):
+            raise ValueError(
+                "Pretrained encoders support features='full' or 'cdr3_only'"
+            )
+        self.features = features
+        if features == "full":
+            self.v_embedding = nn.Embedding(n_v_genes, embedding_dim_genes)
+            self.j_embedding = nn.Embedding(n_j_genes, embedding_dim_genes)
+            self.output_dim = sequence_dim + 2 * embedding_dim_genes
+        else:
+            self.output_dim = sequence_dim
+
+    def forward(self, sequence_features, v_idx, j_idx):
+        if self.features == "cdr3_only":
+            return sequence_features
+        return torch.cat([
+            sequence_features,
+            self.v_embedding(v_idx),
+            self.j_embedding(j_idx),
+        ], dim=1)
+
+
+class ABMIL(_RepertoireBase):
+    """
+    Gated Attention MIL classifier for TCR repertoire classification.
+
+    Each repertoire is treated as a bag of sequences. Frozen pretrained
+    per-sequence representations are optionally concatenated with learned V/J
+    gene embeddings, then aggregated by TCRGatedAttentionMIL.
+    V/J gene names are mapped to integer indices via vocabularies built from the
+    training data (0 = unknown).
+
+    Training uses Adam with early stopping on a held-out validation split of bags.
+    """
+
+    def __init__(
+        self,
+        max_instances=10000,
+        M=128,
+        L=64,
+        epochs=100,
+        lr=5e-4,
+        weight_decay=1e-4,
+        patience=10,
+        val_split=0.2,
+        seed=7,
+        split_seed=None,
+        sequence_col="cdr3_aa",
+        v_gene_col="v_call",
+        j_gene_col="j_call",
+        subsample_fraction=1.0,
+        subsample_seed=7,
+        subsample_n=None,
+        indices_map=None,
+        ignore_allele=False,
+        canonicalize_genes=False,
+        use_gpu=True,
+        dropout=0.25,
+        max_length=40,
+        embedding_dim_aa=64,
+        embedding_dim_genes=48,
+        kernel=5,
+        conv_units=(32, 64, 128),
+        features="full",
+        sequence_encoder="esm2",
+        pretrained_model=None,
+        pretrained_batch_size=256,
+        embedding_cache_dir=None,
+        tcrvalid_repo=None,
+    ):
+        """
+        Args:
+            max_instances: Sequences randomly subsampled per bag per training epoch
+                (augmentation). Evaluation always uses all sequences. None = no limit.
+            M: ABMIL hidden dimension.
+            L: ABMIL attention hidden dimension.
+            epochs: Maximum training epochs.
+            lr: Adam learning rate.
+            weight_decay: Adam weight decay (L2 regularisation).
+            dropout: Dropout probability in the trainable projection and ABMIL encoder.
+            patience: Early-stopping patience (epochs without val-loss improvement).
+            val_split: Fraction of training bags held out for early stopping.
+            seed: Random seed for model initialization, dropout, and epoch subsampling.
+            split_seed: Random seed for the internal early-stopping split. Defaults
+                to ``seed`` for backward compatibility.
+            sequence_col: Column containing CDR3 amino-acid sequences.
+            v_gene_col: Column containing V gene calls.
+            j_gene_col: Column containing J gene calls.
+            subsample_fraction: Fraction of reads to sample per repertoire when loading
+                training bags from disk.
+            subsample_seed: Random seed for repertoire subsampling.
+            subsample_n: Absolute number of reads to keep (overrides subsample_fraction).
+            indices_map: Dict mapping rep_id to pre-computed row indices.
+            ignore_allele: Strip allele designations from V/J gene names.
+            use_gpu: Use CUDA if available.
+            max_length: Maximum CDR3 length; longer sequences are truncated.
+            embedding_dim_aa: Retained for compatibility with the CNN ABMIL API; unused.
+            embedding_dim_genes: Learned V/J gene embedding dimension.
+            kernel: Retained for compatibility with the CNN ABMIL API; unused.
+            conv_units: Retained for compatibility with the CNN ABMIL API; unused.
+            features: Which features to use — 'full' (CDR3 + V/J genes),
+                'cdr3_only' (CDR3 sequence only), or 'vj_only' (V/J gene identities only).
+            sequence_encoder: Frozen sequence encoder: esm2, tcrbert, or tcrvalid.
+            pretrained_model: Optional model ID/name overriding the encoder default.
+            pretrained_batch_size: Inference batch size for the frozen encoder.
+            embedding_cache_dir: Directory for cached per-sequence embeddings.
+            tcrvalid_repo: Path to the official TCR-VALID checkout.
+        """
+        super().__init__(
+            sequence_col=sequence_col,
+            v_gene_col=v_gene_col,
+            j_gene_col=j_gene_col,
+            subsample_fraction=subsample_fraction,
+            subsample_seed=subsample_seed,
+            subsample_n=subsample_n,
+            indices_map=indices_map,
+            ignore_allele=ignore_allele,
+            canonicalize_genes=canonicalize_genes,
+        )
+        self.max_instances = max_instances
+        self.M = M
+        self.L = L
+        self.epochs = epochs
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.patience = patience
+        self.val_split = val_split
+        self.seed = seed
+        self.split_seed = seed if split_seed is None else split_seed
+        self.use_gpu = use_gpu
+        self.dropout = dropout
+        self.max_length = max_length
+        self.embedding_dim_aa = embedding_dim_aa
+        self.embedding_dim_genes = embedding_dim_genes
+        self.kernel = kernel
+        self.conv_units = tuple(conv_units)
+        self.features = features
+        self.sequence_encoder = sequence_encoder
+        self.pretrained_model = pretrained_model
+        self.pretrained_batch_size = pretrained_batch_size
+        self.embedding_cache_dir = embedding_cache_dir
+        self.tcrvalid_repo = tcrvalid_repo
+        if self.sequence_encoder not in ("esm2", "tcrbert", "tcrvalid"):
+            raise ValueError(
+                "sequence_encoder must be esm2, tcrbert, or tcrvalid"
+            )
+        if self.features == "vj_only":
+            raise ValueError(
+                "Pretrained ABMIL requires features='full' or 'cdr3_only'"
+            )
+
+        # Set after train()
+        self.v_vocab = None  # dict: gene_name -> int index (0 = unknown)
+        self.j_vocab = None
+        self.encoder = None  # Trainable pretrained-feature/VJ combiner
+        self.model = None  # TCRGatedAttentionMIL
+        self.device = None
+        self.pretrained_sequence_encoder = None
+
+    def _encode_seq(self, seq):
+        """Encode a CDR3 string to a zero-padded integer array of length max_length."""
+        arr = np.zeros(self.max_length, dtype=np.int64)
+        for i, c in enumerate(seq[: self.max_length]):
+            arr[i] = _AA_IDX.get(c, 0)
+        return arr
+
+    def _encode_v(self, gene):
+        if not isinstance(gene, str) or not gene:
+            return 0
+        return self.v_vocab.get(self._normalize_gene(gene), 0)
+
+    def _encode_j(self, gene):
+        if not isinstance(gene, str) or not gene:
+            return 0
+        return self.j_vocab.get(self._normalize_gene(gene), 0)
+
+    def _get_per_seq_arrays(self, file_path, apply_subsampling=True):
+        """Load a repertoire and encode all sequences + V/J genes as integer arrays.
+
+        No sequences are filtered out. Sequences longer than max_length are
+        truncated; unknown/non-standard characters map to 0 (same as padding);
+        null sequences become all-zero rows.
+
+        Returns:
+            seq_arr: np.int64 (K, max_length)
+            v_arr:   np.int64 (K,)
+            j_arr:   np.int64 (K,)
+            raw_v_genes: normalized V calls for TCR-VALID CDR2 lookup
+        """
+        # Repertoire DataFrames are large and only needed while constructing the
+        # compact per-sequence arrays below. Retaining one DataFrame per bag can
+        # consume tens of GiB across a fold.
+        df = self.load_repertoire(
+            file_path,
+            use_cache=False,
+            apply_subsampling=apply_subsampling,
+        )
+        K = len(df)
+
+        if K == 0:
+            return (
+                np.zeros((0, self.max_length), dtype=np.int64),
+                np.zeros(0, dtype=np.int64),
+                np.zeros(0, dtype=np.int64),
+                [],
+            )
+
+        # Encode sequences — truncate at max_length, unknown chars → 0
+        seq_arr = np.zeros((K, self.max_length), dtype=np.int64)
+        if self.sequence_col in df.columns:
+            for k, seq in enumerate(df[self.sequence_col]):
+                if isinstance(seq, str):
+                    for i, c in enumerate(seq[: self.max_length]):
+                        seq_arr[k, i] = _AA_IDX.get(c, 0)
+
+        # Encode V genes — unknown genes → 0
+        v_arr = np.zeros(K, dtype=np.int64)
+        raw_v_genes = [""] * K
+        if self.v_gene_col in df.columns:
+            for k, gene in enumerate(df[self.v_gene_col]):
+                v_arr[k] = self._encode_v(gene)
+                if isinstance(gene, str) and gene:
+                    raw_v_genes[k] = self._normalize_gene(gene)
+
+        # Encode J genes — unknown genes → 0
+        j_arr = np.zeros(K, dtype=np.int64)
+        if self.j_gene_col in df.columns:
+            for k, gene in enumerate(df[self.j_gene_col]):
+                j_arr[k] = self._encode_j(gene)
+
+        return seq_arr, v_arr, j_arr, raw_v_genes
+
+    def _to_tensors(self, seq_arr, v_arr, j_arr, row_inds=None):
+        if row_inds is not None:
+            seq_arr = seq_arr[row_inds]
+            v_arr = v_arr[row_inds]
+            j_arr = j_arr[row_inds]
+
+        return (
+            torch.from_numpy(np.asarray(seq_arr)).float().to(self.device),
+            torch.from_numpy(v_arr).long().to(self.device),
+            torch.from_numpy(j_arr).long().to(self.device),
+        )
+
+    def _embedding_cache_path(self, file_path, apply_subsampling):
+        if self.embedding_cache_dir is None:
+            return None
+        stat = os.stat(file_path)
+        subsampling_changes_rows = (
+            self.subsample_n is not None
+            or self.subsample_fraction != 1.0
+            or self.indices_map is not None
+        )
+        effective_subsampling = bool(
+            apply_subsampling and subsampling_changes_rows
+        )
+        payload = json.dumps({
+            "path": os.path.abspath(file_path),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "encoder": self.pretrained_sequence_encoder.cache_id,
+            "max_length": self.max_length,
+            "apply_subsampling": effective_subsampling,
+            "subsample_fraction": self.subsample_fraction,
+            "subsample_n": self.subsample_n,
+            "subsample_seed": self.subsample_seed,
+        }, sort_keys=True)
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        os.makedirs(self.embedding_cache_dir, exist_ok=True)
+        return os.path.join(self.embedding_cache_dir, f"{digest}.npy")
+
+    def _get_bag_arrays(self, file_path, apply_subsampling=True):
+        seq_arr, v_arr, j_arr, raw_v_genes = self._get_per_seq_arrays(
+            file_path, apply_subsampling=apply_subsampling
+        )
+        if len(seq_arr) == 0:
+            return np.empty(
+                (0, self.pretrained_sequence_encoder.output_dim), dtype=np.float16
+            ), v_arr, j_arr
+
+        cache_path = self._embedding_cache_path(file_path, apply_subsampling)
+        if cache_path is not None and os.path.exists(cache_path):
+            sequence_features = np.load(cache_path, mmap_mode="c")
+        else:
+            inverse_v_vocab = {index: gene for gene, index in self.v_vocab.items()}
+            sequence_features = self.pretrained_sequence_encoder.encode(
+                seq_arr, v_arr, inverse_v_vocab, raw_v_genes
+            )
+            if cache_path is not None:
+                temporary_path = f"{cache_path}.{os.getpid()}.tmp.npy"
+                np.save(temporary_path, sequence_features)
+                os.replace(temporary_path, cache_path)
+                sequence_features = np.load(cache_path, mmap_mode="c")
+        return sequence_features, v_arr, j_arr
+
+    def train(self, train_files, train_labels, val_files=None, val_labels=None):
+        """
+        Train ABMIL on cached representations from the frozen sequence encoder.
+
+        Args:
+            train_files: List of repertoire file paths.
+            train_labels: List/array of binary labels (0 = healthy, 1 = disease).
+
+        Returns:
+            Dict with 'best_val_loss' and 'epochs_trained'.
+        """
+        # Seed before model construction so initialization, dropout, and bag
+        # subsampling are repeatable and can be varied independently of the
+        # internal early-stopping split.
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        torch.manual_seed(self.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(self.seed)
+        if torch.backends.cudnn.is_available():
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+        train_files = list(train_files)
+        train_labels = np.array(train_labels)
+        vocabulary_files = train_files
+        external_validation = val_files is not None
+        if external_validation:
+            val_files = list(val_files)
+            if val_labels is None:
+                raise ValueError('val_labels is required when val_files is provided')
+            n_train = len(train_files)
+            train_files = train_files + val_files
+            train_labels = np.concatenate([train_labels, np.asarray(val_labels)])
+
+        self.device = torch.device(
+            "cuda" if self.use_gpu and torch.cuda.is_available() else "cpu"
+        )
+
+        # --- Build V/J gene vocabularies from training data ---
+        print("Scanning training bags for gene vocabulary...")
+        v_genes, j_genes = set(), set()
+        for fp in tqdm(vocabulary_files, desc="Scanning bags"):
+            # Only the V/J vocabulary is retained from this scan. Do not keep
+            # every raw repertoire DataFrame alive for the rest of training.
+            df = self.load_repertoire(
+                fp,
+                use_cache=False,
+                apply_subsampling=True,
+            )
+            if self.v_gene_col in df.columns:
+                for g in df[self.v_gene_col].dropna():
+                    if isinstance(g, str) and g:
+                        v_genes.add(self._normalize_gene(g))
+            if self.j_gene_col in df.columns:
+                for g in df[self.j_gene_col].dropna():
+                    if isinstance(g, str) and g:
+                        j_genes.add(self._normalize_gene(g))
+
+        # index 0 is reserved for unknown genes
+        self.v_vocab = {g: i + 1 for i, g in enumerate(sorted(v_genes))}
+        self.j_vocab = {g: i + 1 for i, g in enumerate(sorted(j_genes))}
+        n_v = len(self.v_vocab) + 1
+        n_j = len(self.j_vocab) + 1
+        print(f"V-gene vocabulary: {n_v} classes  |  J-gene vocabulary: {n_j} classes")
+
+        # --- Train / val split by bag ---
+        n = len(train_files)
+        if external_validation:
+            tr_idx = np.arange(n_train)
+            val_idx = np.arange(n_train, n)
+        else:
+            tr_idx, val_idx = train_test_split(
+                np.arange(n), test_size=self.val_split,
+                random_state=self.split_seed, stratify=train_labels)
+
+        n_pos = int(train_labels[tr_idx].sum())
+        n_neg = len(tr_idx) - n_pos
+        pos_weight = n_neg / max(n_pos, 1)
+        print(f"Training set: {n_pos} positive, {n_neg} negative  (pos_weight={pos_weight:.3f})")
+
+        # --- Build frozen sequence encoder + trainable ABMIL layers ---
+        self.pretrained_sequence_encoder = build_pretrained_sequence_encoder(
+            self.sequence_encoder,
+            self.pretrained_model,
+            self.device,
+            self.pretrained_batch_size,
+            self.tcrvalid_repo,
+        )
+        self.encoder = PretrainedTCRSeqEncoder(
+            sequence_dim=self.pretrained_sequence_encoder.output_dim,
+            n_v_genes=n_v,
+            n_j_genes=n_j,
+            embedding_dim_genes=self.embedding_dim_genes,
+            features=self.features,
+        ).to(self.device)
+
+        print(f"Encoding bags with frozen {self.sequence_encoder} encoder...")
+        # Materialize only the representations used by each split. Previously
+        # every bag was encoded for both training and validation, even though
+        # the training loop only reads tr_idx and validation only reads val_idx.
+        train_bag_arrays = {
+            int(i): self._get_bag_arrays(
+                train_files[i], apply_subsampling=True
+            )
+            for i in tqdm(tr_idx, desc="Encoding training bags")
+        }
+        # Validation bags use all sequences, matching prediction behavior.
+        val_bag_arrays = {
+            int(i): self._get_bag_arrays(
+                train_files[i], apply_subsampling=False
+            )
+            for i in tqdm(val_idx, desc="Encoding validation bags")
+        }
+
+        self.model = TCRGatedAttentionMIL(
+            input_dim=self.encoder.output_dim,
+            M=self.M,
+            L=self.L,
+            dropout=self.dropout,
+        ).to(self.device)
+
+        optimizer = optim.Adam(
+            list(self.encoder.parameters()) + list(self.model.parameters()),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+
+        # --- Training loop with early stopping ---
+        rng = np.random.RandomState(self.seed)
+        best_val_loss = float("inf")
+        patience_ctr = 0
+        best_enc_state = None
+        best_mil_state = None
+        epochs_trained = 0
+
+        for epoch in range(1, self.epochs + 1):
+            epochs_trained = epoch
+            epoch_rng = np.random.RandomState(self.seed + epoch)
+
+            self.encoder.train()
+            self.model.train()
+            train_loss = 0.0
+            n_train_used = 0
+
+            for i in rng.permutation(tr_idx):
+                seq_arr, v_arr, j_arr = train_bag_arrays[i]
+                K = seq_arr.shape[0]
+                if K == 0:
+                    continue
+
+                row_inds = None
+                if self.max_instances is not None and K > self.max_instances:
+                    row_inds = np.sort(epoch_rng.choice(K, self.max_instances, replace=False))
+
+                seq_t, v_t, j_t = self._to_tensors(seq_arr, v_arr, j_arr, row_inds)
+                H = self.encoder(seq_t, v_t, j_t)
+                y = torch.tensor([[train_labels[i]]], dtype=torch.float32, device=self.device)
+
+                optimizer.zero_grad()
+                loss, _ = self.model.calculate_objective(H, y, pos_weight=pos_weight)
+                loss.backward()
+                optimizer.step()
+
+                train_loss += loss.item()
+                n_train_used += 1
+
+            # Validation — all sequences, no repertoire-level subsampling
+            self.encoder.eval()
+            self.model.eval()
+            val_loss = 0.0
+            n_val_used = 0
+
+            with torch.no_grad():
+                for i in val_idx:
+                    seq_arr, v_arr, j_arr = val_bag_arrays[i]
+                    if seq_arr.shape[0] == 0:
+                        continue
+
+                    seq_t, v_t, j_t = self._to_tensors(seq_arr, v_arr, j_arr)
+                    H = self.encoder(seq_t, v_t, j_t)
+                    y = torch.tensor([[train_labels[i]]], dtype=torch.float32, device=self.device)
+                    loss, _ = self.model.calculate_objective(H, y, pos_weight=pos_weight)
+
+                    val_loss += loss.item()
+                    n_val_used += 1
+
+            mean_train_loss = train_loss / max(n_train_used, 1)
+            mean_val_loss = val_loss / max(n_val_used, 1)
+
+            if epoch % 10 == 0:
+                print(
+                    f"Epoch {epoch:3d}: "
+                    f"train_loss={mean_train_loss:.4f}  "
+                    f"val_loss={mean_val_loss:.4f}"
+                )
+
+            if mean_val_loss < best_val_loss:
+                best_val_loss = mean_val_loss
+                patience_ctr = 0
+                best_enc_state = {k: v.detach().cpu().clone() for k, v in self.encoder.state_dict().items()}
+                best_mil_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+            else:
+                patience_ctr += 1
+                if patience_ctr >= self.patience:
+                    print(f"Early stopping at epoch {epoch}.")
+                    break
+
+        if best_enc_state is not None:
+            self.encoder.load_state_dict(best_enc_state)
+            self.model.load_state_dict(best_mil_state)
+
+        return {"best_val_loss": best_val_loss, "epochs_trained": epochs_trained}
+
+    # ------------------------------------------------------------------
+    # Save / load
+    # ------------------------------------------------------------------
+
+    def save(self, save_dir):
+        """Persist trained encoder and MIL model to save_dir."""
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(self.encoder.state_dict(), os.path.join(save_dir, 'encoder.pt'))
+        torch.save(self.model.state_dict(), os.path.join(save_dir, 'mil.pt'))
+        with open(os.path.join(save_dir, 'meta.json'), 'w') as f:
+            json.dump({
+                'M': self.M, 'L': self.L, 'dropout': self.dropout,
+                'max_length': self.max_length,
+                'embedding_dim_aa': self.embedding_dim_aa,
+                'embedding_dim_genes': self.embedding_dim_genes,
+                'kernel': self.kernel, 'conv_units': list(self.conv_units),
+                'features': self.features,
+                'sequence_encoder': self.sequence_encoder,
+                'pretrained_model': self.pretrained_model,
+                'pretrained_batch_size': self.pretrained_batch_size,
+                'embedding_cache_dir': self.embedding_cache_dir,
+                'tcrvalid_repo': (
+                    str(self.tcrvalid_repo) if self.tcrvalid_repo is not None else None
+                ),
+                'sequence_col': self.sequence_col,
+                'v_gene_col': self.v_gene_col, 'j_gene_col': self.j_gene_col,
+                'ignore_allele': self.ignore_allele,
+                'canonicalize_genes': self.canonicalize_genes,
+                'v_vocab': self.v_vocab, 'j_vocab': self.j_vocab,
+            }, f, indent=2)
+        print(f"  Model saved to: {save_dir}")
+
+    @classmethod
+    def load(cls, save_dir, use_gpu=True):
+        """Reconstruct a trained ABMIL from a save_dir written by save()."""
+        with open(os.path.join(save_dir, 'meta.json')) as f:
+            meta = json.load(f)
+
+        obj = cls(
+            M=meta['M'], L=meta['L'], dropout=meta['dropout'],
+            max_length=meta['max_length'],
+            embedding_dim_aa=meta['embedding_dim_aa'],
+            embedding_dim_genes=meta['embedding_dim_genes'],
+            kernel=meta['kernel'], conv_units=tuple(meta['conv_units']),
+            features=meta['features'],
+            sequence_col=meta['sequence_col'],
+            v_gene_col=meta['v_gene_col'], j_gene_col=meta['j_gene_col'],
+            ignore_allele=meta['ignore_allele'],
+            canonicalize_genes=meta.get('canonicalize_genes', False),
+            sequence_encoder=meta['sequence_encoder'],
+            pretrained_model=meta.get('pretrained_model'),
+            pretrained_batch_size=meta.get('pretrained_batch_size', 256),
+            embedding_cache_dir=meta.get('embedding_cache_dir'),
+            tcrvalid_repo=meta.get('tcrvalid_repo'),
+            use_gpu=use_gpu,
+        )
+        obj.v_vocab = meta['v_vocab']
+        obj.j_vocab = meta['j_vocab']
+
+        obj.device = torch.device(
+            'cuda' if use_gpu and torch.cuda.is_available() else 'cpu'
+        )
+        n_v = len(obj.v_vocab) + 1
+        n_j = len(obj.j_vocab) + 1
+
+        obj.pretrained_sequence_encoder = build_pretrained_sequence_encoder(
+            obj.sequence_encoder,
+            obj.pretrained_model,
+            obj.device,
+            obj.pretrained_batch_size,
+            obj.tcrvalid_repo,
+        )
+        obj.encoder = PretrainedTCRSeqEncoder(
+            sequence_dim=obj.pretrained_sequence_encoder.output_dim,
+            n_v_genes=n_v, n_j_genes=n_j,
+            embedding_dim_genes=meta['embedding_dim_genes'],
+            features=meta['features'],
+        ).to(obj.device)
+
+        obj.model = TCRGatedAttentionMIL(
+            input_dim=obj.encoder.output_dim,
+            M=meta['M'], L=meta['L'], dropout=meta['dropout'],
+        ).to(obj.device)
+
+        map_loc = obj.device
+        obj.encoder.load_state_dict(
+            torch.load(os.path.join(save_dir, 'encoder.pt'), map_location=map_loc)
+        )
+        obj.model.load_state_dict(
+            torch.load(os.path.join(save_dir, 'mil.pt'), map_location=map_loc)
+        )
+        obj.encoder.eval()
+        obj.model.eval()
+        return obj
+
+    def get_bag_embedding(self, file_path):
+        """Return the attention-weighted bag embedding (shape: (M,)) before the classifier.
+
+        Runs the trained encoder and gated-attention mechanism without applying
+        the final classification linear layer.  Use this to extract per-repertoire
+        representations for downstream residualization or linear probing.
+        """
+        if self.encoder is None or self.model is None:
+            raise RuntimeError("Model has not been trained yet.")
+
+        self.encoder.eval()
+        self.model.eval()
+
+        seq_arr, v_arr, j_arr = self._get_bag_arrays(
+            file_path, apply_subsampling=False
+        )
+        if seq_arr.shape[0] == 0:
+            return np.zeros(self.M, dtype=np.float32)
+
+        seq_t, v_t, j_t = self._to_tensors(seq_arr, v_arr, j_arr)
+        with torch.no_grad():
+            H = self.encoder(seq_t, v_t, j_t)              # (K, encoder.output_dim)
+            H_enc = self.model.encoder(H)                   # (K, M)
+            A = self.model.attention_w(
+                self.model.attention_V(H_enc) * self.model.attention_U(H_enc)
+            )                                               # (K, 1)
+            A = F.softmax(A.transpose(1, 0), dim=1)        # (1, K)
+            Z = torch.mm(A, H_enc)                         # (1, M)
+        return Z.squeeze(0).cpu().numpy()                   # (M,)
+
+    def predict_diagnosis(self, file_path):
+        """
+        Predict disease probability for a single repertoire.
+
+        Args:
+            file_path: Path to a repertoire .tsv / .tsv.gz file.
+
+        Returns:
+            Dict with 'probability_positive' (float) and 'diagnosis' (str).
+        """
+        if self.encoder is None or self.model is None:
+            raise RuntimeError("Model has not been trained yet.")
+
+        self.encoder.eval()
+        self.model.eval()
+
+        # Prediction uses all sequences, not repertoire-level subsampling.
+        seq_arr, v_arr, j_arr = self._get_bag_arrays(
+            file_path, apply_subsampling=False
+        )
+        if seq_arr.shape[0] == 0:
+            return {"probability_positive": 0.5, "diagnosis": "Healthy"}
+
+        seq_t, v_t, j_t = self._to_tensors(seq_arr, v_arr, j_arr)
+        with torch.no_grad():
+            H = self.encoder(seq_t, v_t, j_t)
+            Y_prob, _, _ = self.model(H)
+
+        prob = float(Y_prob.squeeze().cpu().item())
+        return {
+            "probability_positive": prob,
+            "diagnosis": "Diseased" if prob >= 0.5 else "Healthy",
+        }
