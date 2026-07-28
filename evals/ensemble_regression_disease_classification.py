@@ -148,13 +148,28 @@ class EnsembleRegressionEvaluator:
                             f"{file_prefix}{participant_label}_{specimen_label}{file_suffix}")
 
     def add_file_paths(self, metadata, data_dir, participant_col='participant_label',
-                       file_prefix='part_table_', file_suffix='.tsv.gz'):
+                       file_prefix='part_table_', file_suffix='.tsv.gz',
+                       file_template=None):
+        """
+        Resolve one repertoire file path per row.
+
+        By default paths follow the MAL-ID convention
+        `{file_prefix}{participant}_{specimen}{file_suffix}`. Cohorts that name
+        files differently (e.g. Emerson/CMV, where participant == specimen and
+        files are `<specimen>.tsv`) can pass `file_template`, a format string
+        over metadata columns such as "{repertoire_file}".
+        """
         metadata = metadata.copy()
-        metadata['file_path'] = metadata.apply(
-            lambda row: self.construct_file_path(
-                row[participant_col], row['specimen_label'], data_dir, file_prefix, file_suffix
-            ), axis=1
-        )
+        if file_template is not None:
+            metadata['file_path'] = metadata.apply(
+                lambda row: os.path.join(data_dir, file_template.format(**row)), axis=1
+            )
+        else:
+            metadata['file_path'] = metadata.apply(
+                lambda row: self.construct_file_path(
+                    row[participant_col], row['specimen_label'], data_dir, file_prefix, file_suffix
+                ), axis=1
+            )
         return metadata
 
     def filter_existing_files(self, metadata):
@@ -175,6 +190,7 @@ class EnsembleRegressionEvaluator:
     def run_cross_validation(self, metadata_path, target_disease, data_dir,
                               participant_col='participant_label',
                               file_prefix='part_table_', file_suffix='.tsv.gz',
+                              file_template=None,
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3, random_state=7,
@@ -228,7 +244,7 @@ class EnsembleRegressionEvaluator:
                                                 random_baseline=random_baseline,
                                                 random_baseline_seed=random_baseline_seed)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
-                                        file_prefix, file_suffix)
+                                        file_prefix, file_suffix, file_template)
         metadata = self.filter_existing_files(metadata)
 
         if ext_metadata_path is not None:
@@ -393,6 +409,10 @@ if __name__ == "__main__":
     parser.add_argument('--fold_col', default='malid_cross_validation_fold_id_when_in_test_set')
     parser.add_argument('--file_prefix', default='part_table_')
     parser.add_argument('--file_suffix', default='.tsv.gz')
+    parser.add_argument('--file_template', type=str, default=None,
+                        help='Filename template for repertoire files, formatted with '
+                             'metadata columns, e.g. "{repertoire_file}" or '
+                             '"{specimen_label}.tsv". Overrides --file_prefix/--file_suffix.')
     parser.add_argument('--val_split', type=float, default=0.2,
                         help='Internal val fraction for alpha tuning (default: 0.2)')
     parser.add_argument('--n_cv_folds', type=int, default=5,
@@ -475,6 +495,7 @@ if __name__ == "__main__":
                 participant_col=args.participant_col,
                 file_prefix=args.file_prefix,
                 file_suffix=args.file_suffix,
+                file_template=args.file_template,
                 disease_col=args.disease_col,
                 fold_col=args.fold_col,
                 require_demographics=args.require_demographics,
@@ -518,6 +539,7 @@ if __name__ == "__main__":
             participant_col=args.participant_col,
             file_prefix=args.file_prefix,
             file_suffix=args.file_suffix,
+            file_template=args.file_template,
             disease_col=args.disease_col,
             fold_col=args.fold_col,
             require_demographics=args.require_demographics,

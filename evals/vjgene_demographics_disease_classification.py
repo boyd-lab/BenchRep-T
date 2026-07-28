@@ -85,14 +85,30 @@ class VJDemographicsEvaluator:
             f"{file_prefix}{participant_label}_{specimen_label}{file_suffix}")
 
     def add_file_paths(self, metadata, data_dir, participant_col='participant_label',
-                       file_prefix='part_table_', file_suffix='.tsv.gz'):
+                       file_prefix='part_table_', file_suffix='.tsv.gz',
+                       file_template=None):
+        """
+        Resolve one repertoire file path per row.
+
+        By default paths follow the MAL-ID convention
+        `{file_prefix}{participant}_{specimen}{file_suffix}`. Cohorts that name
+        files differently (e.g. Emerson/CMV, where participant == specimen and
+        files are `<specimen>.tsv`) can pass `file_template`, a format string
+        over metadata columns such as "{repertoire_file}".
+        """
         metadata = metadata.copy()
-        metadata['file_path'] = metadata.apply(
-            lambda row: self.construct_file_path(
-                row[participant_col], row['specimen_label'],
-                data_dir, file_prefix, file_suffix
-            ), axis=1
-        )
+        if file_template is not None:
+            metadata['file_path'] = metadata.apply(
+                lambda row: os.path.join(data_dir, file_template.format(**row)),
+                axis=1
+            )
+        else:
+            metadata['file_path'] = metadata.apply(
+                lambda row: self.construct_file_path(
+                    row[participant_col], row['specimen_label'],
+                    data_dir, file_prefix, file_suffix
+                ), axis=1
+            )
         return metadata
 
     def filter_existing_files(self, metadata):
@@ -179,6 +195,7 @@ class VJDemographicsEvaluator:
     def run_cross_validation(self, metadata_path, target_disease, data_dir,
                               participant_col='participant_label',
                               file_prefix='part_table_', file_suffix='.tsv.gz',
+                              file_template=None,
                               disease_col='disease',
                               fold_col='malid_cross_validation_fold_id_when_in_test_set',
                               n_folds=3,
@@ -193,7 +210,7 @@ class VJDemographicsEvaluator:
         metadata = self.prepare_disease_data(raw_metadata, target_disease,
                                              disease_col)
         metadata = self.add_file_paths(metadata, data_dir, participant_col,
-                                        file_prefix, file_suffix)
+                                        file_prefix, file_suffix, file_template)
         metadata = self.filter_existing_files(metadata)
 
         if ext_metadata_path is not None:
@@ -379,6 +396,11 @@ if __name__ == "__main__":
                         help='Directory containing repertoire .tsv.gz files')
     parser.add_argument('--target_disease', type=str, required=True,
                         help='Disease to classify (e.g. Lupus, T1D, HIV)')
+    parser.add_argument('--file_template', type=str, default=None,
+                        help='Filename template for repertoire files, formatted with '
+                             'metadata columns, e.g. "{repertoire_file}" or '
+                             '"{specimen_label}.tsv". Overrides the default '
+                             '"part_table_{participant_label}_{specimen_label}.tsv.gz".')
     parser.add_argument('--output_csv', type=str, default=None,
                         help='Path to save per-sample scores CSV (optional)')
     parser.add_argument('--ext_metadata_path', type=str, default=None,
@@ -396,6 +418,7 @@ if __name__ == "__main__":
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
+        file_template=args.file_template,
         ext_metadata_path=args.ext_metadata_path,
         ext_data_dir=args.ext_data_dir,
         ext_file_template=args.ext_file_template,
