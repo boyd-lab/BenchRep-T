@@ -1,4 +1,4 @@
-name: simple
+name: benchrep-base
 channels:
   - conda-forge
 dependencies:
@@ -13,6 +13,5 @@ dependencies:
       - biopython==1.87
       - matplotlib==3.10.8
       - seaborn==0.13.2
-      - torch==2.5.1
       - xgboost==3.2.0
       - python-Levenshtein==0.27.3

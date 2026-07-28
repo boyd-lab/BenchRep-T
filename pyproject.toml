@@ -16,12 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Statistical, feature-engineered, and ABMIL methods
-simple = [
+# Statistical and feature-engineered methods
+base = [
     "biopython>=1.83,<2",
     "matplotlib>=3.7,<4",
     "seaborn>=0.12,<1",
-    "torch>=2.3,<3",
     "xgboost>=2,<4",
 ]
 # GIANA clustering model
@@ -32,6 +31,7 @@ giana = [
 # Attention-based MIL model (requires PyTorch)
 abmil = [
     "torch>=2.3,<3",
+    "transformers>=4.41,<5",
 ]
 # DeepRC model and its upstream utilities
 deeprc = [
@@ -64,7 +64,7 @@ drivers = [
 ]
 # All optional dependencies
 all = [
-    "benchrep-t[simple,giana,deeprc,deeptcr,drivers]",
+    "benchrep-t[base,abmil,giana,deeprc,deeptcr,drivers]",
 ]
 
 [tool.setuptools.packages.find]

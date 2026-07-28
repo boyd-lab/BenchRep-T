@@ -204,22 +204,29 @@ Other preprocessing utilities:
 
 Requires Python >= 3.10. The recommended installation uses one minimal Conda
 environment per method family so that DeepTCR's TensorFlow 2.12 constraints do
-not conflict with the newer PyTorch and scientific-Python stacks.
+not conflict with the newer PyTorch and scientific-Python stacks. ABMIL, GIANA,
+DeepRC, and DeepTCR are separated from `benchrep-base` to make dependency
+resolution easier and keep each method's framework and version constraints
+isolated.
 
 | Environment | File | Methods |
 |-------------|------|---------|
-| `simple` | `environment-simple.yml` | Emerson, Ostmeyer, Ensemble Regression/XGBoost, and ABMIL |
+| `benchrep-base` | `environment-base.yml` | Emerson, Ostmeyer, and Ensemble Regression/XGBoost |
+| `abmil` | `environment-abmil.yml` | ABMIL and pretrained-encoder ABMIL variants |
 | `giana` | `environment-giana.yml` | GIANA |
 | `deeprc` | `environment-deeprc.yml` | DeepRC |
 | `deeptcr` | `environment-deeptcr.yml` | DeepTCR |
 
 The environments are separated as follows:
 
-- **`simple`** uses Python 3.11 and contains the shared scientific stack,
-  PyTorch, and XGBoost. It runs Emerson, Ostmeyer, Ensemble Regression,
-  Ensemble XGBoost, and ABMIL, as well as the common preprocessing and analysis
-  utilities. This replaces the former general-purpose `airr-bench`
+- **`benchrep-base`** uses Python 3.11 and contains the shared scientific
+  stack and XGBoost. It runs Emerson, Ostmeyer, Ensemble Regression, and
+  Ensemble XGBoost, as well as the common preprocessing and analysis
+  utilities. The project prefix distinguishes it from Conda's special `base`
   environment.
+- **`abmil`** uses Python 3.10 with PyTorch and Transformers. It runs standard
+  ABMIL and the pretrained TCR-encoder variants without pulling TensorFlow into
+  the environment.
 - **`giana`** uses Python 3.11 with Biopython and FAISS CPU. Keeping GIANA
   separate avoids coupling its FAISS and NumPy compatibility constraints to
   the deep-learning environments.
@@ -234,7 +241,8 @@ The environments are separated as follows:
 Create the environments from the repository root:
 
 ```bash
-conda env create -f environment-simple.yml
+conda env create -f environment-base.yml
+conda env create -f environment-abmil.yml
 conda env create -f environment-giana.yml
 conda env create -f environment-deeprc.yml
 conda env create -f environment-deeptcr.yml
@@ -245,7 +253,7 @@ are already supplied by the corresponding YAML, so `--no-deps` prevents pip
 from changing the tested method-specific pins:
 
 ```bash
-for env_name in simple giana deeprc deeptcr; do
+for env_name in benchrep-base abmil giana deeprc deeptcr; do
     conda run -n "${env_name}" python -m pip install --no-deps -e .
 done
 ```
@@ -255,10 +263,6 @@ Run the method-level import smoke tests with:
 ```bash
 bash scripts/smoke_test_conda_envs.sh
 ```
-
-The environment previously called `airr-bench` is now named `simple`. Existing
-local `airr-bench` environments do not need to be removed; new installations
-should use `environment-simple.yml`.
 
 For GPU execution, PyTorch includes its CUDA runtime dependencies. DeepTCR is
 pinned to TensorFlow 2.12 because the bundled DeepTCR source uses TensorFlow 1
@@ -275,7 +279,8 @@ Install with [uv](https://docs.astral.sh/uv/):
 uv sync
 
 # With specific model extras
-uv sync --extra simple
+uv sync --extra base
+uv sync --extra abmil
 uv sync --extra giana
 uv sync --extra deeprc
 uv sync --extra deeptcr
