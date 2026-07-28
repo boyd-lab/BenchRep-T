@@ -209,9 +209,6 @@ __marimo__/
 # Project data and outputs
 data/
 
-# bash/
-plots/
-
 # Mal-ID-internal preprocessing scripts (not part of the public benchmark)
 external_data_process/reassign_clones_bcr_clones.py
 external_data_process/reassign_clones_external.py
@@ -219,3 +216,7 @@ scripts/check_demographics_v2.py
 
 # Preprocessing run logs/reports (per-machine artifacts)
 preprocessing/reports/
+results/
+bash/
+logs/
+plots/

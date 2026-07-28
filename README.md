@@ -1,22 +1,21 @@
 # BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics
 
 A unified benchmark for TCRβ repertoire-based disease classification,
-harmonizing the Mal-ID cohort (Zaslavsky et al. 2025) with external T1D
-(Mitchell and Rawat), TB, RA, and Emerson CMV cohorts into a single
-AIRR-compliant schema. BenchRep-T evaluates statistical, feature-engineered,
-clustering, and deep-learning methods using identical inputs and fixed splits.
+harmonizing cohorts from Zaslavsky et al. (Mal-ID), Mitchell, Rawat, Musvosvi,
+Savola, and Emerson into a single AIRR-compliant schema. BenchRep-T evaluates
+statistical, feature-engineered, clustering, and deep-learning methods using
+identical inputs and fixed splits.
 
 ## Overview
 
-BenchRep-T includes disease and serostatus tasks organized into four groups:
+BenchRep-T includes the following disease and serostatus tasks:
 
-- **Mal-ID-only**: HIV, Lupus, Influenza, COVID-19
-- **Multi-cohort T1D**: Mal-ID, Mitchell, and Rawat cohorts, supporting
-  within-cohort evaluation and transfer to independently collected cohorts
-- **External disease cohorts**: Tuberculosis progression and Rheumatoid
-  Arthritis
-- **CMV serostatus**: Emerson et al. CMV-positive versus CMV-negative
-  repertoires
+- **HIV, Lupus, Influenza, and COVID-19** in the Zaslavsky/Mal-ID cohort
+- **T1D** across the Zaslavsky/Mal-ID, Mitchell, and Rawat cohorts, supporting
+  both within-cohort and cross-cohort evaluation
+- **Tuberculosis progression** in the Musvosvi cohort
+- **Rheumatoid Arthritis** in the Savola cohort
+- **CMV serostatus** in the Emerson cohort
 
 It defines four evaluation tasks: disease classification, driver-sequence identification, sequencing-depth scaling, and demographic-confounding analysis. All methods consume identical AIRR-formatted repertoire files and are scored on pre-assigned 3-fold cross-validation splits.
 
@@ -33,8 +32,8 @@ models/                          Classification methods
 ├── DeepRC/                      Widrich et al. 2020          (deep learning)
 └── DeepTCR/                     Sidhom et al. 2021           (deep learning)
 evals/                           Per-method experiment scripts (disease, drivers, depth, demographics)
-preprocessing/                   Mal-ID data cleaning and preparation
-external_data_process/           immunoSEQ dataset conversion (Adaptive -> AIRR) and gene harmonization
+preprocessing/                   Repertoire cleaning and preparation
+external_data_process/           Cohort-specific conversion to AIRR and gene harmonization
 utils/                           Repertoire I/O, metric helpers, cohort/covariate adjustment
 scripts/                         Misc analysis helpers
 ```
@@ -70,20 +69,30 @@ cross-validation, with an internal 80/20 or 90/10 train/validation split for
 hyperparameter tuning. The following cohort protocols reuse the same evaluation
 harness:
 
-- **Mal-ID-only diseases** (HIV, Lupus, Influenza, COVID-19) — Mal-ID's pre-assigned 3-fold splits, scored against Healthy/Background controls.
-- **Multi-cohort T1D** — Mal-ID T1D specimens can be pooled with the Mitchell
-  cohort for three-fold evaluation. The Rawat cohort adds a larger independent
-  T1D dataset for within-Rawat cross-validation and out-of-distribution
-  evaluation on Mal-ID and Mitchell.
-- **External-only diseases (TB, RA)** — Each cohort is evaluated entirely within itself under the same 3-fold protocol; this measures within-cohort accuracy on a different assay rather than cross-cohort transfer.
-- **CMV serostatus** — The Emerson cohort is evaluated as CMV-positive versus
-  CMV-negative classification using fixed three-fold splits.
+- **Zaslavsky/Mal-ID** — HIV, Lupus, Influenza, COVID-19, and T1D are scored
+  against Healthy/Background controls using preassigned folds.
+- **Mitchell and Rawat T1D** — Each cohort supports within-cohort evaluation.
+  T1D models can also be trained on one cohort and evaluated on the others to
+  measure cross-cohort generalization. Zaslavsky/Mal-ID and Mitchell T1D
+  repertoires can additionally be pooled for three-fold evaluation.
+- **Musvosvi TB and Savola RA** — Each cohort uses the same three-fold
+  within-cohort protocol.
+- **Emerson CMV** — CMV-positive versus CMV-negative classification uses fixed
+  three-fold splits.
 
 Metrics: AUROC, AUPR.
 
 ### 2. Driver Sequence Identification
 
-Tests whether per-sequence scores produced as a by-product of classification surface known antigen-specific TCRs. Ground truth is built from VDJdb (confidence ≥ 2), augmented for COVID-19 with experimentally validated SARS-CoV-2 clonotypes from Minervina et al., and matched to Mal-ID repertoires via ≥90% Levenshtein similarity. Supported for Emerson 2017, GIANA, Ensemble Regression, Ensemble XGBoost, ABMIL, and DeepRC; each ranks sequences by its native score (Fisher p-value, cluster disease fraction, decision-function weight, attention weight, etc.). A random-chance baseline is provided by `compute_random_baseline_recall.py`.
+Tests whether per-sequence scores produced as a by-product of classification
+surface known antigen-specific TCRs. Ground truth is built from VDJdb
+(confidence ≥ 2), augmented for COVID-19 with experimentally validated
+SARS-CoV-2 clonotypes from Minervina et al., and matched to benchmark
+repertoires via ≥90% Levenshtein similarity. Supported for Emerson 2017, GIANA,
+Ensemble Regression, Ensemble XGBoost, ABMIL, and DeepRC; each ranks sequences
+by its native score (Fisher p-value, cluster disease fraction,
+decision-function weight, attention weight, etc.). A random-chance baseline is
+provided by `compute_random_baseline_recall.py`.
 
 Metrics: recall@k (k ∈ {100, 1000, 10000}, macro-averaged across disease-positive repertoires).
 
@@ -102,15 +111,18 @@ Two complementary analyses probe whether classifier signal is carried by partici
 
 ### Sources
 
-- **Mal-ID** (Zaslavsky et al. 2025) — 550 TCRβ specimens from 542 participants across multiple clinical sites: 197 Healthy/Background, 98 HIV, 96 T1D, 64 Lupus, 58 COVID-19, 37 Influenza. A subset has age, sex, and self-reported ancestry annotations.
-- **Mitchell T1D** — 197 independently collected T1D and control repertoires.
-- **Rawat T1D** — 614 repertoires: 426 T1D and 188 Healthy/Background.
-- **TB progression** (Musvosvi et al.) — 140 repertoires.
-- **Rheumatoid Arthritis** (Savola et al.) — 94 repertoires.
-- **Emerson CMV** (Emerson et al. 2017) — 761 labeled repertoires: 340
-  CMV-positive and 421 CMV-negative. An additional 25 specimens with unknown
-  CMV status are retained in the source metadata but excluded from supervised
-  classification.
+| Cohort | Prediction task | Labeled repertoires | Class composition |
+|--------|-----------------|--------------------:|-------------------|
+| Zaslavsky/Mal-ID | HIV, T1D, Lupus, COVID-19, and Influenza vs Healthy/Background | 550 | 197 Healthy/Background; 98 HIV; 96 T1D; 64 Lupus; 58 COVID-19; 37 Influenza |
+| Mitchell | T1D vs control | 197 | T1D and control |
+| Rawat | T1D vs Healthy/Background | 614 | 426 T1D; 188 Healthy/Background |
+| Musvosvi | TB progression vs control | 140 | TB progressor and control |
+| Savola | Rheumatoid Arthritis vs control | 94 | RA and control |
+| Emerson | CMV seropositive vs seronegative | 761 | 340 CMV-positive; 421 CMV-negative |
+
+The Emerson source metadata also contains 25 specimens with unknown CMV status;
+these are retained in the metadata but excluded from supervised classification.
+Demographic annotations are used where they are available.
 
 ### Format
 
@@ -127,12 +139,16 @@ File naming convention: `part_table_<participant>_<specimen>.tsv.gz`
 
 ### Metadata
 
-`metadata_malid.tsv` provides Mal-ID sample annotations;
-`metadata_{T1D,RA,Tb}_final.tsv` provides the corresponding external-cohort
-annotations; `data/external_datasets/Rawat_T1D/cohort1_metadata.tsv` describes
-Rawat T1D; and
-`data/external_datasets/CMV/emerson_cohort_metadata.tsv` describes Emerson CMV.
-Common columns include:
+| Cohort | Metadata file |
+|--------|---------------|
+| Zaslavsky/Mal-ID | `data/malid_clean/metadata.tsv` |
+| Mitchell | `data/external_datasets/T1D/metadata_T1D_final.tsv` |
+| Rawat | `data/external_datasets/Rawat_T1D/cohort1_metadata.tsv` |
+| Musvosvi | `data/external_datasets/tuberculosis/metadata_Tb_final.tsv` |
+| Savola | `data/external_datasets/rheumatoid_arthritis/metadata_RA_final.tsv` |
+| Emerson | `data/external_datasets/CMV/emerson_cohort_metadata.tsv` |
+
+The harmonized metadata tables use the following common columns:
 
 | Column | Description |
 |--------|-------------|
@@ -140,7 +156,7 @@ Common columns include:
 | `specimen_label` | Specimen identifier |
 | `disease` | Disease label (e.g., HIV, Covid19, Healthy/Background) |
 | `malid_cross_validation_fold_id_when_in_test_set` | Pre-assigned CV fold (0, 1, or 2) |
-| `age`, `sex`, `ancestry` | Demographics (Mal-ID; subset of specimens) |
+| `age`, `sex`, `ancestry` | Demographics, where available |
 
 ### HuggingFace
 
@@ -152,26 +168,36 @@ Emerson CMV, are hosted at:
 
 ## Preprocessing
 
-Mal-ID and the external cohorts enter the pipeline in different raw formats and
-follow conceptually parallel cleanup paths that converge on a single
-AIRR-compliant schema (`cdr3_aa`, `v_call`, `j_call`).
+Every cohort is processed through a cohort-specific adapter and converges on
+the same AIRR-compliant schema (`cdr3_aa`, `v_call`, `j_call`).
 
-**Mal-ID** (`preprocessing/`): drops non-productive rearrangements and low-confidence V calls, strips IgBLAST whitespace and uppercases amino-acid fields, drops rows with missing or non-standard CDR3/V/J, collapses V-gene alleles indistinguishable under the FR3 primer set (per Meysman et al.), renames to AIRR columns, and splits per-participant tables into per-specimen files.
+**Zaslavsky/Mal-ID adapter** (`preprocessing/`): drops non-productive
+rearrangements and low-confidence V calls, strips IgBLAST whitespace and
+uppercases amino-acid fields, drops rows with missing or non-standard CDR3/V/J,
+collapses V-gene alleles indistinguishable under the FR3 primer set (per
+Meysman et al.), renames to AIRR columns, and splits per-participant tables into
+per-specimen files.
 
-**External cohorts** (`external_data_process/`): cohort-specific adapters handle
-the Mitchell, Rawat, TB, RA, and Emerson input schemas. They rename Adaptive
+**Mitchell, Rawat, Musvosvi, Savola, and Emerson adapters**
+(`external_data_process/`): handle each cohort's input schema, rename Adaptive
 columns (`aminoAcid` → `cdr3_aa`, etc.), convert Adaptive V/J names (for example,
 `TCRBV07-02`) to AIRR/IMGT form (`TRBV7-2`), strip allele annotations, and trim
-the flanking conserved cysteine and phenylalanine from each CDR3 to match the
-Mal-ID definition. Specimens with fewer than 1,000 unique post-preprocessing
-sequences are excluded where required by the cohort protocol.
+the flanking conserved cysteine and phenylalanine from each CDR3 to use a
+consistent sequence definition. Specimens with fewer than 1,000 unique
+post-preprocessing sequences are excluded where required by the cohort
+protocol.
 
-**Cross-source gene-label reconciliation**: when an immunoSEQ cohort is merged with Mal-ID (T1D), the Adaptive-style `-1` suffix on singleton TRBV families (TRBV2, TRBV9, TRBV13–15, TRBV18, TRBV19, TRBV27, TRBV28, TRBV30) is collapsed so the same gene receives the same label across sources. Within-source evaluations preserve each source's native labels. Reconciliation is handled by `utils/gene_harmonization.py`.
+**Cross-cohort gene-label reconciliation**: when Zaslavsky/Mal-ID and Mitchell
+T1D repertoires are combined, the Adaptive-style `-1` suffix on singleton TRBV
+families (TRBV2, TRBV9, TRBV13–15, TRBV18, TRBV19, TRBV27, TRBV28, TRBV30) is
+collapsed so the same gene receives the same label in both cohorts.
+Within-cohort evaluations preserve each cohort's native labels. Reconciliation
+is handled by `utils/gene_harmonization.py`.
 
 Other preprocessing utilities:
 
 - **Depth indices** (`preprocessing/generate_depth_indices.py`) — pre-generates reproducible nested subsampling indices for the depth-scaling experiment.
-- **Driver sequence matching** (`preprocessing/process_driver_sequences.py`) — matches VDJdb entries to Mal-ID repertoires via Levenshtein similarity.
+- **Driver sequence matching** (`preprocessing/process_driver_sequences.py`) — matches VDJdb entries to benchmark repertoires via Levenshtein similarity.
 - **Demographic analysis** (`preprocessing/check_demographics.py`) — summarizes demographic completeness per disease.
 
 ## Setup
