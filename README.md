@@ -162,7 +162,7 @@ The harmonized metadata tables use the following common columns:
 
 Preprocessed BenchRep-T repertoires and metadata are hosted on Hugging Face at:
 
-**[https://huggingface.co/datasets/lordim/BenchRep-T](https://huggingface.co/datasets/lordim/BenchRep-T)**
+**[https://huggingface.co/datasets/neurips-2026-dataset/BenchRep-T](https://huggingface.co/datasets/neurips-2026-dataset/BenchRep-T)**
 
 
 ## Preprocessing
