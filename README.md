@@ -35,7 +35,6 @@ evals/                           Per-method experiment scripts (disease, drivers
 preprocessing/                   Repertoire cleaning and preparation
 external_data_process/           Cohort-specific conversion to AIRR and gene harmonization
 utils/                           Repertoire I/O, metric helpers, cohort/covariate adjustment
-scripts/                         Misc analysis helpers
 ```
 
 ## Implemented Methods
@@ -255,12 +254,6 @@ from changing the tested method-specific pins:
 for env_name in benchrep-base abmil giana deeprc deeptcr; do
     conda run -n "${env_name}" python -m pip install --no-deps -e .
 done
-```
-
-Run the method-level import smoke tests with:
-
-```bash
-bash scripts/smoke_test_conda_envs.sh
 ```
 
 For GPU execution, PyTorch includes its CUDA runtime dependencies. DeepTCR is
