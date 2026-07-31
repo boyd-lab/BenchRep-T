@@ -83,7 +83,8 @@ TensorFlow's `and-cuda` extra, which supplies a matched CUDA 12 runtime, cuDNN,
 and PTX compiler while retaining the TensorFlow 1 compatibility APIs used by
 the bundled source. The example launcher discovers these libraries inside the
 environment, so it does not require a system CUDA toolkit. GIANA similarly uses
-a self-contained CUDA 12 FAISS wheel. These paths were smoke-tested on an H200.
+a self-contained CUDA 12 FAISS wheel. These GPU execution paths were validated
+on an H200.
 
 ### uv or pip
 
@@ -360,17 +361,14 @@ downloaded data, but removing or relocating `data/` by itself breaks its links.
 By default it uses the method-specific Conda environments documented below.
 The full 80-run matrix is compute-intensive and executes sequentially.
 Set `DRY_RUN=1 DOWNLOAD_DATA=0` to print all 80 commands without downloading or
-training. Set `SMOKE_TEST=1 MAX_FOLDS=1 USE_GPU=0` to execute every selected
-method end to end with small CPU training budgets. Smoke-test scores only check
-execution and are not benchmark results. `METHODS`, `DATASETS`, `OUTPUT_ROOT`,
-`USE_GPU`, `N_JOBS`, and `N_THREADS` can be overridden as environment
-variables.
+training. `METHODS`, `DATASETS`, `OUTPUT_ROOT`, `USE_GPU`, `N_JOBS`, and
+`N_THREADS` can be overridden as environment variables.
 
-For example, smoke-test all eight methods on Savola RA:
+For example, run the complete benchmark configuration for all eight methods on
+Savola RA:
 
 ```bash
-DATASETS=ra SMOKE_TEST=1 MAX_FOLDS=1 USE_GPU=0 N_JOBS=1 N_THREADS=1 \
-  bash examples/run_all_disease_classification.sh
+DATASETS=ra bash examples/run_all_disease_classification.sh
 ```
 
 

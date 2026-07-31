@@ -14,9 +14,6 @@ dependencies:
       - biopython==1.76
       - matplotlib==3.7.2
       - seaborn==0.12.2
-      # The CUDA extra supplies a matched CUDA 12 runtime, cuDNN, and ptxas.
-      # TensorFlow 2.15 retains the v1 compatibility APIs used by DeepTCR and
-      # has been validated on an NVIDIA H200 (compute capability 9.0).
       - tensorflow[and-cuda]==2.15.1
       - umap-learn==0.5.5
       - logomaker==0.8
