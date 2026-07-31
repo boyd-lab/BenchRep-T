@@ -19,6 +19,97 @@ BenchRep-T includes the following disease and serostatus tasks:
 
 It defines four evaluation tasks: disease classification, driver-sequence identification, sequencing-depth scaling, and demographic-confounding analysis. All methods consume identical AIRR-formatted repertoire files and are scored on pre-assigned 3-fold cross-validation splits.
 
+## Setup
+
+Requires Python >= 3.10. The recommended installation uses one minimal Conda
+environment per method family so that DeepTCR's TensorFlow 2.12 constraints do
+not conflict with the newer PyTorch and scientific-Python stacks. ABMIL, GIANA,
+DeepRC, and DeepTCR are separated from `benchrep-base` to make dependency
+resolution easier and keep each method's framework and version constraints
+isolated.
+
+| Environment | File | Methods |
+|-------------|------|---------|
+| `benchrep-base` | `environment-base.yml` | Emerson, Ostmeyer, and Ensemble Regression/XGBoost |
+| `abmil` | `environment-abmil.yml` | ABMIL and pretrained-encoder ABMIL variants |
+| `giana` | `environment-giana.yml` | GIANA |
+| `deeprc` | `environment-deeprc.yml` | DeepRC |
+| `deeptcr` | `environment-deeptcr.yml` | DeepTCR |
+
+The environments are separated as follows:
+
+- **`benchrep-base`** uses Python 3.11 and contains the shared scientific
+  stack and XGBoost. It runs Emerson, Ostmeyer, Ensemble Regression, and
+  Ensemble XGBoost, as well as the common preprocessing and analysis
+  utilities. The project prefix distinguishes it from Conda's special `base`
+  environment.
+- **`abmil`** uses Python 3.10 with PyTorch and Transformers. It runs standard
+  ABMIL and the pretrained TCR-encoder variants without pulling TensorFlow into
+  the environment.
+- **`giana`** uses Python 3.11 with Biopython and FAISS CPU. Keeping GIANA
+  separate avoids coupling its FAISS and NumPy compatibility constraints to
+  the deep-learning environments.
+- **`deeprc`** uses Python 3.10 with PyTorch, HDF5, TensorBoard, the upstream
+  `deeprc` package, and `widis-lstm-tools`. The PyTorch wheel supplies the CUDA
+  runtime used by the GPU launchers.
+- **`deeptcr`** uses Python 3.10 and the legacy-compatible TensorFlow 2.12,
+  NumPy 1.23, pandas 1.5, scikit-learn 1.2, and Biopython 1.76 stack required by
+  the bundled DeepTCR TensorFlow-1 compatibility and deprecated Biopython APIs.
+  It is intentionally isolated from the newer scientific-Python environments.
+
+Create the environments from the repository root:
+
+```bash
+conda env create -f environment-base.yml
+conda env create -f environment-abmil.yml
+conda env create -f environment-giana.yml
+conda env create -f environment-deeprc.yml
+conda env create -f environment-deeptcr.yml
+```
+
+Install BenchRep-T itself into each environment in editable mode. Dependencies
+are already supplied by the corresponding YAML, so `--no-deps` prevents pip
+from changing the tested method-specific pins:
+
+```bash
+for env_name in benchrep-base abmil giana deeprc deeptcr; do
+    conda run -n "${env_name}" python -m pip install --no-deps -e .
+done
+```
+
+For GPU execution, PyTorch includes its CUDA runtime dependencies. DeepTCR is
+pinned to TensorFlow 2.12 because the bundled DeepTCR source uses TensorFlow 1
+compatibility APIs. Its GPU launchers configure the node's CUDA/cuDNN paths and
+the additional Hopper compatibility settings needed on H100/H200 GPUs.
+
+### uv or pip
+
+The same dependency groups are exposed as optional extras in `pyproject.toml`.
+Install with [uv](https://docs.astral.sh/uv/):
+
+```bash
+# Core dependencies
+uv sync
+
+# With specific model extras
+uv sync --extra base
+uv sync --extra abmil
+uv sync --extra giana
+uv sync --extra deeprc
+uv sync --extra deeptcr
+uv sync --extra drivers
+
+# Everything
+uv sync --all-extras
+```
+
+Alternatively, with pip:
+
+```bash
+pip install -e .             # core only
+pip install -e ".[all]"      # all extras
+```
+
 ## Repository Structure
 
 ```
@@ -113,14 +204,12 @@ Two complementary analyses probe whether classifier signal is carried by partici
 | Cohort | Prediction task | Labeled repertoires | Class composition |
 |--------|-----------------|--------------------:|-------------------|
 | Zaslavsky/Mal-ID | HIV, T1D, Lupus, COVID-19, and Influenza vs Healthy/Background | 550 | 197 Healthy/Background; 98 HIV; 96 T1D; 64 Lupus; 58 COVID-19; 37 Influenza |
-| Mitchell | T1D vs control | 197 | T1D and control |
+| Mitchell | T1D vs Healthy/Background | 196 | 171 T1D; 25 Healthy/Background |
 | Rawat | T1D vs Healthy/Background | 614 | 426 T1D; 188 Healthy/Background |
-| Musvosvi | TB progression vs control | 140 | TB progressor and control |
-| Savola | Rheumatoid Arthritis vs control | 94 | RA and control |
+| Musvosvi | TB progression vs control | 140 | 63 Progressor; 77 Controller |
+| Savola | Rheumatoid Arthritis vs Healthy | 91 | 71 Rheumatoid Arthritis; 20 Healthy |
 | Emerson | CMV seropositive vs seronegative | 761 | 340 CMV-positive; 421 CMV-negative |
 
-The Emerson source metadata also contains 25 specimens with unknown CMV status;
-these are retained in the metadata but excluded from supervised classification.
 Demographic annotations are used where they are available.
 
 ### Format
@@ -134,18 +223,25 @@ Repertoire files are gzip-compressed TSV (`.tsv.gz`) in AIRR standard format. Th
 | `j_call` | J gene |
 | `duplicate_count` | Clone count (optional; assumed 1 if absent) |
 
-File naming convention: `part_table_<participant>_<specimen>.tsv.gz`
+Repertoire filenames follow the cohort-native conventions:
+
+| Cohort | Filename template |
+|--------|-------------------|
+| Zaslavsky/Mal-ID | `part_table_{participant_label}_{specimen_label}.tsv.gz` |
+| Mitchell | `{specimen_label}.tsv.gz` |
+| Rawat | `{participant_label}_TCRB.tsv.gz` |
+| Musvosvi, Savola, Emerson | `{specimen_label}.tsv.gz` |
 
 ### Metadata
 
 | Cohort | Metadata file |
 |--------|---------------|
-| Zaslavsky/Mal-ID | `data/malid_clean/metadata.tsv` |
-| Mitchell | `data/external_datasets/T1D/metadata_T1D_final.tsv` |
-| Rawat | `data/external_datasets/Rawat_T1D/cohort1_metadata.tsv` |
-| Musvosvi | `data/external_datasets/tuberculosis/metadata_Tb_final.tsv` |
-| Savola | `data/external_datasets/rheumatoid_arthritis/metadata_RA_final.tsv` |
-| Emerson | `data/external_datasets/CMV/emerson_cohort_metadata.tsv` |
+| Zaslavsky/Mal-ID | `data/Mal-ID/metadata.tsv` |
+| Mitchell | `data/immunoSEQ/Mitchell_T1D/metadata.tsv` |
+| Rawat | `data/immunoSEQ/Rawat_T1D/metadata.tsv` |
+| Musvosvi | `data/immunoSEQ/Musvosvi_TB/metadata.tsv` |
+| Savola | `data/immunoSEQ/Savola_RA/metadata.tsv` |
+| Emerson | `data/immunoSEQ/Emerson_CMV/metadata.tsv` |
 
 The harmonized metadata tables use the following common columns:
 
@@ -154,7 +250,7 @@ The harmonized metadata tables use the following common columns:
 | `participant_label` | Participant identifier |
 | `specimen_label` | Specimen identifier |
 | `disease` | Disease label (e.g., HIV, Covid19, Healthy/Background) |
-| `malid_cross_validation_fold_id_when_in_test_set` | Pre-assigned CV fold (0, 1, or 2) |
+| `malid_cross_validation_fold_id_when_in_test_set` or `CV_fold` | Pre-assigned CV fold (0, 1, or 2), depending on cohort |
 | `age`, `sex`, `ancestry` | Demographics, where available |
 
 ### HuggingFace
@@ -162,6 +258,23 @@ The harmonized metadata tables use the following common columns:
 Preprocessed BenchRep-T repertoires and metadata are hosted on Hugging Face at:
 
 **[https://huggingface.co/datasets/neurips-2026-dataset/BenchRep-T](https://huggingface.co/datasets/neurips-2026-dataset/BenchRep-T)**
+
+The downloaded dataset has this model-ready structure:
+
+```text
+data/
+├── Mal-ID/
+│   ├── metadata.tsv
+│   ├── repertoires/                              # 550 .tsv.gz
+│   ├── scaling_exp_depth_indices_max75k.json.gz
+│   └── vdjdb_minervina_driver_seq_matches.csv
+└── immunoSEQ/
+    ├── Savola_RA/{metadata.tsv,repertoires/}      # 91 repertoires
+    ├── Musvosvi_TB/{metadata.tsv,repertoires/}    # 140 repertoires
+    ├── Rawat_T1D/{metadata.tsv,repertoires/}      # 614 repertoires
+    ├── Mitchell_T1D/{metadata.tsv,repertoires/}   # 196 repertoires
+    └── Emerson_CMV/{metadata.tsv,repertoires/}    # 761 repertoires
+```
 
 The repository is private, so first request access and authenticate without
 putting a token in a command or configuration file:
@@ -252,97 +365,6 @@ Other preprocessing utilities:
 - **Depth indices** (`preprocessing/generate_depth_indices.py`) — pre-generates reproducible nested subsampling indices for the depth-scaling experiment.
 - **Driver sequence matching** (`preprocessing/process_driver_sequences.py`) — matches VDJdb entries to benchmark repertoires via Levenshtein similarity.
 - **Demographic analysis** (`preprocessing/check_demographics.py`) — summarizes demographic completeness per disease.
-
-## Setup
-
-Requires Python >= 3.10. The recommended installation uses one minimal Conda
-environment per method family so that DeepTCR's TensorFlow 2.12 constraints do
-not conflict with the newer PyTorch and scientific-Python stacks. ABMIL, GIANA,
-DeepRC, and DeepTCR are separated from `benchrep-base` to make dependency
-resolution easier and keep each method's framework and version constraints
-isolated.
-
-| Environment | File | Methods |
-|-------------|------|---------|
-| `benchrep-base` | `environment-base.yml` | Emerson, Ostmeyer, and Ensemble Regression/XGBoost |
-| `abmil` | `environment-abmil.yml` | ABMIL and pretrained-encoder ABMIL variants |
-| `giana` | `environment-giana.yml` | GIANA |
-| `deeprc` | `environment-deeprc.yml` | DeepRC |
-| `deeptcr` | `environment-deeptcr.yml` | DeepTCR |
-
-The environments are separated as follows:
-
-- **`benchrep-base`** uses Python 3.11 and contains the shared scientific
-  stack and XGBoost. It runs Emerson, Ostmeyer, Ensemble Regression, and
-  Ensemble XGBoost, as well as the common preprocessing and analysis
-  utilities. The project prefix distinguishes it from Conda's special `base`
-  environment.
-- **`abmil`** uses Python 3.10 with PyTorch and Transformers. It runs standard
-  ABMIL and the pretrained TCR-encoder variants without pulling TensorFlow into
-  the environment.
-- **`giana`** uses Python 3.11 with Biopython and FAISS CPU. Keeping GIANA
-  separate avoids coupling its FAISS and NumPy compatibility constraints to
-  the deep-learning environments.
-- **`deeprc`** uses Python 3.10 with PyTorch, HDF5, TensorBoard, the upstream
-  `deeprc` package, and `widis-lstm-tools`. The PyTorch wheel supplies the CUDA
-  runtime used by the GPU launchers.
-- **`deeptcr`** uses Python 3.10 and the legacy-compatible TensorFlow 2.12,
-  NumPy 1.23, pandas 1.5, scikit-learn 1.2, and Biopython 1.76 stack required by
-  the bundled DeepTCR TensorFlow-1 compatibility and deprecated Biopython APIs.
-  It is intentionally isolated from the newer scientific-Python environments.
-
-Create the environments from the repository root:
-
-```bash
-conda env create -f environment-base.yml
-conda env create -f environment-abmil.yml
-conda env create -f environment-giana.yml
-conda env create -f environment-deeprc.yml
-conda env create -f environment-deeptcr.yml
-```
-
-Install BenchRep-T itself into each environment in editable mode. Dependencies
-are already supplied by the corresponding YAML, so `--no-deps` prevents pip
-from changing the tested method-specific pins:
-
-```bash
-for env_name in benchrep-base abmil giana deeprc deeptcr; do
-    conda run -n "${env_name}" python -m pip install --no-deps -e .
-done
-```
-
-For GPU execution, PyTorch includes its CUDA runtime dependencies. DeepTCR is
-pinned to TensorFlow 2.12 because the bundled DeepTCR source uses TensorFlow 1
-compatibility APIs. Its GPU launchers configure the node's CUDA/cuDNN paths and
-the additional Hopper compatibility settings needed on H100/H200 GPUs.
-
-### uv or pip
-
-The same dependency groups are exposed as optional extras in `pyproject.toml`.
-Install with [uv](https://docs.astral.sh/uv/):
-
-```bash
-# Core dependencies
-uv sync
-
-# With specific model extras
-uv sync --extra base
-uv sync --extra abmil
-uv sync --extra giana
-uv sync --extra deeprc
-uv sync --extra deeptcr
-uv sync --extra drivers
-
-# Everything
-uv sync --all-extras
-```
-
-Alternatively, with pip:
-
-```bash
-pip install -e .             # core only
-pip install -e ".[all]"      # all extras
-```
 
 <!-- removing for anonymity
 ## Preprint

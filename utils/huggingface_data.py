@@ -24,6 +24,7 @@ class Cohort:
     metadata: str
     repertoires: str
     description: str
+    file_template: str
 
 
 COHORTS: dict[str, Cohort] = {
@@ -31,31 +32,37 @@ COHORTS: dict[str, Cohort] = {
         "Mal-ID/metadata.tsv",
         "Mal-ID/repertoires",
         "Zaslavsky/Mal-ID (HIV, lupus, influenza, COVID-19, and T1D)",
+        "part_table_{participant_label}_{specimen_label}.tsv.gz",
     ),
     "mitchell-t1d": Cohort(
         "immunoSEQ/Mitchell_T1D/metadata.tsv",
         "immunoSEQ/Mitchell_T1D/repertoires",
         "Mitchell T1D",
+        "{specimen_label}.tsv.gz",
     ),
     "rawat-t1d": Cohort(
         "immunoSEQ/Rawat_T1D/metadata.tsv",
         "immunoSEQ/Rawat_T1D/repertoires",
         "Rawat T1D",
+        "{participant_label}_TCRB.tsv.gz",
     ),
     "tb": Cohort(
         "immunoSEQ/Musvosvi_TB/metadata.tsv",
         "immunoSEQ/Musvosvi_TB/repertoires",
         "Musvosvi tuberculosis progression",
+        "{specimen_label}.tsv.gz",
     ),
     "ra": Cohort(
         "immunoSEQ/Savola_RA/metadata.tsv",
         "immunoSEQ/Savola_RA/repertoires",
         "Savola rheumatoid arthritis",
+        "{specimen_label}.tsv.gz",
     ),
     "cmv": Cohort(
         "immunoSEQ/Emerson_CMV/metadata.tsv",
         "immunoSEQ/Emerson_CMV/repertoires",
         "Emerson CMV serostatus",
+        "{specimen_label}.tsv.gz",
     ),
 }
 
@@ -136,6 +143,24 @@ def _metadata_columns(path: Path) -> set[str]:
     return set(row or [])
 
 
+def _missing_repertoires(
+    metadata: Path, repertoire_dir: Path, template: str
+) -> list[str]:
+    """Return expected repertoire filenames absent for metadata rows."""
+    missing: list[str] = []
+    with metadata.open("r", encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle, delimiter="\t"):
+            try:
+                filename = template.format(**row)
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"{metadata} lacks filename-template column {exc.args[0]!r}"
+                ) from exc
+            if not (repertoire_dir / filename).is_file():
+                missing.append(filename)
+    return missing
+
+
 def validate_data(
     output_dir: Path, tasks: Sequence[str], cohorts: Sequence[str]
 ) -> list[str]:
@@ -156,8 +181,19 @@ def validate_data(
                 )
         if not repertoire_dir.is_dir() or not any(repertoire_dir.glob("*.tsv*")):
             errors.append(f"no repertoire TSV files found in: {repertoire_dir}")
+        elif metadata.is_file():
+            missing_repertoires = _missing_repertoires(
+                metadata, repertoire_dir, cohort.file_template
+            )
+            if missing_repertoires:
+                preview = ", ".join(missing_repertoires[:3])
+                errors.append(
+                    f"{len(missing_repertoires)} metadata repertoires are missing "
+                    f"from {repertoire_dir} (first: {preview})"
+                )
         results.append(
-            f"{name}: metadata={metadata}, repertoires={repertoire_dir}"
+            f"{name}: metadata={metadata}, repertoires={repertoire_dir}, "
+            f"file_template={cohort.file_template!r}"
         )
 
     if "drivers" in tasks and not (output_dir / DRIVER_MATCHES).is_file():

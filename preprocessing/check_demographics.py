@@ -4,10 +4,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
+from pathlib import Path
 
-METADATA_PATH = "/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench/data/malid_clean/metadata.tsv"
-TCR_DIR = "/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench/data/malid_clean/TCR"
-OUT_DIR = "/oak/stanford/groups/akundaje/abuen/tcr-bench/airr_bench/preprocessing/demographics_plots"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+METADATA_PATH = REPO_ROOT / "data/Mal-ID/metadata.tsv"
+TCR_DIR = REPO_ROOT / "data/Mal-ID/repertoires"
+OUT_DIR = REPO_ROOT / "preprocessing/demographics_plots"
 DISEASE_CLASSES = ["Healthy/Background", "HIV", "Lupus", "Covid19", "T1D", "Influenza"]
 
 os.makedirs(OUT_DIR, exist_ok=True)

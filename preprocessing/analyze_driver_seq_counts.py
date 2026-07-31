@@ -15,8 +15,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VDJDB_MATCHES = REPO_ROOT / "airr_bench/data/vdjdb_matches.csv"
-METADATA = REPO_ROOT / "airr_bench/data/malid_clean/metadata.tsv"
+VDJDB_MATCHES = (
+    REPO_ROOT / "airr_bench/data/Mal-ID/vdjdb_minervina_driver_seq_matches.csv"
+)
+METADATA = REPO_ROOT / "airr_bench/data/Mal-ID/metadata.tsv"
 OUT_DIR = REPO_ROOT / "airr_bench/preprocessing/reports"
 
 DISEASES_TO_PLOT = ["Covid19", "HIV", "Influenza"]

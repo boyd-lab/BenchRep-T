@@ -38,7 +38,7 @@ Usage:
     python generate_depth_indices.py <repertoire_dir> <output_path> [--seed SEED]
 
 Example:
-    python generate_depth_indices.py /path/to/repertoires data/depth_indices_seed42.json.gz
+    python generate_depth_indices.py data/Mal-ID/repertoires data/Mal-ID/depth_indices_seed42.json.gz
 """
 
 import argparse

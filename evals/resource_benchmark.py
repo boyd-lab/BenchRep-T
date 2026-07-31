@@ -240,11 +240,11 @@ def _method_uses_gpu(method: str, args: argparse.Namespace) -> bool:
 
 
 def _base_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
-    metadata = Path(args.metadata_path) if args.metadata_path else AIRR_ROOT / "data/malid_clean/metadata.tsv"
+    metadata = Path(args.metadata_path) if args.metadata_path else AIRR_ROOT / "data/Mal-ID/metadata.tsv"
     repertoire_dir = (
         Path(args.repertoire_data_dir)
         if args.repertoire_data_dir
-        else AIRR_ROOT / "data/malid_clean/TCR"
+        else AIRR_ROOT / "data/Mal-ID/repertoires"
     )
     output_dir = Path(args.output_dir)
     return metadata, repertoire_dir, output_dir

@@ -37,12 +37,12 @@ def load_drivers_by_file(driver_seqs_path, disease):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--metadata_path', default='data/metadata_malid.tsv')
-    ap.add_argument('--repertoire_dir', required=True,
+    ap.add_argument('--metadata_path', default='data/Mal-ID/metadata.tsv')
+    ap.add_argument('--repertoire_dir', default='data/Mal-ID/repertoires',
                     help='Directory containing per-specimen repertoire TSVs '
-                         '(e.g. data/malid_clean/data_per_specimen).')
+                         '(default: data/Mal-ID/repertoires).')
     ap.add_argument('--driver_seqs_path',
-                    default='data/vdjdb_matches_expanded.csv',
+                    default='data/Mal-ID/vdjdb_minervina_driver_seq_matches.csv',
                     help='Ground-truth driver CDR3s CSV (columns: disease, '
                          'sample_cdr3, filename, ...).')
     ap.add_argument('--diseases', nargs='+',

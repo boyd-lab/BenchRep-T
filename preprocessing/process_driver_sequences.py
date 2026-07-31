@@ -39,10 +39,12 @@ THOMAS_COVID_PATH = os.path.join(
     REPO_ROOT, "data", "thomas_covid", "41590_2022_1184_MOESM7_ESM.xlsx"
 )
 
-METADATA_PATH = os.path.join(REPO_ROOT, "data", "malid_clean", "metadata.tsv")
-TCR_DIR       = os.path.join(REPO_ROOT, "data", "malid_clean", "TCR")
+METADATA_PATH = os.path.join(REPO_ROOT, "data", "Mal-ID", "metadata.tsv")
+TCR_DIR       = os.path.join(REPO_ROOT, "data", "Mal-ID", "repertoires")
 
-DEFAULT_OUTPUT_PATH = os.path.join(REPO_ROOT, "data", "vdjdb_matches.csv")
+DEFAULT_OUTPUT_PATH = os.path.join(
+    REPO_ROOT, "data", "Mal-ID", "vdjdb_minervina_driver_seq_matches.csv"
+)
 
 SIMILARITY_THRESHOLD = 0.90
 MIN_SCORE = 2

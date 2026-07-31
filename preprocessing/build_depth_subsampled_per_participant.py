@@ -24,7 +24,7 @@ Usage:
     python preprocessing/build_depth_subsampled_per_participant.py \\
         --input-dir  <path/to/data_per_specimen> \\
         --output-dir <path/to/data_per_participant> \\
-        --indices    data/depth_indices_max75k.json.gz \\
+        --indices    data/Mal-ID/scaling_exp_depth_indices_max75k.json.gz \\
         --workers    8
 """
 
@@ -98,7 +98,7 @@ def main() -> int:
     p.add_argument(
         "--indices",
         type=Path,
-        default=Path("data/depth_indices_max75k.json.gz"),
+        default=Path("data/Mal-ID/scaling_exp_depth_indices_max75k.json.gz"),
     )
     p.add_argument(
         "--workers",

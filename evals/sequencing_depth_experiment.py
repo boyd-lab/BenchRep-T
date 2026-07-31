@@ -10,10 +10,10 @@ min_sequences, seed) and pre-computed row indices for each repertoire.
 Usage:
     python -m evals.sequencing_depth_experiment \\
         --model emerson_2017 \\
-        --target_disease CMV \\
-        --metadata_path data/metadata.tsv \\
-        --repertoire_data_dir /path/to/data \\
-        --depth_indices data/depth_indices_seed7.json.gz \\
+        --target_disease Covid19 \\
+        --metadata_path data/Mal-ID/metadata.tsv \\
+        --repertoire_data_dir data/Mal-ID/repertoires \\
+        --depth_indices data/Mal-ID/scaling_exp_depth_indices_max75k.json.gz \\
         --output_json results/depth_experiment.json
 """
 
