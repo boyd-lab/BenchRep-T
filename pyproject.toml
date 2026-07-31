@@ -30,7 +30,7 @@ base = [
 # GIANA clustering model
 giana = [
     "biopython>=1.83,<2",
-    "faiss-cpu==1.7.4",
+    "faiss-gpu-cu12==1.8.0.2",
 ]
 # Attention-based MIL model (requires PyTorch)
 abmil = [
@@ -39,8 +39,8 @@ abmil = [
 ]
 # DeepRC model and its upstream utilities
 deeprc = [
-    "deeprc==0.0.6",
-    "widis-lstm-tools==0.4",
+    "deeprc @ https://github.com/ml-jku/DeepRC/archive/108d08d8cf2d2d69eb3f6caef1aa04d624dec871.tar.gz",
+    "widis-lstm-tools @ https://github.com/widmi/widis-lstm-tools/archive/c0aa852341445b8c51071c9b5aad01d579df96f5.tar.gz",
     "torch>=2.3,<3",
     "h5py>=3.8,<4",
     "tensorboard>=2.12,<3",
@@ -49,7 +49,7 @@ deeprc = [
 ]
 # DeepTCR model (requires TensorFlow)
 deeptcr = [
-    "tensorflow==2.12.0",
+    "tensorflow[and-cuda]==2.15.1",
     "numpy==1.23.5",
     "pandas==1.5.3",
     "scipy==1.10.1",

@@ -12,4 +12,6 @@ dependencies:
       - scikit-learn==1.8.0
       - tqdm==4.67.3
       - biopython==1.87
-      - faiss-cpu==1.7.4
+      # Provides both the CPU API and the StandardGpuResources/index_cpu_to_gpu
+      # API used when the benchmark is launched with --use_gpu.
+      - faiss-gpu-cu12==1.8.0.2

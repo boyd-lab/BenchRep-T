@@ -19,6 +19,7 @@ USE_GPU="${USE_GPU:-1}"
 N_JOBS="${N_JOBS:-8}"
 N_THREADS="${N_THREADS:-8}"
 MAX_FOLDS="${MAX_FOLDS:-}"
+SMOKE_TEST="${SMOKE_TEST:-0}"
 METHODS="${METHODS:-emerson ostmeyer ensemble_regression ensemble_xgboost abmil deeprc deeptcr giana}"
 DATASETS="${DATASETS:-malid mitchell-t1d rawat-t1d tb ra cmv}"
 
@@ -54,7 +55,18 @@ declare -A TARGETS=(
 python_command() {
   local method=$1
   if [[ "${USE_CONDA}" == "1" ]]; then
-    printf '%s\n' "${CONDA_EXE}" run --no-capture-output -n "${ENVIRONMENTS[$method]}" python
+    if [[ "${method}" == "deeptcr" && "${USE_GPU}" == "1" ]]; then
+      # tensorflow[and-cuda] installs its CUDA libraries and compiler below the
+      # environment's site-packages/nvidia tree. Expose those paths without
+      # depending on a system CUDA toolkit or mixing in another CUDA runtime.
+      printf '%s\n' \
+        "${CONDA_EXE}" run -n "${ENVIRONMENTS[$method]}" \
+        bash -c \
+        'nvidia_root=$(python -c "import pathlib, site; print(pathlib.Path(site.getsitepackages()[0]) / '\''nvidia'\'')"); cuda_libs=$(find "${nvidia_root}" -mindepth 2 -maxdepth 2 -type d -name lib -print | paste -sd:); cuda_bins=$(find "${nvidia_root}" -mindepth 2 -maxdepth 2 -type d -name bin -print | paste -sd:); export LD_LIBRARY_PATH="${cuda_libs}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"; export PATH="${cuda_bins}:${PATH}"; exec python "$@"' \
+        bash
+    else
+      printf '%s\n' "${CONDA_EXE}" run -n "${ENVIRONMENTS[$method]}" python
+    fi
   else
     printf '%s\n' "${PYTHON_BIN}"
   fi
@@ -138,6 +150,32 @@ for dataset in ${DATASETS}; do
           [[ "${USE_GPU}" == "1" ]] && command+=(--use_gpu)
           ;;
       esac
+
+      # Exercise each complete train/predict path with deliberately tiny
+      # compute budgets. Dataset selection, staging, and fold membership remain
+      # identical to a production run.
+      if [[ "${SMOKE_TEST}" == "1" ]]; then
+        case "${method}" in
+          ostmeyer)
+            command+=(--n_restarts 1)
+            ;;
+          ensemble_regression|ensemble_xgboost)
+            command+=(--n_cv_folds 2)
+            ;;
+          abmil)
+            command+=(--epochs 1 --patience 1 --max_instances 100)
+            ;;
+          deeprc)
+            command+=(--n_updates 2 --evaluate_at 1 --sample_n_sequences 100 --batch_size 4 --n_worker_processes 0)
+            ;;
+          deeptcr)
+            command+=(--epochs_min 1 --epochs_max 1 --debug --debug_repertoires 10)
+            ;;
+          giana)
+            command+=(--max_seqs_per_specimen 100)
+            ;;
+        esac
+      fi
 
       run_count=$((run_count + 1))
       if [[ "${DRY_RUN}" == "1" ]]; then

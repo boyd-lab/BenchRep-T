@@ -22,7 +22,7 @@ It defines four evaluation tasks: disease classification, driver-sequence identi
 ## Setup
 
 Requires Python >= 3.10. The recommended installation uses one minimal Conda
-environment per method family so that DeepTCR's TensorFlow 2.12 constraints do
+environment per method family so that DeepTCR's TensorFlow constraints do
 not conflict with the newer PyTorch and scientific-Python stacks. ABMIL, GIANA,
 DeepRC, and DeepTCR are separated from `benchrep-base` to make dependency
 resolution easier and keep each method's framework and version constraints
@@ -46,13 +46,14 @@ The environments are separated as follows:
 - **`abmil`** uses Python 3.10 with PyTorch and Transformers. It runs standard
   ABMIL and the pretrained TCR-encoder variants without pulling TensorFlow into
   the environment.
-- **`giana`** uses Python 3.11 with Biopython and FAISS CPU. Keeping GIANA
-  separate avoids coupling its FAISS and NumPy compatibility constraints to
-  the deep-learning environments.
+- **`giana`** uses Python 3.11 with Biopython and CUDA 12 FAISS. The package
+  implements both CPU indexing and the GPU API used by `USE_GPU=1`; a compatible
+  NVIDIA driver is only required for GPU runs. Keeping GIANA separate avoids
+  coupling its FAISS and NumPy constraints to the other environments.
 - **`deeprc`** uses Python 3.10 with PyTorch, HDF5, TensorBoard, the upstream
   `deeprc` package, and `widis-lstm-tools`. The PyTorch wheel supplies the CUDA
   runtime used by the GPU launchers.
-- **`deeptcr`** uses Python 3.10 and the legacy-compatible TensorFlow 2.12,
+- **`deeptcr`** uses Python 3.10 and the legacy-compatible TensorFlow 2.15,
   NumPy 1.23, pandas 1.5, scikit-learn 1.2, and Biopython 1.76 stack required by
   the bundled DeepTCR TensorFlow-1 compatibility and deprecated Biopython APIs.
   It is intentionally isolated from the newer scientific-Python environments.
@@ -77,10 +78,12 @@ for env_name in benchrep-base abmil giana deeprc deeptcr; do
 done
 ```
 
-For GPU execution, PyTorch includes its CUDA runtime dependencies. DeepTCR is
-pinned to TensorFlow 2.12 because the bundled DeepTCR source uses TensorFlow 1
-compatibility APIs. Its GPU launchers configure the node's CUDA/cuDNN paths and
-the additional Hopper compatibility settings needed on H100/H200 GPUs.
+For GPU execution, PyTorch includes its CUDA runtime dependencies. DeepTCR uses
+TensorFlow's `and-cuda` extra, which supplies a matched CUDA 12 runtime, cuDNN,
+and PTX compiler while retaining the TensorFlow 1 compatibility APIs used by
+the bundled source. The example launcher discovers these libraries inside the
+environment, so it does not require a system CUDA toolkit. GIANA similarly uses
+a self-contained CUDA 12 FAISS wheel. These paths were smoke-tested on an H200.
 
 ### uv or pip
 
@@ -357,8 +360,18 @@ downloaded data, but removing or relocating `data/` by itself breaks its links.
 By default it uses the method-specific Conda environments documented below.
 The full 80-run matrix is compute-intensive and executes sequentially.
 Set `DRY_RUN=1 DOWNLOAD_DATA=0` to print all 80 commands without downloading or
-training. `METHODS`, `DATASETS`, `OUTPUT_ROOT`, `USE_GPU`, `N_JOBS`, and
-`N_THREADS` can be overridden as environment variables.
+training. Set `SMOKE_TEST=1 MAX_FOLDS=1 USE_GPU=0` to execute every selected
+method end to end with small CPU training budgets. Smoke-test scores only check
+execution and are not benchmark results. `METHODS`, `DATASETS`, `OUTPUT_ROOT`,
+`USE_GPU`, `N_JOBS`, and `N_THREADS` can be overridden as environment
+variables.
+
+For example, smoke-test all eight methods on Savola RA:
+
+```bash
+DATASETS=ra SMOKE_TEST=1 MAX_FOLDS=1 USE_GPU=0 N_JOBS=1 N_THREADS=1 \
+  bash examples/run_all_disease_classification.sh
+```
 
 
 ## Preprocessing

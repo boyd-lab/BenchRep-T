@@ -847,19 +847,23 @@ def make_dataloaders_from_airr(
 
     train_generator = torch.Generator()
     train_generator.manual_seed(int(rng_seed))
+    # Restricted/containerized environments may disallow the local socket used
+    # by multiprocessing DataLoaders. Honor an explicit zero-worker request for
+    # every loader while retaining the historical single eval worker otherwise.
+    eval_n_workers = 0 if n_worker_processes == 0 else 1
     trainingset_dataloader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         num_workers=n_worker_processes, collate_fn=no_stack_collate_fn,
         generator=train_generator)
     trainingset_eval_dataloader = DataLoader(
         train_eval_ds, batch_size=1, shuffle=False,
-        num_workers=1, collate_fn=no_stack_collate_fn)
+        num_workers=eval_n_workers, collate_fn=no_stack_collate_fn)
     validationset_eval_dataloader = DataLoader(
         val_ds, batch_size=1, shuffle=False,
-        num_workers=1, collate_fn=no_stack_collate_fn)
+        num_workers=eval_n_workers, collate_fn=no_stack_collate_fn)
     testset_eval_dataloader = DataLoader(
         test_ds, batch_size=1, shuffle=False,
-        num_workers=1, collate_fn=no_stack_collate_fn)
+        num_workers=eval_n_workers, collate_fn=no_stack_collate_fn)
 
     if verbose:
         print("  Done building dataloaders.")

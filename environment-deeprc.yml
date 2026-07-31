@@ -16,5 +16,5 @@ dependencies:
       - h5py==3.15.1
       - tensorboard==2.20.0
       - dill==0.4.0
-      - deeprc==0.0.6
-      - widis-lstm-tools==0.4
+      - deeprc @ https://github.com/ml-jku/DeepRC/archive/108d08d8cf2d2d69eb3f6caef1aa04d624dec871.tar.gz
+      - widis-lstm-tools @ https://github.com/widmi/widis-lstm-tools/archive/c0aa852341445b8c51071c9b5aad01d579df96f5.tar.gz
