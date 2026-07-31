@@ -163,6 +163,61 @@ Preprocessed BenchRep-T repertoires and metadata are hosted on Hugging Face at:
 
 **[https://huggingface.co/datasets/neurips-2026-dataset/BenchRep-T](https://huggingface.co/datasets/neurips-2026-dataset/BenchRep-T)**
 
+The repository is private, so first request access and authenticate without
+putting a token in a command or configuration file:
+
+```bash
+hf auth login
+# On a cluster, exporting a read-only token is also supported:
+export HF_TOKEN=hf_...
+```
+
+After installing BenchRep-T, materialize the complete dataset in its native
+Hugging Face directory layout:
+
+```bash
+benchrep-download-data
+```
+
+Downloads can be limited by experiment task and cohort. Options are repeatable,
+which makes it possible to stage only the data required by a particular job:
+
+```bash
+# COVID-19 disease classification and demographic experiments
+benchrep-download-data --task disease --task demographics --cohort malid
+
+# Driver-sequence experiment (Mal-ID repertoires plus driver matches)
+benchrep-download-data --task drivers
+
+# Sequencing-depth experiment (Mal-ID repertoires plus nested depth indices)
+benchrep-download-data --task depth
+
+# Within-cohort CMV disease classification
+benchrep-download-data --task disease --cohort cmv
+
+# Inspect a selection without authenticating or downloading
+benchrep-download-data --task disease --cohort rawat-t1d --dry-run
+```
+
+Supported cohort names are `malid`, `mitchell-t1d`, `rawat-t1d`, `tb`, `ra`,
+and `cmv`. The downloader supports a pinned dataset commit with `--revision`,
+resumes through the Hugging Face cache, validates metadata columns and
+repertoire presence after download, and never stores credentials in this
+repository. Existing files can be checked without network access using
+`benchrep-download-data --validate-only`.
+
+Downloaded cohorts retain the Hugging Face repository layout. For example,
+Savola RA is written to `data/immunoSEQ/Savola_RA/metadata.tsv` and
+`data/immunoSEQ/Savola_RA/repertoires/`; Mal-ID is written to
+`data/Mal-ID/metadata.tsv` and `data/Mal-ID/repertoires/`. Pass those native
+paths to `--metadata_path` and `--repertoire_data_dir` in the experiment
+commands.
+
+The task-specific auxiliary paths are
+`data/Mal-ID/vdjdb_minervina_driver_seq_matches.csv` for driver identification
+and `data/Mal-ID/scaling_exp_depth_indices_max75k.json.gz` for sequencing-depth
+scaling.
+
 
 ## Preprocessing
 

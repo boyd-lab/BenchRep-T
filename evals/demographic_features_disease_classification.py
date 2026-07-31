@@ -1,9 +1,10 @@
 """
 Evaluation script for disease classification using demographic features only.
 
-Uses age (raw), sex (binary), and ancestry (one-hot encoded) as features
-with logistic regression. Evaluates whether demographic confounders alone
-can predict disease status.
+Uses configurable demographic features with logistic regression. Age is
+represented by its raw numeric value, sex is binary, and other selected
+columns are one-hot encoded. Evaluates whether measured covariates alone can
+predict disease status.
 """
 
 import argparse
@@ -18,16 +19,38 @@ class DemographicFeaturesEvaluator:
     """
     Evaluator for disease classification using demographic features only.
 
-    Features:
+    Feature encoding:
     - age: raw numeric value
     - sex: binary (M=1, F=0)
-    - ancestry: one-hot encoded over all categories observed in training data
+    - all other selected columns: one-hot encoded over categories observed in
+      the training data
     """
 
     HEALTHY_LABEL = "Healthy/Background"
 
-    def __init__(self, train_val_ratio=0.9):
+    def __init__(
+        self,
+        train_val_ratio=0.9,
+        feature_columns=None,
+        complete_case_columns=None,
+    ):
         self.train_val_ratio = train_val_ratio
+        self.feature_columns = (
+            list(feature_columns)
+            if feature_columns is not None
+            else ['age', 'sex', 'ancestry']
+        )
+        self.complete_case_columns = (
+            list(complete_case_columns)
+            if complete_case_columns is not None
+            else list(self.feature_columns)
+        )
+        if not self.feature_columns:
+            raise ValueError("At least one demographic feature is required.")
+        if not self.complete_case_columns:
+            raise ValueError(
+                "At least one complete-case column is required."
+            )
 
     def load_metadata(self, metadata_path):
         return pd.read_csv(metadata_path, sep='\t')
@@ -37,11 +60,28 @@ class DemographicFeaturesEvaluator:
         filtered = metadata[mask].copy()
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
 
-        # Drop rows with any missing demographic feature
+        required_columns = list(
+            dict.fromkeys(
+                self.feature_columns + self.complete_case_columns
+            )
+        )
+        missing_columns = [
+            column for column in required_columns
+            if column not in filtered.columns
+        ]
+        if missing_columns:
+            raise ValueError(
+                f"Metadata is missing requested feature columns: {missing_columns}"
+            )
+
+        # Restrict to the requested common complete-case cohort. By default
+        # this is simply the set of fitted features, while feature-ablation
+        # analyses can supply a shared superset for like-for-like evaluation.
         before = len(filtered)
-        filtered = filtered.dropna(subset=['age', 'sex', 'ancestry'])
-        # Also drop rows where ancestry is empty string
-        filtered = filtered[filtered['ancestry'].str.strip() != '']
+        filtered = filtered.dropna(subset=self.complete_case_columns)
+        for column in self.complete_case_columns:
+            if pd.api.types.is_object_dtype(filtered[column]):
+                filtered = filtered[filtered[column].str.strip() != '']
         after = len(filtered)
 
         n_disease = (filtered['label'] == 1).sum()
@@ -54,39 +94,60 @@ class DemographicFeaturesEvaluator:
 
         return filtered
 
-    def featurize(self, data, ancestry_categories=None):
+    def featurize(self, data, categorical_categories=None):
         """
-        Convert demographic columns into a numeric feature matrix.
+        Convert selected demographic columns into a numeric feature matrix.
 
         Args:
-            data: DataFrame with 'age', 'sex', 'ancestry' columns
-            ancestry_categories: List of ancestry categories for one-hot encoding.
-                If None, derived from data (use for training). Pass training categories
-                for test data to ensure consistent encoding.
+            data: DataFrame containing the selected feature columns.
+            categorical_categories: Mapping from categorical column name to
+                training categories. If None, categories are derived from data.
+                Pass the training mapping for validation and test data to ensure
+                consistent encoding.
 
         Returns:
-            (feature_matrix as np.ndarray, ancestry_categories list)
+            (feature_matrix, categorical category mapping, feature names)
         """
-        # Age: raw numeric
-        age = data['age'].values.astype(float)
+        if categorical_categories is None:
+            categorical_categories = {}
 
-        # Sex: binary (M=1, F=0)
-        sex = (data['sex'] == 'M').astype(int).values
+        feature_arrays = []
+        feature_names = []
+        fitted_categories = {}
 
-        # Ancestry: one-hot encoding
-        if ancestry_categories is None:
-            ancestry_categories = sorted(data['ancestry'].unique().tolist())
+        for column in self.feature_columns:
+            if column == 'age':
+                feature_arrays.append(data[column].values.astype(float)[:, None])
+                feature_names.append(column)
+                continue
 
-        ancestry_dummies = np.zeros((len(data), len(ancestry_categories)), dtype=float)
-        for i, cat in enumerate(ancestry_categories):
-            ancestry_dummies[:, i] = (data['ancestry'].values == cat).astype(float)
+            if column == 'sex':
+                feature_arrays.append(
+                    (data[column] == 'M').astype(int).values[:, None]
+                )
+                feature_names.append(column)
+                continue
 
-        # Stack all features: [age, sex, ancestry_0, ancestry_1, ...]
-        features = np.column_stack([age, sex, ancestry_dummies])
+            categories = categorical_categories.get(column)
+            if categories is None:
+                categories = sorted(data[column].unique().tolist())
+            fitted_categories[column] = categories
 
-        feature_names = ['age', 'sex'] + [f'ancestry_{cat}' for cat in ancestry_categories]
+            dummies = np.zeros((len(data), len(categories)), dtype=float)
+            for index, category in enumerate(categories):
+                dummies[:, index] = (
+                    data[column].values == category
+                ).astype(float)
+            feature_arrays.append(dummies)
+            feature_names.extend(
+                [f'{column}_{category}' for category in categories]
+            )
 
-        return features, ancestry_categories, feature_names
+        return (
+            np.column_stack(feature_arrays),
+            fitted_categories,
+            feature_names,
+        )
 
     def tune_and_train(self, X_train, y_train, X_val, y_val,
                        C_candidates=None):
@@ -184,14 +245,22 @@ class DemographicFeaturesEvaluator:
 
             print(f"Train: {len(train_data)}, Validation: {len(val_data)}, Test: {len(test_data)}")
 
-            # Featurize (derive ancestry categories from training data)
-            X_train, ancestry_cats, feature_names = self.featurize(train_data)
+            # Featurize (derive categorical levels from training data).
+            X_train, categorical_categories, feature_names = self.featurize(
+                train_data
+            )
             y_train = train_data['label'].values
 
-            X_val, _, _ = self.featurize(val_data, ancestry_categories=ancestry_cats)
+            X_val, _, _ = self.featurize(
+                val_data,
+                categorical_categories=categorical_categories,
+            )
             y_val = val_data['label'].values
 
-            X_test, _, _ = self.featurize(test_data, ancestry_categories=ancestry_cats)
+            X_test, _, _ = self.featurize(
+                test_data,
+                categorical_categories=categorical_categories,
+            )
             y_test = test_data['label'].values
 
             print(f"Features ({len(feature_names)}): {feature_names}")
@@ -290,16 +359,40 @@ if __name__ == "__main__":
     parser.add_argument('--ext_metadata_path', type=str, default=None,
                         help='Optional external-cohort metadata TSV (MAL-ID column style). '
                              'Merges external samples by fold (no repertoire files needed).')
+    parser.add_argument(
+        '--features',
+        nargs='+',
+        default=['age', 'sex', 'ancestry'],
+        help='Demographic columns to use. Age is raw numeric, sex is binary, '
+             'and all other columns are one-hot encoded.',
+    )
+    parser.add_argument(
+        '--complete_case_features',
+        nargs='+',
+        default=None,
+        help='Columns required to be non-missing for every feature ablation. '
+             'Defaults to --features.',
+    )
+    parser.add_argument(
+        '--fold_col',
+        default='malid_cross_validation_fold_id_when_in_test_set',
+        help='Metadata column containing the pre-assigned test fold.',
+    )
     args = parser.parse_args()
 
     print("Demographic Features Disease Classification Evaluation")
     print("=" * 60)
 
-    evaluator = DemographicFeaturesEvaluator(train_val_ratio=0.9)
+    evaluator = DemographicFeaturesEvaluator(
+        train_val_ratio=0.9,
+        feature_columns=args.features,
+        complete_case_columns=args.complete_case_features,
+    )
 
     scores_df = evaluator.run_cross_validation(
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
+        fold_col=args.fold_col,
         n_folds=3,
         random_state=7,
         C_candidates=[0.001, 0.01, 0.1, 1.0, 10.0, 100.0],

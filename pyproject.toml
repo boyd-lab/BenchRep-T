@@ -8,12 +8,16 @@ version = "0.1.0"
 description = "Benchmarking framework for TCR repertoire-based disease classification"
 requires-python = ">=3.10"
 dependencies = [
+    "huggingface-hub>=0.24,<1",
     "numpy>=1.23.5,<3",
     "pandas>=1.5,<4",
     "scipy>=1.10,<2",
     "scikit-learn>=1.2,<2",
     "tqdm>=4.66,<5",
 ]
+
+[project.scripts]
+benchrep-download-data = "utils.huggingface_data:main"
 
 [project.optional-dependencies]
 # Statistical and feature-engineered methods
