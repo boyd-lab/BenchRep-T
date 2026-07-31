@@ -81,10 +81,9 @@ done
 For GPU execution, PyTorch includes its CUDA runtime dependencies. DeepTCR uses
 TensorFlow's `and-cuda` extra, which supplies a matched CUDA 12 runtime, cuDNN,
 and PTX compiler while retaining the TensorFlow 1 compatibility APIs used by
-the bundled source. The example launcher discovers these libraries inside the
-environment, so it does not require a system CUDA toolkit. GIANA similarly uses
-a self-contained CUDA 12 FAISS wheel. These GPU execution paths were validated
-on an H200.
+the bundled source, so it does not require a system CUDA toolkit. GIANA
+similarly uses a self-contained CUDA 12 FAISS wheel. These GPU execution paths
+were validated on an H200.
 
 ### uv or pip
 

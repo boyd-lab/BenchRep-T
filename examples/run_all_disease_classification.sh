@@ -54,12 +54,7 @@ declare -A TARGETS=(
 python_command() {
   local method=$1
   if [[ "${USE_CONDA}" == "1" ]]; then
-    if [[ "${method}" == "deeptcr" && "${USE_GPU}" == "1" ]]; then
-      printf '%s\n' "${CONDA_EXE}" run -n "${ENVIRONMENTS[$method]}" \
-        python -m utils.tensorflow_cuda_launcher
-    else
-      printf '%s\n' "${CONDA_EXE}" run -n "${ENVIRONMENTS[$method]}" python
-    fi
+    printf '%s\n' "${CONDA_EXE}" run -n "${ENVIRONMENTS[$method]}" python
   else
     printf '%s\n' "${PYTHON_BIN}"
   fi
