@@ -101,17 +101,19 @@ uv sync --extra giana
 uv sync --extra deeprc
 uv sync --extra deeptcr
 uv sync --extra drivers
-
-# Everything
-uv sync --all-extras
 ```
 
 Alternatively, with pip:
 
 ```bash
 pip install -e .             # core only
-pip install -e ".[all]"      # all extras
+pip install -e ".[base]"     # one method-family extra per environment
 ```
+
+Do not combine all extras in one environment. In particular, DeepTCR requires
+Biopython 1.76 while the other method environments use newer Biopython
+versions. Use the separate environments described above, or substitute the
+desired method-family extra in the pip example.
 
 ## Repository Structure
 

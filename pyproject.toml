@@ -66,10 +66,6 @@ deeptcr = [
 drivers = [
     "python-Levenshtein",
 ]
-# All optional dependencies
-all = [
-    "benchrep-t[base,abmil,giana,deeprc,deeptcr,drivers]",
-]
 
 [tool.setuptools.packages.find]
 where = ["."]
