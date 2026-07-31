@@ -1,4 +1,4 @@
-"""Download the private BenchRep-T dataset into the benchmark's data layout.
+"""Download the public BenchRep-T dataset into the benchmark's data layout.
 
 The model evaluators intentionally continue to consume ordinary files.  This
 module materializes only the cohorts and task assets requested by the user so
@@ -222,7 +222,7 @@ def download_data(
     token: str | bool | None = None,
     dry_run: bool = False,
 ) -> list[str]:
-    """Download selected private dataset files and validate their local layout."""
+    """Download selected dataset files and validate their local layout."""
     patterns = local_patterns(tasks, cohorts)
     if dry_run:
         return list(patterns)
@@ -261,7 +261,7 @@ def download_data(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Download private BenchRep-T files in their native Mal-ID/ and "
+            "Download public BenchRep-T files in their native Mal-ID/ and "
             "immunoSEQ/ layout for disease, driver, depth, and demographic tasks."
         )
     )
@@ -299,8 +299,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--token-env",
         default=None,
         help=(
-            "Read the access token from this environment variable. By default "
-            "huggingface_hub uses HF_TOKEN or the token saved by `hf auth login`."
+            "Optionally read a Hugging Face token from this environment variable. "
+            "The default public dataset does not require a token."
         ),
     )
     parser.add_argument(
@@ -346,8 +346,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         if "401" in str(exc) or "gated" in str(exc).lower():
             print(
-                "Authenticate with `hf auth login` or set HF_TOKEN to a token "
-                "that has access to the private dataset.",
+                "Check the repository ID, revision, and network access. "
+                "Authentication is not required for the default public dataset.",
                 file=sys.stderr,
             )
         return 1

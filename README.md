@@ -276,14 +276,8 @@ data/
     └── Emerson_CMV/{metadata.tsv,repertoires/}    # 761 repertoires
 ```
 
-The repository is private, so first request access and authenticate without
-putting a token in a command or configuration file:
-
-```bash
-hf auth login
-# On a cluster, exporting a read-only token is also supported:
-export HF_TOKEN=hf_...
-```
+BenchRep-T is public. No Hugging Face account, access request, login, or token
+is required to download it.
 
 After installing BenchRep-T, materialize the complete dataset in its native
 Hugging Face directory layout:
@@ -308,28 +302,63 @@ benchrep-download-data --task depth
 # Within-cohort CMV disease classification
 benchrep-download-data --task disease --cohort cmv
 
-# Inspect a selection without authenticating or downloading
+# Inspect a selection without downloading
 benchrep-download-data --task disease --cohort rawat-t1d --dry-run
 ```
 
 Supported cohort names are `malid`, `mitchell-t1d`, `rawat-t1d`, `tb`, `ra`,
 and `cmv`. The downloader supports a pinned dataset commit with `--revision`,
 resumes through the Hugging Face cache, validates metadata columns and
-repertoire presence after download, and never stores credentials in this
-repository. Existing files can be checked without network access using
+repertoire presence after download. An optional token can still be supplied
+with `--token-env` when using a custom repository that requires one. Existing
+files can be checked without network access using
 `benchrep-download-data --validate-only`.
 
 Downloaded cohorts retain the Hugging Face repository layout. For example,
 Savola RA is written to `data/immunoSEQ/Savola_RA/metadata.tsv` and
 `data/immunoSEQ/Savola_RA/repertoires/`; Mal-ID is written to
-`data/Mal-ID/metadata.tsv` and `data/Mal-ID/repertoires/`. Pass those native
-paths to `--metadata_path` and `--repertoire_data_dir` in the experiment
-commands.
+`data/Mal-ID/metadata.tsv` and `data/Mal-ID/repertoires/`. Tools that support
+cohort-native filename templates can consume these paths directly. The
+all-method example below creates a uniform compatibility view for evaluators
+that expect Mal-ID-style filenames.
 
 The task-specific auxiliary paths are
 `data/Mal-ID/vdjdb_minervina_driver_seq_matches.csv` for driver identification
 and `data/Mal-ID/scaling_exp_depth_indices_max75k.json.gz` for sequencing-depth
 scaling.
+
+### Run every disease-classification benchmark
+
+The tracked example runner downloads the complete public dataset, creates a
+symlink-only normalized view for evaluator compatibility, and sequentially runs
+all eight methods across all ten cohort/disease tasks:
+
+```bash
+bash examples/run_all_disease_classification.sh
+```
+
+The downloaded repertoire files are never copied or modified. For each
+metadata row, the runner creates a relative symlink in its run directory using
+the filename expected by all evaluators:
+
+```text
+source: data/immunoSEQ/Rawat_T1D/repertoires/Brusko_6534_TCRB.tsv.gz
+link:   results/all_disease_classification/<run>/staged_data/rawat-t1d/repertoires/part_table_Brusko_6534_Brusko_6534.tsv.gz
+```
+
+The staged `metadata.tsv` is a small derived copy. It preserves the source
+columns while exposing the common fold column and normalizing `Healthy` (RA)
+and `Controller` (TB) to `Healthy/Background`. Relative links contain no
+machine-specific absolute paths. A fresh run recreates them on each machine;
+they also remain valid if the project tree, including both `data/` and
+`results/`, is moved together. Removing a staged run does not remove the
+downloaded data, but removing or relocating `data/` by itself breaks its links.
+
+By default it uses the method-specific Conda environments documented below.
+The full 80-run matrix is compute-intensive and executes sequentially.
+Set `DRY_RUN=1 DOWNLOAD_DATA=0` to print all 80 commands without downloading or
+training. `METHODS`, `DATASETS`, `OUTPUT_ROOT`, `USE_GPU`, `N_JOBS`, and
+`N_THREADS` can be overridden as environment variables.
 
 
 ## Preprocessing
