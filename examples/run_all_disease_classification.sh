@@ -19,6 +19,10 @@ USE_GPU="${USE_GPU:-1}"
 N_JOBS="${N_JOBS:-8}"
 N_THREADS="${N_THREADS:-8}"
 MAX_FOLDS="${MAX_FOLDS:-}"
+# DeepRC and DeepTCR were benchmarked at these batch sizes rather than their
+# evaluators' argparse defaults (4 and 25), so they are set explicitly here.
+DEEPRC_BATCH_SIZE="${DEEPRC_BATCH_SIZE:-32}"
+DEEPTCR_BATCH_SIZE="${DEEPTCR_BATCH_SIZE:-4}"
 METHODS="${METHODS:-emerson ostmeyer ensemble_regression ensemble_xgboost abmil deeprc deeptcr giana}"
 DATASETS="${DATASETS:-malid mitchell-t1d rawat-t1d tb ra cmv}"
 
@@ -61,7 +65,15 @@ python_command() {
 }
 
 if [[ "${DOWNLOAD_DATA}" == "1" ]]; then
-  download=("${PYTHON_BIN}" -m utils.huggingface_data --output-dir "${DATA_ROOT}")
+  # Fetch only the cohorts this run needs; the full dataset is 14.6 GiB and a
+  # single-cohort run such as DATASETS=ra needs 0.04 GiB of it.
+  download=(
+    "${PYTHON_BIN}" -m utils.huggingface_data
+    --output-dir "${DATA_ROOT}" --task disease
+  )
+  for dataset in ${DATASETS}; do
+    download+=(--cohort "${dataset}")
+  done
   if [[ "${DRY_RUN}" == "1" ]]; then
     download+=(--dry-run)
   fi
@@ -127,11 +139,17 @@ for dataset in ${DATASETS}; do
           [[ "${USE_GPU}" != "1" ]] && command+=(--no_gpu)
           ;;
         deeprc)
-          command+=(--results_dir "${method_root}/models" --n_worker_processes "${N_JOBS}")
+          command+=(
+            --results_dir "${method_root}/models" --n_worker_processes "${N_JOBS}"
+            --batch_size "${DEEPRC_BATCH_SIZE}"
+          )
           [[ "${USE_GPU}" == "1" ]] && command+=(--device cuda:0) || command+=(--device cpu)
           ;;
         deeptcr)
-          command+=(--results_dir "${method_root}/models" --n_jobs "${N_JOBS}")
+          command+=(
+            --results_dir "${method_root}/models" --n_jobs "${N_JOBS}"
+            --batch_size "${DEEPTCR_BATCH_SIZE}"
+          )
           ;;
         giana)
           command+=(--results_dir "${method_root}/models" --n_threads "${N_THREADS}")
