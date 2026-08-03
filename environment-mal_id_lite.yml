@@ -1,0 +1,16 @@
+name: mal_id_lite
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - numpy==2.4.4
+      - pandas==3.0.2
+      - pyarrow==23.0.1
+      - scipy==1.17.1
+      - scikit-learn==1.8.0
+      - joblib==1.5.3
+      - torch==2.5.1
+      - fair-esm==2.0.0
+      - python-glmnet==2.6.1

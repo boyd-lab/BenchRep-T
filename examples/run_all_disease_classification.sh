@@ -23,7 +23,7 @@ MAX_FOLDS="${MAX_FOLDS:-}"
 # evaluators' argparse defaults (4 and 25), so they are set explicitly here.
 DEEPRC_BATCH_SIZE="${DEEPRC_BATCH_SIZE:-32}"
 DEEPTCR_BATCH_SIZE="${DEEPTCR_BATCH_SIZE:-4}"
-METHODS="${METHODS:-emerson ostmeyer ensemble_regression ensemble_xgboost abmil deeprc deeptcr giana}"
+METHODS="${METHODS:-emerson ostmeyer ensemble_regression ensemble_xgboost abmil deeprc deeptcr giana malid_lite}"
 DATASETS="${DATASETS:-malid mitchell-t1d rawat-t1d tb ra cmv}"
 
 declare -A MODULES=(
@@ -35,6 +35,7 @@ declare -A MODULES=(
   [deeprc]=evals.deeprc_2020_disease_classification
   [deeptcr]=evals.deeptcr_2021_disease_classification
   [giana]=evals.giana_2021_disease_classification
+  [malid_lite]=evals.mal_id_lite_disease_classification
 )
 declare -A ENVIRONMENTS=(
   [emerson]=benchrep-base
@@ -45,6 +46,7 @@ declare -A ENVIRONMENTS=(
   [deeprc]=deeprc
   [deeptcr]=deeptcr
   [giana]=giana
+  [malid_lite]=mal_id_lite
 )
 declare -A TARGETS=(
   [malid]="HIV,T1D,Lupus,Covid19,Influenza"
@@ -154,6 +156,18 @@ for dataset in ${DATASETS}; do
         giana)
           command+=(--results_dir "${method_root}/models" --n_threads "${N_THREADS}")
           [[ "${USE_GPU}" == "1" ]] && command+=(--use_gpu)
+          ;;
+        malid_lite)
+          # cache_dir is scoped to ${dataset} (not ${target_tag}), so every
+          # target disease sharing this dataset reuses one cache/one set of
+          # ESM-2 embeddings instead of rebuilding per target.
+          command+=(
+            --dataset_name "${dataset}"
+            --cache_dir "${OUTPUT_ROOT}/${dataset}/malid_lite_cache"
+            --model_save_dir "${method_root}/models"
+            --n_jobs "${N_JOBS}"
+          )
+          [[ "${USE_GPU}" != "1" ]] && command+=(--no_gpu)
           ;;
       esac
 
