@@ -83,7 +83,32 @@ TensorFlow's `and-cuda` extra, which supplies a matched CUDA 12 runtime, cuDNN,
 and PTX compiler while retaining the TensorFlow 1 compatibility APIs used by
 the bundled source, so it does not require a system CUDA toolkit. GIANA
 similarly uses a self-contained CUDA 12 FAISS wheel. These GPU execution paths
-were validated on an H200.
+were validated on an H200 and an L40S.
+
+Because each environment ships its own CUDA runtime, a system CUDA on
+`LD_LIBRARY_PATH` can shadow those wheels and break an otherwise correct
+environment. With `/usr/local/cuda-12.0/lib64` exported, for example, importing
+PyTorch in the `abmil` environment fails with:
+
+```text
+ImportError: .../nvidia/cusparse/lib/libcusparse.so.12: undefined symbol:
+__nvJitLinkAddData_12_1, version libnvJitLink.so.12
+```
+
+CUDA 12.0's `libnvJitLink.so.12` is loaded ahead of the wheel's and does not
+export the symbol that the bundled cuSPARSE 12.1 needs. The environments
+themselves are correct; unset or reorder `LD_LIBRARY_PATH` so the wheel-provided
+libraries win:
+
+```bash
+env -u LD_LIBRARY_PATH bash examples/run_all_disease_classification.sh
+```
+
+Confirm an environment resolves its own CUDA libraries with:
+
+```bash
+conda run -n abmil python -c "import torch; print(torch.cuda.is_available())"
+```
 
 ### uv or pip
 
@@ -128,6 +153,7 @@ models/                          Classification methods
 ├── DeepRC/                      Widrich et al. 2020          (deep learning)
 └── DeepTCR/                     Sidhom et al. 2021           (deep learning)
 evals/                           Per-method experiment scripts (disease, drivers, depth, demographics)
+examples/                        One runner per evaluation task (see below)
 preprocessing/                   Repertoire cleaning and preparation
 external_data_process/           Cohort-specific conversion to AIRR and gene harmonization
 utils/                           Repertoire I/O, metric helpers, cohort/covariate adjustment
@@ -372,6 +398,94 @@ Savola RA:
 DATASETS=ra bash examples/run_all_disease_classification.sh
 ```
 
+The download step is narrowed to the selected cohorts, so a single-cohort run
+fetches only that cohort rather than the full 14.6 GiB dataset.
+
+### Run every driver-sequence identification benchmark
+
+```bash
+bash examples/run_all_driver_identification.sh
+```
+
+Six methods across the three diseases the ground-truth match table covers
+(HIV, Influenza, COVID-19) — 18 runs — plus the random-chance recall@k baseline
+written to `random_baseline_recall.csv` in the run directory. Emerson and
+Ensemble Regression take `--k` as space-separated integers while the rest take a
+comma-separated list; the runner emits both from a single `K` setting.
+
+The task covers Mal-ID only, because the published driver labels are keyed to
+Mal-ID repertoire identifiers. Ensemble XGBoost only scores CDR3s with the models
+saved by disease classification and never fits here, so it needs the earlier
+run's `OUTPUT_ROOT`:
+
+```bash
+OUTPUT_ROOT=results/disease bash examples/run_all_disease_classification.sh
+DISEASE_RUN_ROOT=results/disease bash examples/run_all_driver_identification.sh
+```
+
+ABMIL, DeepRC and GIANA reuse that run's checkpoints and cluster files when
+present and otherwise fit their own, so every method except Ensemble XGBoost
+also runs standalone. Without `DISEASE_RUN_ROOT`, Ensemble XGBoost is reported
+as skipped rather than producing all-NaN folds. `K`, `DISEASES`, `METHODS`,
+`MAX_REPERTOIRES` and `RANDOM_BASELINE` can be overridden.
+
+### Run every demographic-confounding analysis
+
+```bash
+bash examples/run_all_demographic_analysis.sh
+```
+
+Both analyses of section 4, selected with `ANALYSES`:
+
+- `matched_controls` — seven methods x four diseases x two modes (56 runs).
+  `adjust` passes `--adjust_distribution_by_demographics`; `baseline` passes
+  `--random_baseline_seeds 7 14 21 28 35`. The step also writes the 24 cohort
+  sample lists. GIANA is excluded: its evaluator accepts the matched-cohort flag
+  but has no `--random_baseline_seeds`, so it has no paired control.
+- `feature_concat` — seven cells x four diseases (28 runs), covering the
+  demographics-only baseline, each method on the complete-demographics subset
+  via `--require_demographics`, and the concatenated model. CMV comes from the
+  Emerson cohort, so this analysis stages two cohorts.
+
+DeepRC and DeepTCR follow the published demographic runs, whose training
+schedules differ from those evaluators' argparse defaults; see the `DEEPRC_*`
+and `DEEPTCR_*` variables in the script.
+
+### Run every sequencing-depth scaling experiment
+
+```bash
+bash examples/run_all_depth_scaling.sh
+```
+
+Four methods across Lupus and HIV (8 runs), each sweeping every depth and
+replicate in the published indices file — 30 complete cross-validation runs per
+method and disease. Depths, replicate count, minimum sequence count and seed all
+come from that file rather than from flags, so the subsampling is the published
+one: nested across depths, so the sequences at depth D are always a subset of
+those at any larger depth.
+
+Mal-ID only, since the indices are keyed to Mal-ID repertoire identifiers. The
+scaling figure also carries a Mal-ID method row, which is the original Zaslavsky
+classifier rather than one of this repository's evaluators, so this runner does
+not produce it. `ostmeyer_2019`, `giana_2021` and the `_kmer`/`_vj` sub-model
+ablations are supported through `METHODS` but are not enabled by default.
+
+Because the full matrix is expensive, `DEPTHS` and `REPLICATES` narrow it
+without modifying the downloaded indices — they write a filtered copy under the
+run directory and tag the output filename, so a narrowed run never collides with
+a full one:
+
+```bash
+DEPTHS=1000 REPLICATES=1 bash examples/run_all_depth_scaling.sh
+DEPTHS=75000 METHODS=ensemble_xgboost bash examples/run_all_depth_scaling.sh
+```
+
+The published scaling runs kept XGBoost and GIANA on CPU even where a GPU was
+available; `XGBOOST_DEVICE` and `GIANA_USE_GPU` expose that, and `USE_GPU=0`
+forces CPU throughout.
+
+Every runner accepts `DRY_RUN=1 DOWNLOAD_DATA=0`, which prints each fully
+expanded command without downloading data or training anything.
 
 ## Preprocessing
 

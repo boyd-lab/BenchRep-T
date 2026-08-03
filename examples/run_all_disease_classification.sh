@@ -58,7 +58,7 @@ declare -A TARGETS=(
 python_command() {
   local method=$1
   if [[ "${USE_CONDA}" == "1" ]]; then
-    printf '%s\n' "${CONDA_EXE}" run -n "${ENVIRONMENTS[$method]}" python
+    printf '%s\n' "${CONDA_EXE}" run --no-capture-output -n "${ENVIRONMENTS[$method]}" python
   else
     printf '%s\n' "${PYTHON_BIN}"
   fi

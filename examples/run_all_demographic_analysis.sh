@@ -131,7 +131,7 @@ has_analysis() { [[ " ${ANALYSES} " == *" $1 "* ]]; }
 python_command() {
   local key=$1
   if [[ "${USE_CONDA}" == "1" ]]; then
-    printf '%s\n' "${CONDA_EXE}" run -n "${ENVIRONMENTS[$key]}" python
+    printf '%s\n' "${CONDA_EXE}" run --no-capture-output -n "${ENVIRONMENTS[$key]}" python
   else
     printf '%s\n' "${PYTHON_BIN}"
   fi
