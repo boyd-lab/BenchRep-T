@@ -10,10 +10,19 @@ set -euo pipefail
 # flags, so the subsampling is exactly the published one: nested across depths,
 # so the D sequences at depth D are always a subset of those at any larger depth.
 #
-# Only Mal-ID is covered: the published indices are keyed to Mal-ID repertoire
-# identifiers. The scaling figure also carries a Mal-ID method row, which is the
-# original Zaslavsky classifier rather than one of this repository's evaluators
-# and has no --model key here, so it is not produced by this runner.
+# Only the Mal-ID cohort is covered: the published indices are keyed to its
+# repertoire identifiers. The scaling figure's own Mal-ID method row is the
+# original Zaslavsky classifier, not reproduced here; `malid_lite` (this
+# repository's Mal-ID-Lite reimplementation) is a separate, runnable stand-in
+# for it, but it doesn't go through evals.sequencing_depth_experiment's
+# --model dispatch since Mal-ID-Lite is a multi-stage subprocess pipeline
+# rather than an in-process evaluator class. Instead, evals.mal_id_lite_depth_experiment
+# filters each repertoire file down to the same pre-computed row indices the
+# other methods use for a given (depth, repeat), then runs the normal
+# Mal-ID-Lite pipeline unmodified on the filtered files. It is not included in
+# METHODS by default (like giana_2021 and ostmeyer_2019) since each
+# (depth, repeat) is a full Mal-ID-Lite training run -- opt in explicitly with
+# METHODS=malid_lite.
 #
 # Repertoires remain in the downloaded Hugging Face tree; staging creates only
 # normalized metadata and symlinks. Run from any directory.
@@ -69,6 +78,7 @@ declare -A ENVIRONMENTS=(
   [ensemble_xgboost_vj]=benchrep-base
   [giana_2021]=giana
   [deeprc_2020]=deeprc
+  [malid_lite]=mal_id_lite
 )
 # Diseases the published scaling figure covers.
 declare -A SUPPORTED_DISEASES=(
@@ -192,37 +202,55 @@ for disease in ${DISEASES}; do
       # have to hide the GPUs.
       command+=(env CUDA_VISIBLE_DEVICES=)
     fi
-    command+=(
-      "${launcher[@]}" -u -m evals.sequencing_depth_experiment
-      --model "${model}"
-      --target_disease "${disease}"
-      --metadata_path "${metadata}"
-      --repertoire_data_dir "${repertoires}"
-      --depth_indices "${indices}"
-      --random_seed "${RANDOM_SEED}"
-      --output_json "${run_root}/scaling${output_suffix}.json"
-    )
 
-    case "${model}" in
-      ensemble_xgboost*)
-        device="${XGBOOST_DEVICE}"
-        [[ "${USE_GPU}" != "1" ]] && device=cpu
-        command+=(--xgboost_n_jobs "${N_JOBS}" --xgboost_device "${device}")
-        ;;
-      giana_2021)
-        # GIANA re-clusters at every depth and replicate, so each one gets its
-        # own directory under the run; the evaluator appends a depth/replicate
-        # tag beneath this path.
-        command+=(
-          --giana_results_dir "${run_root}/clusters"
-          --giana_n_threads "${N_THREADS}"
-          --giana_threshold_iso 7
-        )
-        if [[ "${GIANA_USE_GPU}" != "1" || "${USE_GPU}" != "1" ]]; then
-          command+=(--giana_cpu)
-        fi
-        ;;
-    esac
+    if [[ "${model}" == "malid_lite" ]]; then
+      # Separate module: filters repertoires to the depth-indices row subset,
+      # then runs the normal Mal-ID-Lite pipeline (see comment above).
+      command+=(
+        "${launcher[@]}" -u -m evals.mal_id_lite_depth_experiment
+        --target_disease "${disease}"
+        --metadata_path "${metadata}"
+        --repertoire_data_dir "${repertoires}"
+        --depth_indices "${indices}"
+        --dataset_name "${COHORT}_${disease}"
+        --cache_root "${run_root}/cache"
+        --n_jobs "${N_JOBS}"
+        --output_json "${run_root}/scaling${output_suffix}.json"
+      )
+      [[ "${USE_GPU}" != "1" ]] && command+=(--no_gpu)
+    else
+      command+=(
+        "${launcher[@]}" -u -m evals.sequencing_depth_experiment
+        --model "${model}"
+        --target_disease "${disease}"
+        --metadata_path "${metadata}"
+        --repertoire_data_dir "${repertoires}"
+        --depth_indices "${indices}"
+        --random_seed "${RANDOM_SEED}"
+        --output_json "${run_root}/scaling${output_suffix}.json"
+      )
+
+      case "${model}" in
+        ensemble_xgboost*)
+          device="${XGBOOST_DEVICE}"
+          [[ "${USE_GPU}" != "1" ]] && device=cpu
+          command+=(--xgboost_n_jobs "${N_JOBS}" --xgboost_device "${device}")
+          ;;
+        giana_2021)
+          # GIANA re-clusters at every depth and replicate, so each one gets its
+          # own directory under the run; the evaluator appends a depth/replicate
+          # tag beneath this path.
+          command+=(
+            --giana_results_dir "${run_root}/clusters"
+            --giana_n_threads "${N_THREADS}"
+            --giana_threshold_iso 7
+          )
+          if [[ "${GIANA_USE_GPU}" != "1" || "${USE_GPU}" != "1" ]]; then
+            command+=(--giana_cpu)
+          fi
+          ;;
+      esac
+    fi
 
     run_count=$((run_count + 1))
     if [[ "${DRY_RUN}" == "1" ]]; then

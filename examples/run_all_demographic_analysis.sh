@@ -27,6 +27,13 @@ set -euo pipefail
 # matched run would have no paired random-control baseline, and it is omitted
 # from the published figure.
 #
+# malid_lite (Mal-ID-Lite) supports both flags but is not in the default
+# MATCHED_METHODS: each (disease, mode) cell -- and each of the 5 baseline
+# seeds within a "baseline" cell -- is a full Mal-ID-Lite training run with
+# its own cache (the resampled healthy cohort differs per seed, so nothing is
+# reused across them), which is expensive to run by default. Opt in with
+# MATCHED_METHODS=malid_lite.
+#
 # DeepRC and DeepTCR here follow the published demographic runs
 # (bash/demographic_subsample/), whose training schedules differ from those
 # evaluators' argparse defaults; see the DEEPRC_* and DEEPTCR_* knobs below.
@@ -67,6 +74,7 @@ declare -A MODULES=(
   [abmil]=evals.ensemble_abmil_disease_classification
   [deeprc]=evals.deeprc_2020_disease_classification
   [deeptcr]=evals.deeptcr_2021_disease_classification
+  [malid_lite]=evals.mal_id_lite_disease_classification
   [demographics_only]=evals.demographic_features_disease_classification
   [vj_repertoire_only]=evals.ensemble_regression_disease_classification
   [vj_plus_demographics]=evals.vjgene_demographics_disease_classification
@@ -83,6 +91,7 @@ declare -A ENVIRONMENTS=(
   [abmil]=abmil
   [deeprc]=deeprc
   [deeptcr]=deeptcr
+  [malid_lite]=mal_id_lite
   [demographics_only]=benchrep-base
   [vj_repertoire_only]=benchrep-base
   [vj_plus_demographics]=benchrep-base
@@ -118,6 +127,7 @@ declare -A SUPPORTS_MAX_FOLDS=(
   [abmil]=1
   [deeprc]=1
   [deeptcr]=1
+  [malid_lite]=1
   [vj_repertoire_only]=1
   [deeptcr_repertoire_only]=1
   [abmil_repertoire_only]=1
@@ -308,6 +318,18 @@ if has_analysis matched_controls; then
               --batch_size "${DEEPTCR_BATCH_SIZE}"
               --device 0
             )
+            ;;
+          malid_lite)
+            # Fresh cache per (disease, method, mode) cell; --random_baseline_seeds
+            # further scopes a subdirectory per seed internally (see the mode case
+            # below), since the resampled healthy cohort differs per seed.
+            command+=(
+              --dataset_name "malid_${disease}_${mode}"
+              --cache_dir "${run_root}/cache"
+              --model_save_dir "${run_root}/models"
+              --n_jobs "${N_JOBS}"
+            )
+            [[ "${USE_GPU}" != "1" ]] && command+=(--no_gpu)
             ;;
         esac
 

@@ -38,12 +38,36 @@ from pathlib import Path
 
 import pandas as pd
 
+from utils.cohort_adjustments import apply_cohort_adjustment
+
 MAL_ID_LITE_ROOT = Path(__file__).resolve().parent.parent / "models" / "Mal-ID-Lite"
 HEALTHY_LABEL = "Healthy/Background"
 
 
 def load_metadata(metadata_path):
     return pd.read_csv(metadata_path, sep="\t")
+
+
+def prepare_metadata_subset(
+    metadata, target_disease, disease_col="disease", healthy_label=HEALTHY_LABEL,
+    adjust_distribution_by_demographics=False, random_baseline=False, random_baseline_seed=7,
+):
+    """Filter to target_disease vs. healthy_label and add a binary `label`
+    column, then optionally apply the same demographic cohort adjustment
+    (utils.cohort_adjustments) every other evaluator in this package
+    supports: `adjust_distribution_by_demographics` replaces the healthy pool
+    with one matched on the disease's dominant confounder (age or ancestry);
+    `random_baseline` additionally resamples healthy uniformly at random to
+    the same target N, for the paired random-control baseline.
+    """
+    mask = metadata[disease_col].isin([target_disease, healthy_label])
+    filtered = metadata[mask].copy()
+    filtered["label"] = (filtered[disease_col] == target_disease).astype(int)
+    if adjust_distribution_by_demographics:
+        filtered = apply_cohort_adjustment(
+            filtered, target_disease, seed=random_baseline_seed, random_baseline=random_baseline,
+        )
+    return filtered
 
 
 def consolidate_participant_files(
@@ -147,7 +171,7 @@ def build_cache_if_missing(
 
 def run_training(
     cache_dir, dataset_name, gene_locus, target_disease, healthy_label,
-    models, model2_abstention_strategy, output_dir, n_jobs, use_gpu,
+    models, model2_abstention_strategy, output_dir, n_jobs, use_gpu, fold_ids=None,
 ):
     cmd = [
         sys.executable,
@@ -165,6 +189,8 @@ def run_training(
         "--n-jobs", str(n_jobs),
         "--model3-device", "cuda" if use_gpu else "cpu",
     ]
+    if fold_ids is not None:
+        cmd += ["--fold-ids", *[str(f) for f in fold_ids]]
     # clone_id parameters are locked in at cache-build time; per Mal-ID-Lite's
     # own guidance, subsequent commands should omit them so the cached values
     # are accepted as-is rather than risking a conflicting-parameter error.
@@ -210,6 +236,61 @@ def convert_to_standard_scores(predictions_csv, target_disease):
     return out
 
 
+def run_pipeline(
+    cache_metadata, repertoire_data_dir, target_disease, dataset_name, cache_dir, model_save_dir,
+    participant_col="participant_label", disease_col="disease", file_prefix="part_table_",
+    file_suffix=".tsv.gz", healthy_label=HEALTHY_LABEL, gene_locus="TCR", models=(1, 2, 3),
+    model2_abstention_strategy="fill_models13_mean", n_jobs=4, use_gpu=True, fold_ids=None,
+    force_reprocess=False,
+):
+    """Run the full consolidate -> cache -> train -> convert pipeline and
+    return the standard-schema scores DataFrame.
+
+    `cache_metadata` determines both what gets physically consolidated and
+    what Mal-ID-Lite's own cache is built from -- pass the full dataset
+    metadata (all diseases) when the cache is meant to be reused across
+    multiple --target_disease calls sharing one cache_dir (so every
+    participant any future target might need already has a file), or a
+    single target's (optionally demographically-adjusted) subset when the
+    cache is single-use (e.g. one cache_dir per demographic-matched run).
+    Training itself always narrows to target_disease vs. healthy_label via
+    train_ensemble.py's --diseases flag regardless of which was passed.
+    """
+    cache_dir = Path(cache_dir)
+    consolidated_dir = cache_dir / "consolidated_data"
+    print(f"[1/4] Consolidating per-specimen repertoires into per-participant files "
+          f"under {consolidated_dir} ...")
+    has_nt_cdr3 = consolidate_participant_files(
+        cache_metadata, repertoire_data_dir, consolidated_dir,
+        participant_col=participant_col, file_prefix=file_prefix, file_suffix=file_suffix,
+    )
+    use_aa_clone_id = not has_nt_cdr3
+    print(f"  Nucleotide CDR3 column present: {has_nt_cdr3} "
+          f"(clone_id will use {'amino acid' if use_aa_clone_id else 'nucleotide'} sequence).")
+
+    staged_metadata_path = cache_dir / "staged_metadata_for_malid_lite.tsv"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    renamed = cache_metadata.rename(columns={disease_col: "disease"}) \
+        if disease_col != "disease" else cache_metadata
+    renamed.to_csv(staged_metadata_path, sep="\t", index=False)
+
+    print(f"[2/4] Building Mal-ID-Lite cache at {cache_dir} (skipped if already built) ...")
+    build_cache_if_missing(
+        consolidated_dir, staged_metadata_path, cache_dir, gene_locus,
+        n_jobs, use_aa_clone_id, force_reprocess,
+    )
+
+    print(f"[3/4] Training Mal-ID-Lite ensemble for target_disease={target_disease} ...")
+    run_training(
+        cache_dir, dataset_name, gene_locus, target_disease, healthy_label,
+        models, model2_abstention_strategy, model_save_dir, n_jobs, use_gpu, fold_ids=fold_ids,
+    )
+
+    print("[4/4] Converting ensemble_predictions.csv to standard scores.csv schema ...")
+    predictions_csv = find_predictions_csv(model_save_dir)
+    return convert_to_standard_scores(predictions_csv, target_disease)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mal-ID-Lite Disease Classification")
     parser.add_argument("--metadata_path", type=str, required=True,
@@ -249,51 +330,92 @@ if __name__ == "__main__":
                              "(passed through as train_ensemble.py's --output-dir).")
     parser.add_argument("--output_csv", type=str, default=None,
                         help="Path to save per-sample scores CSV (standard schema).")
+    parser.add_argument("--adjust_distribution_by_demographics", action="store_true",
+                        help="Apply per-disease cohort distribution adjustment (see "
+                             "utils.cohort_adjustments): HIV filters to African ancestry; "
+                             "Lupus/T1D/Influenza/Covid19 subsample Healthy/Background to "
+                             "match the disease cohort's age distribution.")
+    parser.add_argument("--random_baseline_seeds", type=int, nargs="+", default=None,
+                        help="Run the random-sampling healthy baseline for each seed "
+                             "(implies --adjust_distribution_by_demographics). For each "
+                             "seed, healthy is resampled uniformly at random to the same "
+                             "target N as the demographic-matched cohort. Each seed gets "
+                             "its own cache/output subdirectory (the resampled cohort "
+                             "differs per seed, so nothing is reused across them); results "
+                             "from all seeds are concatenated with a `random_baseline_seed` "
+                             "column. Example: 7 14 21 28 35.")
+    parser.add_argument("--max_folds", type=int, default=None,
+                        help="Limit training to fold IDs 0..max_folds-1 (passed through as "
+                             "train_ensemble.py's --fold-ids). Default: all folds.")
     args = parser.parse_args()
 
     if args.model_save_dir is None:
         parser.error("--model_save_dir is required (used as Mal-ID-Lite's training output dir)")
+    if args.max_folds is not None and args.max_folds < 1:
+        parser.error("--max_folds must be >= 1")
+    fold_ids = list(range(args.max_folds)) if args.max_folds is not None else None
 
-    metadata = load_metadata(args.metadata_path)
-    metadata = metadata[
-        metadata[args.disease_col].isin([args.target_disease, args.healthy_label])
-    ].copy()
-
-    consolidated_dir = Path(args.cache_dir) / "consolidated_data"
-    print(f"[1/4] Consolidating per-specimen repertoires into per-participant files "
-          f"under {consolidated_dir} ...")
-    has_nt_cdr3 = consolidate_participant_files(
-        metadata, args.repertoire_data_dir, consolidated_dir,
-        participant_col=args.participant_col,
-        file_prefix=args.file_prefix, file_suffix=args.file_suffix,
-    )
-    use_aa_clone_id = not has_nt_cdr3
-    print(f"  Nucleotide CDR3 column present: {has_nt_cdr3} "
-          f"(clone_id will use {'amino acid' if use_aa_clone_id else 'nucleotide'} sequence).")
-
-    staged_metadata_path = Path(args.cache_dir) / "staged_metadata_for_malid_lite.tsv"
-    Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
     full_metadata = load_metadata(args.metadata_path)
-    full_metadata.rename(columns={args.disease_col: "disease"}, inplace=True) \
-        if args.disease_col != "disease" else None
-    full_metadata.to_csv(staged_metadata_path, sep="\t", index=False)
-
-    print(f"[2/4] Building Mal-ID-Lite cache at {args.cache_dir} (skipped if already built) ...")
-    build_cache_if_missing(
-        consolidated_dir, staged_metadata_path, args.cache_dir, args.gene_locus,
-        args.n_jobs, use_aa_clone_id, args.force_reprocess,
+    pipeline_kwargs = dict(
+        repertoire_data_dir=args.repertoire_data_dir,
+        target_disease=args.target_disease,
+        dataset_name=args.dataset_name,
+        participant_col=args.participant_col,
+        disease_col=args.disease_col,
+        file_prefix=args.file_prefix,
+        file_suffix=args.file_suffix,
+        healthy_label=args.healthy_label,
+        gene_locus=args.gene_locus,
+        models=args.models,
+        model2_abstention_strategy=args.model2_abstention_strategy,
+        n_jobs=args.n_jobs,
+        use_gpu=not args.no_gpu,
+        fold_ids=fold_ids,
+        force_reprocess=args.force_reprocess,
     )
 
-    print(f"[3/4] Training Mal-ID-Lite ensemble for target_disease={args.target_disease} ...")
-    run_training(
-        args.cache_dir, args.dataset_name, args.gene_locus, args.target_disease,
-        args.healthy_label, args.models, args.model2_abstention_strategy,
-        args.model_save_dir, args.n_jobs, not args.no_gpu,
-    )
-
-    print("[4/4] Converting ensemble_predictions.csv to standard scores.csv schema ...")
-    predictions_csv = find_predictions_csv(args.model_save_dir)
-    scores_df = convert_to_standard_scores(predictions_csv, args.target_disease)
+    if args.random_baseline_seeds:
+        seed_dfs = []
+        for seed in args.random_baseline_seeds:
+            print(f"\n{'#'*60}")
+            print(f"# RANDOM BASELINE RUN — seed={seed}")
+            print(f"{'#'*60}")
+            metadata_subset = prepare_metadata_subset(
+                full_metadata, args.target_disease, args.disease_col, args.healthy_label,
+                adjust_distribution_by_demographics=True, random_baseline=True,
+                random_baseline_seed=seed,
+            )
+            seed_df = run_pipeline(
+                cache_metadata=metadata_subset,
+                cache_dir=Path(args.cache_dir) / f"seed{seed}",
+                model_save_dir=Path(args.model_save_dir) / f"seed{seed}",
+                **pipeline_kwargs,
+            )
+            seed_df["random_baseline_seed"] = seed
+            seed_dfs.append(seed_df)
+        scores_df = pd.concat(seed_dfs, axis=0, ignore_index=True)
+    elif args.adjust_distribution_by_demographics:
+        metadata_subset = prepare_metadata_subset(
+            full_metadata, args.target_disease, args.disease_col, args.healthy_label,
+            adjust_distribution_by_demographics=True,
+        )
+        scores_df = run_pipeline(
+            cache_metadata=metadata_subset,
+            cache_dir=args.cache_dir, model_save_dir=args.model_save_dir,
+            **pipeline_kwargs,
+        )
+    else:
+        # No demographic adjustment: cache_metadata is the full, unfiltered
+        # dataset metadata (every disease, not just this target) so that if
+        # --cache_dir is reused across multiple --target_disease calls (the
+        # normal disease-classification driver pattern), every participant a
+        # later target might need already has a consolidated file, rather
+        # than only whichever target happened to run first.
+        scores_df = run_pipeline(
+            cache_metadata=full_metadata,
+            cache_dir=args.cache_dir, model_save_dir=args.model_save_dir,
+            **pipeline_kwargs,
+        )
 
     if args.output_csv:
         scores_df.to_csv(args.output_csv, index=False)
