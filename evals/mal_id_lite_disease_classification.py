@@ -356,6 +356,15 @@ if __name__ == "__main__":
     fold_ids = list(range(args.max_folds)) if args.max_folds is not None else None
 
     full_metadata = load_metadata(args.metadata_path)
+    # utils.stage_disease_data's uniform staging view adds the canonical
+    # fold-ID column (args.fold_col) while preserving each cohort's native
+    # fold column. For cohorts whose native column has its own name --
+    # currently "CV_fold" for rawat-t1d, tb, and ra -- both end up in the
+    # same staged metadata.tsv. Mal-ID-Lite's own loader (normalize_fold_column)
+    # rejects having more than one fold-ID column present, so drop the native
+    # one here now that the canonical one has been read.
+    if "CV_fold" in full_metadata.columns and "CV_fold" != args.fold_col:
+        full_metadata = full_metadata.drop(columns=["CV_fold"])
     pipeline_kwargs = dict(
         repertoire_data_dir=args.repertoire_data_dir,
         target_disease=args.target_disease,

@@ -62,6 +62,14 @@ deeptcr = [
     "matplotlib==3.7.2",
     "seaborn==0.12.2",
 ]
+# Mal-ID-Lite model (git submodule at models/Mal-ID-Lite)
+mal-id-lite = [
+    "torch>=2.3,<3",
+    "fair-esm>=2,<3",
+    "python-glmnet>=2.6,<3",
+    "joblib>=1.5,<2",
+    "pyarrow>=15,<24",
+]
 # Driver sequence identification experiment
 drivers = [
     "python-Levenshtein",

@@ -141,6 +141,7 @@ uv sync --extra abmil
 uv sync --extra giana
 uv sync --extra deeprc
 uv sync --extra deeptcr
+uv sync --extra mal-id-lite
 uv sync --extra drivers
 ```
 
