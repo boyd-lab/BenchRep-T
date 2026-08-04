@@ -30,7 +30,7 @@ constraints isolated.
 
 Mal-ID-Lite is vendored as a **git submodule** rather than copied into the
 repository (unlike GIANA, DeepRC, and DeepTCR), since it is developed in its
-own repository. After cloning `airr_bench`, populate it with:
+own repository. After cloning `BenchRep-T`, populate it with:
 
 ```bash
 git submodule update --init --recursive models/Mal-ID-Lite
