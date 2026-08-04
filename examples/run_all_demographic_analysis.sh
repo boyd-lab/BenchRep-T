@@ -255,7 +255,7 @@ if has_analysis matched_controls; then
   if [[ "${DUMP_COHORTS}" == "1" ]]; then
     mapfile -t dump_launcher < <(python_command emerson)
     dump=(
-      "${dump_launcher[@]}" -u dump_demographic_cohorts.py
+      "${dump_launcher[@]}" -u preprocessing/dump_demographic_cohorts.py
       --metadata_path "${metadata}"
       --out_dir "${analysis_root}/cohort_samples"
     )
