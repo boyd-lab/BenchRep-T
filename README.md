@@ -376,6 +376,8 @@ The task-specific auxiliary paths are
 and `data/Mal-ID/scaling_exp_depth_indices_max75k.json.gz` for sequencing-depth
 scaling.
 
+## Running the benchmark
+
 ### Run every disease-classification benchmark
 
 The tracked example runner downloads the complete public dataset, creates a
