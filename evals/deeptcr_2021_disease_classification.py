@@ -22,6 +22,27 @@ _DEEPTCR_DIR = os.path.join(
 )
 sys.path.insert(0, _DEEPTCR_DIR)
 
+
+def _ensure_ptxas_on_path():
+    """On GPUs newer than tensorflow[and-cuda]'s prebuilt kernels cover (e.g.
+    compute capability 9.0 / H100+), TF JIT-compiles CUDA kernels from PTX by
+    shelling out to `ptxas`. The nvidia-cuda-nvcc-cu12 pip package installs
+    that binary under site-packages but never puts it on PATH, so the
+    subprocess spawn silently fails and the process segfaults. Add it here,
+    before DeepTCR (and therefore tensorflow) is imported.
+    """
+    try:
+        import nvidia.cuda_nvcc
+    except ImportError:
+        return
+    bin_dir = os.path.join(os.path.dirname(nvidia.cuda_nvcc.__file__), "bin")
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    if os.path.isdir(bin_dir) and bin_dir not in path_entries:
+        os.environ["PATH"] = os.pathsep.join([bin_dir, *path_entries])
+
+
+_ensure_ptxas_on_path()
+
 from DeepTCR import DeepTCR_WF
 from utils_s import Get_Train_Valid_Test_KFold
 from data_processing import Process_Seq

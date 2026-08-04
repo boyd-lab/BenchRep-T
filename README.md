@@ -24,9 +24,19 @@ It defines four evaluation tasks: disease classification, driver-sequence identi
 Requires Python >= 3.10. The recommended installation uses one minimal Conda
 environment per method family so that DeepTCR's TensorFlow constraints do
 not conflict with the newer PyTorch and scientific-Python stacks. ABMIL, GIANA,
-DeepRC, and DeepTCR are separated from `benchrep-base` to make dependency
-resolution easier and keep each method's framework and version constraints
-isolated.
+DeepRC, DeepTCR, and Mal-ID-Lite are separated from `benchrep-base` to make
+dependency resolution easier and keep each method's framework and version
+constraints isolated.
+
+Mal-ID-Lite is vendored as a **git submodule** rather than copied into the
+repository (unlike GIANA, DeepRC, and DeepTCR), since it is developed in its
+own repository. After cloning `airr_bench`, populate it with:
+
+```bash
+git submodule update --init --recursive models/Mal-ID-Lite
+```
+
+or clone with `git clone --recurse-submodules` in the first place.
 
 | Environment | File | Methods |
 |-------------|------|---------|
@@ -35,6 +45,7 @@ isolated.
 | `giana` | `environment-giana.yml` | GIANA |
 | `deeprc` | `environment-deeprc.yml` | DeepRC |
 | `deeptcr` | `environment-deeptcr.yml` | DeepTCR |
+| `mal_id_lite` | `environment-mal-id-lite.yml` | Mal-ID-Lite |
 
 The environments are separated as follows:
 
@@ -57,6 +68,10 @@ The environments are separated as follows:
   NumPy 1.23, pandas 1.5, scikit-learn 1.2, and Biopython 1.76 stack required by
   the bundled DeepTCR TensorFlow-1 compatibility and deprecated Biopython APIs.
   It is intentionally isolated from the newer scientific-Python environments.
+- **`mal_id_lite`** uses Python 3.12 with PyTorch, `fair-esm` (for Model 3's
+  ESM-2 embeddings), and `python-glmnet` (for Model 1's elastic-net logistic
+  regression). It runs Mal-ID-Lite, the git submodule vendored at
+  `models/Mal-ID-Lite`.
 
 Create the environments from the repository root:
 
@@ -66,6 +81,7 @@ conda env create -f environment-abmil.yml
 conda env create -f environment-giana.yml
 conda env create -f environment-deeprc.yml
 conda env create -f environment-deeptcr.yml
+conda env create -f environment-mal-id-lite.yml
 ```
 
 Install BenchRep-T itself into each environment in editable mode. Dependencies
@@ -73,7 +89,7 @@ are already supplied by the corresponding YAML, so `--no-deps` prevents pip
 from changing the tested method-specific pins:
 
 ```bash
-for env_name in benchrep-base abmil giana deeprc deeptcr; do
+for env_name in benchrep-base abmil giana deeprc deeptcr mal_id_lite; do
     conda run -n "${env_name}" python -m pip install --no-deps -e .
 done
 ```
@@ -125,6 +141,7 @@ uv sync --extra abmil
 uv sync --extra giana
 uv sync --extra deeprc
 uv sync --extra deeptcr
+uv sync --extra mal-id-lite
 uv sync --extra drivers
 ```
 
@@ -151,7 +168,8 @@ models/                          Classification methods
 ├── GIANA/                       Zhang et al. 2021 (GIANA 4.1) (similarity/clustering)
 ├── ensemble_abmil.py            ABMIL                        (deep learning)
 ├── DeepRC/                      Widrich et al. 2020          (deep learning)
-└── DeepTCR/                     Sidhom et al. 2021           (deep learning)
+├── DeepTCR/                     Sidhom et al. 2021           (deep learning)
+└── Mal-ID-Lite/                 Zaslavsky et al. 2025 (reimpl.) (deep learning, git submodule)
 evals/                           Per-method experiment scripts (disease, drivers, depth, demographics)
 examples/                        One runner per evaluation task (see below)
 preprocessing/                   Repertoire cleaning and preparation
@@ -180,6 +198,7 @@ utils/                           Repertoire I/O, metric helpers, cohort/covariat
 - **ABMIL** — Learned amino-acid and V/J gene embeddings fed through a 1D-CNN encoder, with a gated-attention aggregator pooling per-sequence features into a repertoire-level representation for end-to-end classification.
 - **DeepRC (Widrich et al. 2020)** — 1D-CNN sequence embeddings aggregated via a modern Hopfield attention block over up to ~10⁵ sequences per repertoire.
 - **DeepTCR (Sidhom et al. 2021)** — Convolutional encoder over CDR3 plus V/D/J gene identities, with attention pooling over a fixed concept bank for repertoire-level prediction (whole-file workflow).
+- **Mal-ID-Lite (reimplementation of Zaslavsky et al. 2025)** — Three complementary base models — V-J gene usage (elastic-net logistic regression), convergent CDR3 clusters (hierarchical clustering + Fisher's exact test + GLM), and ESM-2 sequence embeddings (per-V-gene ridge classifiers) — combined by a ridge-regression metamodel. Vendored as a git submodule at `models/Mal-ID-Lite`; `evals/mal_id_lite_disease_classification.py` adapts the benchmark's staged metadata/repertoire format to Mal-ID-Lite's own input conventions and converts its output back to the standard scores schema.
 
 ## Tasks
 
@@ -358,11 +377,13 @@ The task-specific auxiliary paths are
 and `data/Mal-ID/scaling_exp_depth_indices_max75k.json.gz` for sequencing-depth
 scaling.
 
+## Running the benchmark
+
 ### Run every disease-classification benchmark
 
 The tracked example runner downloads the complete public dataset, creates a
 symlink-only normalized view for evaluator compatibility, and sequentially runs
-all eight methods across all ten cohort/disease tasks:
+all nine methods across all ten cohort/disease tasks:
 
 ```bash
 bash examples/run_all_disease_classification.sh
@@ -386,12 +407,12 @@ they also remain valid if the project tree, including both `data/` and
 downloaded data, but removing or relocating `data/` by itself breaks its links.
 
 By default it uses the method-specific Conda environments documented below.
-The full 80-run matrix is compute-intensive and executes sequentially.
-Set `DRY_RUN=1 DOWNLOAD_DATA=0` to print all 80 commands without downloading or
+The full 90-run matrix is compute-intensive and executes sequentially.
+Set `DRY_RUN=1 DOWNLOAD_DATA=0` to print all 90 commands without downloading or
 training. `METHODS`, `DATASETS`, `OUTPUT_ROOT`, `USE_GPU`, `N_JOBS`, and
 `N_THREADS` can be overridden as environment variables.
 
-For example, run the complete benchmark configuration for all eight methods on
+For example, run the complete benchmark configuration for all nine methods on
 Savola RA:
 
 ```bash
