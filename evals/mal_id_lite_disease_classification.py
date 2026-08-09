@@ -29,6 +29,14 @@ driver's staged layout and Mal-ID-Lite's expected layout:
      disease_label_str, method, disease_model, model_score,
      malid_cross_validation_fold_id_when_in_test_set), matching every other
      evaluator's --output_csv.
+
+Like the other disease-classification evaluators, this one accepts
+--ext_metadata_path/--ext_data_dir to pool a second cohort into the same
+fold-based CV split (utils.cohort_merge), which is how the united
+Zaslavsky/Mal-ID + Mitchell T1D evaluation is run. Pooling additionally
+canonicalizes V/J gene labels across the two naming conventions and forces
+amino-acid clone IDs, since the cohorts disagree on whether a usable
+nucleotide CDR3 column exists (see consolidate_participant_files).
 """
 
 import argparse
@@ -42,6 +50,7 @@ from utils.cohort_adjustments import apply_cohort_adjustment
 
 MAL_ID_LITE_ROOT = Path(__file__).resolve().parent.parent / "models" / "Mal-ID-Lite"
 HEALTHY_LABEL = "Healthy/Background"
+FOLD_COL = "malid_cross_validation_fold_id_when_in_test_set"
 
 
 def load_metadata(metadata_path):
@@ -77,6 +86,7 @@ def consolidate_participant_files(
     participant_col="participant_label",
     file_prefix="part_table_",
     file_suffix=".tsv.gz",
+    canonicalize_genes=False,
 ):
     """Build one part_table_{participant}{file_suffix} per participant under
     data_dir_out, concatenating that participant's specimen files and setting
@@ -85,17 +95,82 @@ def consolidate_participant_files(
     makes repeated calls -- once per target disease in the same dataset --
     cheap after the first).
 
-    Returns True if a genuine nucleotide `cdr3` column was found in the
-    source data, so the caller can decide whether Mal-ID-Lite's default
+    Source files are taken from a `file_path` column when the metadata has one
+    (as it does after utils.cohort_merge pools two cohorts, each with its own
+    directory and filename convention), and otherwise constructed from
+    repertoire_data_dir + the prefix/suffix convention.
+
+    `canonicalize_genes` applies utils.gene_harmonization.canonicalize_gene to
+    v_call/j_call. Mal-ID-Lite builds its own cache straight from these
+    consolidated files, so this is the only point at which the Adaptive-style
+    "-1" suffix on IMGT singleton TRBV families can be reconciled; without it a
+    pooled run would treat TRBV13 and TRBV13-1 as different genes.
+
+    Returns True only if a genuine nucleotide `cdr3` column is present in
+    every cohort, so the caller can decide whether Mal-ID-Lite's default
     clone_id computation (nucleotide-based) will work, or whether
-    --clone-id-use-aa is needed.
+    --clone-id-use-aa is needed. This is probed once per cohort before any
+    output is written, rather than taken from whichever file happened to be
+    read first: Mal-ID repertoires carry `cdr3` and immunoSEQ-sourced ones do
+    not, so a first-file-wins decision would be order-dependent and would leave
+    the immunoSEQ half of a pooled run with a half-empty `cdr3` column feeding
+    clone assignment. When the cohorts disagree the column is dropped from
+    every specimen, so both halves are treated identically.
     """
     data_dir_out = Path(data_dir_out)
     data_dir_out.mkdir(parents=True, exist_ok=True)
     is_gz = file_suffix.endswith(".gz")
-    has_nt_cdr3 = None
     an_existing_out_path = None
     built, skipped, missing = 0, 0, 0
+
+    if canonicalize_genes:
+        from utils.gene_harmonization import canonicalize_gene
+
+    # Two source cohorts sharing a participant_label would silently collapse
+    # into one consolidated file (and one Mal-ID-Lite "participant"), so refuse
+    # rather than corrupt the pooled cohort.
+    if "cohort" in metadata.columns and metadata["cohort"].nunique() > 1:
+        overlap = set.intersection(*(
+            set(part[participant_col]) for _, part in metadata.groupby("cohort")
+        ))
+        if overlap:
+            raise ValueError(
+                f"{len(overlap)} participant label(s) appear in more than one "
+                f"cohort and would collide during consolidation, e.g. "
+                f"{sorted(overlap)[:5]}. Disambiguate them before pooling."
+            )
+
+    def source_path(row):
+        file_path = row.get("file_path")
+        if isinstance(file_path, str) and file_path:
+            return Path(file_path)
+        return (Path(repertoire_data_dir)
+                / f"{file_prefix}{row[participant_col]}_{row['specimen_label']}{file_suffix}")
+
+    # Decide nucleotide-vs-AA clone IDs up front, over one representative
+    # source file per cohort, so the answer is fixed before anything is
+    # written. Deciding it while writing would be order-dependent: the first
+    # participants written would keep `cdr3` and later ones would not.
+    probes, seen_cohorts = [], set()
+    for _, row in metadata.iterrows():
+        cohort = row.get("cohort", "") if "cohort" in metadata.columns else ""
+        if cohort in seen_cohorts:
+            continue
+        src = source_path(row)
+        if not src.exists():
+            continue
+        seen_cohorts.add(cohort)
+        probes.append(src)
+
+    has_nt_cdr3 = None
+    for src in probes:
+        header = pd.read_csv(
+            src, sep="\t",
+            compression="gzip" if src.name.endswith(".gz") else None, nrows=0,
+        )
+        found = "cdr3" in header.columns
+        has_nt_cdr3 = found if has_nt_cdr3 is None else (has_nt_cdr3 and found)
+    drop_nt_cdr3 = has_nt_cdr3 is False
 
     for participant, group in metadata.groupby(participant_col):
         out_path = data_dir_out / f"{file_prefix}{participant}{file_suffix}"
@@ -105,17 +180,22 @@ def consolidate_participant_files(
             continue
         frames = []
         for _, row in group.iterrows():
-            specimen = row["specimen_label"]
-            src = Path(repertoire_data_dir) / f"{file_prefix}{participant}_{specimen}{file_suffix}"
+            src = source_path(row)
             if not src.exists():
                 missing += 1
                 continue
             df = pd.read_csv(
-                src, sep="\t", compression="gzip" if is_gz else None, low_memory=False
+                src, sep="\t",
+                compression="gzip" if src.name.endswith(".gz") else None,
+                low_memory=False,
             )
-            if has_nt_cdr3 is None:
-                has_nt_cdr3 = "cdr3" in df.columns
-            df["repertoire_id"] = specimen
+            if drop_nt_cdr3 and "cdr3" in df.columns:
+                df = df.drop(columns=["cdr3"])
+            if canonicalize_genes:
+                for col in ("v_call", "j_call"):
+                    if col in df.columns:
+                        df[col] = df[col].map(canonicalize_gene)
+            df["repertoire_id"] = row["specimen_label"]
             frames.append(df)
         if not frames:
             continue
@@ -127,7 +207,7 @@ def consolidate_participant_files(
 
     if has_nt_cdr3 is None and an_existing_out_path is not None:
         # Every participant was already consolidated (idempotent skip), so no
-        # source file was read this call. Check an existing consolidated file
+        # source file was probed this call. Check an existing consolidated file
         # instead of silently defaulting to False (which would wrongly force
         # the AA clone_id fallback on every run after the first).
         header = pd.read_csv(
@@ -136,6 +216,10 @@ def consolidate_participant_files(
         )
         has_nt_cdr3 = "cdr3" in header.columns
 
+    if len(probes) > 1 and drop_nt_cdr3:
+        print("  Note: source cohorts disagree on the nucleotide `cdr3` column; "
+              "dropping it so clone IDs are computed the same way for every "
+              "specimen (amino-acid based).")
     print(
         f"  Consolidated participant files: {built} built, {skipped} already present, "
         f"{missing} source specimen files missing."
@@ -241,7 +325,8 @@ def run_pipeline(
     participant_col="participant_label", disease_col="disease", file_prefix="part_table_",
     file_suffix=".tsv.gz", healthy_label=HEALTHY_LABEL, gene_locus="TCR", models=(1, 2, 3),
     model2_abstention_strategy="fill_models13_mean", n_jobs=4, use_gpu=True, fold_ids=None,
-    force_reprocess=False,
+    force_reprocess=False, ext_metadata_path=None, ext_data_dir=None,
+    ext_file_template="{participant_label}_TCRB.tsv", fold_col=FOLD_COL,
 ):
     """Run the full consolidate -> cache -> train -> convert pipeline and
     return the standard-schema scores DataFrame.
@@ -255,14 +340,41 @@ def run_pipeline(
     cache is single-use (e.g. one cache_dir per demographic-matched run).
     Training itself always narrows to target_disease vs. healthy_label via
     train_ensemble.py's --diseases flag regardless of which was passed.
+
+    When `ext_metadata_path` is set, a second cohort is pooled into the same
+    fold-based CV split via utils.cohort_merge, and V/J gene labels are
+    canonicalized across the two naming conventions. A pooled cache is
+    inherently single-target (the external cohort is filtered to
+    target_disease vs. healthy_label), so it must not be shared with
+    single-cohort runs -- give it its own cache_dir.
     """
     cache_dir = Path(cache_dir)
+    canonicalize_genes = ext_metadata_path is not None
+
+    if ext_metadata_path is not None:
+        from utils.cohort_merge import prepare_merged_cohort
+        # prepare_merged_cohort resolves external repertoires itself but expects
+        # the internal side to already carry file_path, so build it here using
+        # the same convention consolidate_participant_files would have used.
+        cache_metadata = cache_metadata.copy()
+        cache_metadata["file_path"] = [
+            str(Path(repertoire_data_dir)
+                / f"{file_prefix}{row[participant_col]}_{row['specimen_label']}{file_suffix}")
+            for _, row in cache_metadata.iterrows()
+        ]
+        cache_metadata = prepare_merged_cohort(
+            cache_metadata, ext_metadata_path, ext_data_dir, target_disease,
+            ext_file_template=ext_file_template, healthy_label=healthy_label,
+            fold_col=fold_col, disease_col=disease_col,
+        )
+
     consolidated_dir = cache_dir / "consolidated_data"
     print(f"[1/4] Consolidating per-specimen repertoires into per-participant files "
           f"under {consolidated_dir} ...")
     has_nt_cdr3 = consolidate_participant_files(
         cache_metadata, repertoire_data_dir, consolidated_dir,
         participant_col=participant_col, file_prefix=file_prefix, file_suffix=file_suffix,
+        canonicalize_genes=canonicalize_genes,
     )
     use_aa_clone_id = not has_nt_cdr3
     print(f"  Nucleotide CDR3 column present: {has_nt_cdr3} "
@@ -272,6 +384,12 @@ def run_pipeline(
     cache_dir.mkdir(parents=True, exist_ok=True)
     renamed = cache_metadata.rename(columns={disease_col: "disease"}) \
         if disease_col != "disease" else cache_metadata
+    # `file_path`, `label`, and `cohort` are this wrapper's own bookkeeping from
+    # the merge step; they mean nothing to Mal-ID-Lite's loader, so keep the
+    # staged metadata identical in shape to the single-cohort case.
+    renamed = renamed.drop(
+        columns=[c for c in ("file_path", "label", "cohort") if c in renamed.columns]
+    )
     renamed.to_csv(staged_metadata_path, sep="\t", index=False)
 
     print(f"[2/4] Building Mal-ID-Lite cache at {cache_dir} (skipped if already built) ...")
@@ -308,8 +426,7 @@ if __name__ == "__main__":
                              "reused thereafter (must be the same path across those runs).")
     parser.add_argument("--participant_col", type=str, default="participant_label")
     parser.add_argument("--disease_col", type=str, default="disease")
-    parser.add_argument("--fold_col", type=str,
-                        default="malid_cross_validation_fold_id_when_in_test_set")
+    parser.add_argument("--fold_col", type=str, default=FOLD_COL)
     parser.add_argument("--file_prefix", type=str, default="part_table_")
     parser.add_argument("--file_suffix", type=str, default=".tsv.gz")
     parser.add_argument("--healthy_label", type=str, default=HEALTHY_LABEL,
@@ -347,12 +464,30 @@ if __name__ == "__main__":
     parser.add_argument("--max_folds", type=int, default=None,
                         help="Limit training to fold IDs 0..max_folds-1 (passed through as "
                              "train_ensemble.py's --fold-ids). Default: all folds.")
+    parser.add_argument("--ext_metadata_path", type=str, default=None,
+                        help="Optional external-cohort metadata TSV (MAL-ID column style). "
+                             "When set, external samples are pooled into the same fold-based "
+                             "CV split as the internal cohort and V/J genes are canonicalized "
+                             "-- this is how the united Zaslavsky/Mal-ID + Mitchell T1D "
+                             "evaluation is run. Give a pooled run its own --cache_dir; the "
+                             "cache is single-target and must not be shared with "
+                             "single-cohort runs.")
+    parser.add_argument("--ext_data_dir", type=str, default=None,
+                        help="Directory containing the external cohort repertoire files "
+                             "(required when --ext_metadata_path is provided).")
+    parser.add_argument("--ext_file_template", type=str,
+                        default="{participant_label}_TCRB.tsv",
+                        help="Filename template for external repertoires. For a cohort "
+                             "staged by utils.stage_disease_data, use "
+                             "'part_table_{participant_label}_{specimen_label}.tsv.gz'.")
     args = parser.parse_args()
 
     if args.model_save_dir is None:
         parser.error("--model_save_dir is required (used as Mal-ID-Lite's training output dir)")
     if args.max_folds is not None and args.max_folds < 1:
         parser.error("--max_folds must be >= 1")
+    if args.ext_metadata_path is not None and args.ext_data_dir is None:
+        parser.error("--ext_data_dir is required when --ext_metadata_path is provided")
     fold_ids = list(range(args.max_folds)) if args.max_folds is not None else None
 
     full_metadata = load_metadata(args.metadata_path)
@@ -381,6 +516,10 @@ if __name__ == "__main__":
         use_gpu=not args.no_gpu,
         fold_ids=fold_ids,
         force_reprocess=args.force_reprocess,
+        ext_metadata_path=args.ext_metadata_path,
+        ext_data_dir=args.ext_data_dir,
+        ext_file_template=args.ext_file_template,
+        fold_col=args.fold_col,
     )
 
     if args.random_baseline_seeds:
@@ -407,6 +546,18 @@ if __name__ == "__main__":
         metadata_subset = prepare_metadata_subset(
             full_metadata, args.target_disease, args.disease_col, args.healthy_label,
             adjust_distribution_by_demographics=True,
+        )
+        scores_df = run_pipeline(
+            cache_metadata=metadata_subset,
+            cache_dir=args.cache_dir, model_save_dir=args.model_save_dir,
+            **pipeline_kwargs,
+        )
+    elif args.ext_metadata_path is not None:
+        # Pooling narrows the external cohort to target_disease vs. healthy, so
+        # the cache is single-target either way; filter the internal side to
+        # match rather than consolidating diseases this run will never train on.
+        metadata_subset = prepare_metadata_subset(
+            full_metadata, args.target_disease, args.disease_col, args.healthy_label,
         )
         scores_df = run_pipeline(
             cache_metadata=metadata_subset,

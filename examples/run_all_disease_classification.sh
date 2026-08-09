@@ -24,7 +24,7 @@ MAX_FOLDS="${MAX_FOLDS:-}"
 DEEPRC_BATCH_SIZE="${DEEPRC_BATCH_SIZE:-32}"
 DEEPTCR_BATCH_SIZE="${DEEPTCR_BATCH_SIZE:-4}"
 METHODS="${METHODS:-emerson ostmeyer ensemble_regression ensemble_xgboost abmil deeprc deeptcr giana malid_lite}"
-DATASETS="${DATASETS:-malid mitchell-t1d rawat-t1d tb ra cmv}"
+DATASETS="${DATASETS:-malid mitchell-t1d rawat-t1d tb ra cmv malid+mitchell-t1d}"
 
 declare -A MODULES=(
   [emerson]=evals.emerson_2017_disease_classification
@@ -55,7 +55,43 @@ declare -A TARGETS=(
   [tb]="Progressor"
   [ra]="Rheumatoid Arthritis"
   [cmv]="CMV"
+  [malid+mitchell-t1d]="T1D"
 )
+# Pooled datasets. Rather than being a cohort of their own, these pool a second
+# cohort into the same three-fold CV split as the first (utils.cohort_merge),
+# which is how the manuscript's united T1D evaluation is run: Zaslavsky/Mal-ID
+# specimens and Mitchell specimens are trained and tested together, each
+# keeping its own preassigned fold. Every method receives the same --ext_*
+# arguments, and each evaluator canonicalizes V/J gene labels across the two
+# naming conventions once merging is active. Nothing is copied or symlinked:
+# both cohorts are read in place from their own staged directories.
+declare -A POOL_INTERNAL=(
+  [malid+mitchell-t1d]=malid
+)
+declare -A POOL_EXTERNAL=(
+  [malid+mitchell-t1d]=mitchell-t1d
+)
+# Staged cohorts use one filename convention regardless of their native one.
+POOL_FILE_TEMPLATE='part_table_{participant_label}_{specimen_label}.tsv.gz'
+
+# Expand pooled datasets into the underlying cohorts that must be fetched and
+# staged, dropping duplicates (malid is usually requested on its own too).
+cohorts_for_datasets() {
+  local dataset seen=" "
+  for dataset in "$@"; do
+    local -a parts=("${dataset}")
+    if [[ -n "${POOL_INTERNAL[$dataset]+x}" ]]; then
+      parts=("${POOL_INTERNAL[$dataset]}" "${POOL_EXTERNAL[$dataset]}")
+    fi
+    local part
+    for part in "${parts[@]}"; do
+      if [[ "${seen}" != *" ${part} "* ]]; then
+        seen+="${part} "
+        printf '%s\n' "${part}"
+      fi
+    done
+  done
+}
 
 python_command() {
   local method=$1
@@ -73,9 +109,9 @@ if [[ "${DOWNLOAD_DATA}" == "1" ]]; then
     "${PYTHON_BIN}" -m utils.huggingface_data
     --output-dir "${DATA_ROOT}" --task disease
   )
-  for dataset in ${DATASETS}; do
-    download+=(--cohort "${dataset}")
-  done
+  while IFS= read -r cohort; do
+    download+=(--cohort "${cohort}")
+  done < <(cohorts_for_datasets ${DATASETS})
   if [[ "${DRY_RUN}" == "1" ]]; then
     download+=(--dry-run)
   fi
@@ -88,9 +124,9 @@ if [[ "${DRY_RUN}" != "1" ]]; then
     "${PYTHON_BIN}" -m utils.stage_disease_data
     --data-root "${DATA_ROOT}" --output-root "${STAGE_ROOT}"
   )
-  for dataset in ${DATASETS}; do
-    stage_args+=(--cohort "${dataset}")
-  done
+  while IFS= read -r cohort; do
+    stage_args+=(--cohort "${cohort}")
+  done < <(cohorts_for_datasets ${DATASETS})
   (cd "${ROOT}" && "${stage_args[@]}")
 fi
 
@@ -100,8 +136,21 @@ for dataset in ${DATASETS}; do
     echo "Unknown dataset: ${dataset}" >&2
     exit 2
   fi
-  metadata="${STAGE_ROOT}/${dataset}/metadata.tsv"
-  repertoires="${STAGE_ROOT}/${dataset}/repertoires"
+  # A pooled dataset reads its primary cohort from the internal cohort's staged
+  # directory and merges the external one in at runtime; a plain dataset is its
+  # own internal cohort and adds no --ext_* arguments.
+  internal="${POOL_INTERNAL[$dataset]:-${dataset}}"
+  metadata="${STAGE_ROOT}/${internal}/metadata.tsv"
+  repertoires="${STAGE_ROOT}/${internal}/repertoires"
+  ext_args=()
+  if [[ -n "${POOL_EXTERNAL[$dataset]+x}" ]]; then
+    external="${POOL_EXTERNAL[$dataset]}"
+    ext_args=(
+      --ext_metadata_path "${STAGE_ROOT}/${external}/metadata.tsv"
+      --ext_data_dir "${STAGE_ROOT}/${external}/repertoires"
+      --ext_file_template "${POOL_FILE_TEMPLATE}"
+    )
+  fi
 
   while IFS= read -r target; do
     [[ -z "${target}" ]] && continue
@@ -120,6 +169,7 @@ for dataset in ${DATASETS}; do
         --target_disease "${target}"
         --output_csv "${method_root}/scores.csv"
       )
+      command+=(${ext_args[@]+"${ext_args[@]}"})
       [[ -n "${MAX_FOLDS}" ]] && command+=(--max_folds "${MAX_FOLDS}")
 
       case "${method}" in
@@ -160,7 +210,10 @@ for dataset in ${DATASETS}; do
         malid_lite)
           # cache_dir is scoped to ${dataset} (not ${target_tag}), so every
           # target disease sharing this dataset reuses one cache/one set of
-          # ESM-2 embeddings instead of rebuilding per target.
+          # ESM-2 embeddings instead of rebuilding per target. A pooled dataset
+          # is a distinct ${dataset}, which also gives it the separate cache it
+          # requires: pooling narrows the cohort to one target and forces
+          # amino-acid clone IDs, so its cache cannot be shared with malid's.
           command+=(
             --dataset_name "${dataset}"
             --cache_dir "${OUTPUT_ROOT}/${dataset}/malid_lite_cache"

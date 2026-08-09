@@ -214,7 +214,8 @@ harness:
 - **Mitchell and Rawat T1D** — Each cohort supports within-cohort evaluation.
   T1D models can also be trained on one cohort and evaluated on the others to
   measure cross-cohort generalization. Zaslavsky/Mal-ID and Mitchell T1D
-  repertoires can additionally be pooled for three-fold evaluation.
+  repertoires can additionally be pooled for three-fold evaluation, as the
+  `malid+mitchell-t1d` dataset (see [Pooled cohorts](#pooled-cohorts)).
 - **Musvosvi TB and Savola RA** — Each cohort uses the same three-fold
   within-cohort protocol.
 - **Emerson CMV** — CMV-positive versus CMV-negative classification uses fixed
@@ -357,7 +358,9 @@ benchrep-download-data --task disease --cohort rawat-t1d --dry-run
 ```
 
 Supported cohort names are `malid`, `mitchell-t1d`, `rawat-t1d`, `tb`, `ra`,
-and `cmv`. The downloader supports a pinned dataset commit with `--revision`,
+and `cmv`. Pooled datasets such as `malid+mitchell-t1d` are a runner-level
+combination rather than a cohort of their own, so download their constituent
+cohorts. The downloader supports a pinned dataset commit with `--revision`,
 resumes through the Hugging Face cache, validates metadata columns and
 repertoire presence after download. An optional token can still be supplied
 with `--token-env` when using a custom repository that requires one. Existing
@@ -383,7 +386,7 @@ scaling.
 
 The tracked example runner downloads the complete public dataset, creates a
 symlink-only normalized view for evaluator compatibility, and sequentially runs
-all nine methods across all ten cohort/disease tasks:
+all nine methods across all eleven cohort/disease tasks:
 
 ```bash
 bash examples/run_all_disease_classification.sh
@@ -407,8 +410,8 @@ they also remain valid if the project tree, including both `data/` and
 downloaded data, but removing or relocating `data/` by itself breaks its links.
 
 By default it uses the method-specific Conda environments documented below.
-The full 90-run matrix is compute-intensive and executes sequentially.
-Set `DRY_RUN=1 DOWNLOAD_DATA=0` to print all 90 commands without downloading or
+The full 99-run matrix is compute-intensive and executes sequentially.
+Set `DRY_RUN=1 DOWNLOAD_DATA=0` to print all 99 commands without downloading or
 training. `METHODS`, `DATASETS`, `OUTPUT_ROOT`, `USE_GPU`, `N_JOBS`, and
 `N_THREADS` can be overridden as environment variables.
 
@@ -421,6 +424,47 @@ DATASETS=ra bash examples/run_all_disease_classification.sh
 
 The download step is narrowed to the selected cohorts, so a single-cohort run
 fetches only that cohort rather than the full 14.6 GiB dataset.
+
+#### Pooled cohorts
+
+`malid+mitchell-t1d` is the united T1D evaluation: rather than a cohort of its
+own, it pools Mitchell specimens into the same three-fold CV split as
+Zaslavsky/Mal-ID, so both are trained and tested together with each specimen
+keeping its preassigned fold.
+
+```bash
+DATASETS=malid+mitchell-t1d bash examples/run_all_disease_classification.sh
+```
+
+Both cohorts are read in place from their own staged directories — a pooled
+dataset creates no additional symlinks or copies. The runner passes
+`--ext_metadata_path`/`--ext_data_dir`/`--ext_file_template` to every method,
+and merging is handled by `utils/cohort_merge.py`.
+
+Whenever merging is active, evaluators canonicalize V/J gene labels
+(`utils/gene_harmonization.py`); within-cohort runs keep each cohort's native
+labels. This is load-bearing rather than cosmetic: Zaslavsky/Mal-ID calls
+include the allele (`TRBV13*01`, `TRBV20/OR9-2*02`) while the released
+immunoSEQ cohorts are already collapsed to bare gene names (`TRBV13`), so
+pooling without it would leave the two cohorts with almost entirely disjoint
+gene vocabularies. Canonicalization strips the allele and collapses the
+Adaptive-style `-1` suffix on IMGT singleton families; the latter is a no-op on
+the released cohorts, which are preprocessed that way already, and matters only
+when pooling a differently-prepared cohort of your own.
+
+Mal-ID-Lite additionally falls back to amino-acid clone IDs for pooled runs,
+because Zaslavsky/Mal-ID repertoires carry a usable nucleotide CDR3 column and
+immunoSEQ-sourced ones do not; the column is dropped so both halves are treated
+identically. For that reason a pooled Mal-ID-Lite cache is not
+interchangeable with a single-cohort one, and the runner gives it its own
+`cache_dir`.
+
+Contrast pooling with the cross-cohort transfer protocol
+(`evals/zeroshot_disease_classification.py`), which trains on one cohort and
+evaluates on another rather than training on both.
+
+Any evaluator can be pooled with an arbitrary cohort by passing the same
+`--ext_*` arguments directly.
 
 ### Run every driver-sequence identification benchmark
 
