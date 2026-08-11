@@ -97,6 +97,22 @@ def prepare_merged_cohort(internal_metadata,
 
     ext = pd.read_csv(ext_metadata_path, sep='\t')
 
+    # Some external cohorts (e.g. Mitchell T1D) use purely numeric-looking IDs
+    # ("310102"), which pandas infers as int64, while internal cohorts (e.g.
+    # Mal-ID's "M491-S016") are naturally strings. Left uncoerced, the
+    # concatenated frame below ends up with an `object` specimen_label/
+    # participant_label column holding a silent mix of `str` and `int`
+    # values -- harmless for pandas-native filtering (`.isin`, boolean masks)
+    # but a KeyError waiting to happen for any evaluator that keys a plain
+    # dict off these IDs and looks it up against a value that went through
+    # str-coercion elsewhere (e.g. PyTorch DataLoader collation). IDs are
+    # opaque identifiers, never numbers, so force both sides to string.
+    for col in ('participant_label', 'specimen_label'):
+        if col in ext.columns:
+            ext[col] = ext[col].astype(str)
+        if col in internal.columns:
+            internal[col] = internal[col].astype(str)
+
     required_cols = {disease_col, fold_col, 'participant_label'}
     missing = required_cols - set(ext.columns)
     if missing:
