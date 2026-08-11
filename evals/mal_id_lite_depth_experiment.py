@@ -15,6 +15,11 @@ utils.repertoire_io.load_raw_repertoire's `subsample_indices` row-selection
 (`df.iloc[indices]` on the raw, unfiltered file) so the exact same rows are
 selected as for every other method at a given (depth, repeat).
 
+Like evals.mal_id_lite_disease_classification (whose run_pipeline() this
+module calls into), this requires Mal-ID-Lite to be present at
+models/Mal-ID-Lite -- it is downloaded separately, not vendored as a git
+submodule; see the README's Setup section.
+
 Usage:
     python -m evals.mal_id_lite_depth_experiment \\
         --target_disease Lupus \\

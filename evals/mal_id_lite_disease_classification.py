@@ -1,7 +1,8 @@
 """
 Evaluation script for Mal-ID-Lite disease classification.
 
-Wraps the vendored Mal-ID-Lite submodule (models/Mal-ID-Lite), a streamlined
+Wraps Mal-ID-Lite (models/Mal-ID-Lite, downloaded separately -- see the
+README's Setup section), a streamlined
 reimplementation of Mal-ID (Zaslavsky et al., Science 2025): a three-model
 ensemble (V-J gene usage, convergent CDR3 clusters, ESM-2 sequence
 embeddings) combined by a logistic-regression metamodel.
@@ -348,6 +349,13 @@ def run_pipeline(
     target_disease vs. healthy_label), so it must not be shared with
     single-cohort runs -- give it its own cache_dir.
     """
+    if not (MAL_ID_LITE_ROOT / "malid_lite").is_dir():
+        raise FileNotFoundError(
+            f"Mal-ID-Lite not found at {MAL_ID_LITE_ROOT}. Download it and "
+            f"place its contents there -- see the README's Setup section "
+            f"(models/Mal-ID-Lite)."
+        )
+
     cache_dir = Path(cache_dir)
     canonicalize_genes = ext_metadata_path is not None
 

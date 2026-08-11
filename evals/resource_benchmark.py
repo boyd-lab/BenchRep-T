@@ -689,7 +689,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--giana_max_seqs_per_specimen", type=int, default=10000)
     parser.add_argument("--giana_threshold_iso", type=float, default=7)
     parser.add_argument("--giana_use_gpu", action="store_true", help="Use GPU FAISS for GIANA.")
-    parser.add_argument("--malid_lite_root", default=str(AIRR_ROOT.parent / "Mal-ID-Lite"))
+    parser.add_argument("--malid_lite_root", default=str(AIRR_ROOT / "models" / "Mal-ID-Lite"),
+                        help="Mal-ID-Lite root. Downloaded separately, not vendored as a git "
+                             "submodule -- see the README's Setup section (models/Mal-ID-Lite).")
     parser.add_argument("--malid_cache_dir", default=None,
                         help="Fresh Mal-ID cache directory. Default: run-specific method output cache.")
     parser.add_argument("--malid_dataset_name", default=None,
@@ -707,6 +709,12 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.max_folds is not None and args.max_folds < 1:
         parser.error("--max_folds must be >= 1")
+    if "malid" in args.methods and not (Path(args.malid_lite_root) / "malid_lite").is_dir():
+        parser.error(
+            f"Mal-ID-Lite not found at {args.malid_lite_root}. Download it and "
+            f"place its contents there -- see the README's Setup section "
+            f"(models/Mal-ID-Lite)."
+        )
     return args
 
 

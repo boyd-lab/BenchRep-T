@@ -28,15 +28,23 @@ DeepRC, DeepTCR, and Mal-ID-Lite are separated from `benchrep-base` to make
 dependency resolution easier and keep each method's framework and version
 constraints isolated.
 
-Mal-ID-Lite is vendored as a **git submodule** rather than copied into the
-repository (unlike GIANA, DeepRC, and DeepTCR), since it is developed in its
-own repository. After cloning `BenchRep-T`, populate it with:
+Mal-ID-Lite is developed and released separately, and this repository is currently
+anonymized for review, so it is not vendored here as a git
+submodule. Download it manually and place it at `models/Mal-ID-Lite`:
 
-```bash
-git submodule update --init --recursive models/Mal-ID-Lite
-```
+1. Open the anonymized Mal-ID-Lite repository:
+   https://anonymous.4open.science/r/Mal-ID-Lite/README.md
+2. Click **"Full repo ZIP"** to download the whole codebase as a zip archive.
+3. Extract it. This produces a `Mal-ID-Lite/` folder containing `malid_lite/`,
+   `scripts/`, `tests/`, `LICENSE`, `README.md`, `requirements.txt`, and a few
+   other top-level docs. Move that folder's *contents* into this repository's
+   `models/Mal-ID-Lite/` directory, so that `models/Mal-ID-Lite/malid_lite/`,
+   `models/Mal-ID-Lite/scripts/`, and `models/Mal-ID-Lite/README.md` exist
+   directly.
 
-or clone with `git clone --recurse-submodules` in the first place.
+`evals/mal_id_lite_disease_classification.py`, `evals/mal_id_lite_depth_experiment.py`,
+and `evals/resource_benchmark.py` check for this at startup and fail with a
+clear error if it is missing.
 
 | Environment | File | Methods |
 |-------------|------|---------|
@@ -70,8 +78,8 @@ The environments are separated as follows:
   It is intentionally isolated from the newer scientific-Python environments.
 - **`mal_id_lite`** uses Python 3.12 with PyTorch, `fair-esm` (for Model 3's
   ESM-2 embeddings), and `python-glmnet` (for Model 1's elastic-net logistic
-  regression). It runs Mal-ID-Lite, the git submodule vendored at
-  `models/Mal-ID-Lite`.
+  regression). It runs Mal-ID-Lite, downloaded separately into
+  `models/Mal-ID-Lite` (see Setup above).
 
 Create the environments from the repository root:
 
@@ -169,7 +177,7 @@ models/                          Classification methods
 ├── ensemble_abmil.py            ABMIL                        (deep learning)
 ├── DeepRC/                      Widrich et al. 2020          (deep learning)
 ├── DeepTCR/                     Sidhom et al. 2021           (deep learning)
-└── Mal-ID-Lite/                 Zaslavsky et al. 2025 (reimpl.) (deep learning, git submodule)
+└── Mal-ID-Lite/                 Zaslavsky et al. 2025 (reimpl.) (deep learning, downloaded separately)
 evals/                           Per-method experiment scripts (disease, drivers, depth, demographics)
 examples/                        One runner per evaluation task (see below)
 preprocessing/                   Repertoire cleaning and preparation
@@ -198,7 +206,7 @@ utils/                           Repertoire I/O, metric helpers, cohort/covariat
 - **ABMIL** — Learned amino-acid and V/J gene embeddings fed through a 1D-CNN encoder, with a gated-attention aggregator pooling per-sequence features into a repertoire-level representation for end-to-end classification.
 - **DeepRC (Widrich et al. 2020)** — 1D-CNN sequence embeddings aggregated via a modern Hopfield attention block over up to ~10⁵ sequences per repertoire.
 - **DeepTCR (Sidhom et al. 2021)** — Convolutional encoder over CDR3 plus V/D/J gene identities, with attention pooling over a fixed concept bank for repertoire-level prediction (whole-file workflow).
-- **Mal-ID-Lite (reimplementation of Zaslavsky et al. 2025)** — Three complementary base models — V-J gene usage (elastic-net logistic regression), convergent CDR3 clusters (hierarchical clustering + Fisher's exact test + GLM), and ESM-2 sequence embeddings (per-V-gene ridge classifiers) — combined by a ridge-regression metamodel. Vendored as a git submodule at `models/Mal-ID-Lite`; `evals/mal_id_lite_disease_classification.py` adapts the benchmark's staged metadata/repertoire format to Mal-ID-Lite's own input conventions and converts its output back to the standard scores schema.
+- **Mal-ID-Lite (reimplementation of Zaslavsky et al. 2025)** — Three complementary base models — V-J gene usage (elastic-net logistic regression), convergent CDR3 clusters (hierarchical clustering + Fisher's exact test + GLM), and ESM-2 sequence embeddings (per-V-gene ridge classifiers) — combined by a ridge-regression metamodel. Downloaded separately into `models/Mal-ID-Lite` (see Setup); `evals/mal_id_lite_disease_classification.py` adapts the benchmark's staged metadata/repertoire format to Mal-ID-Lite's own input conventions and converts its output back to the standard scores schema.
 
 ## Tasks
 
@@ -210,7 +218,7 @@ hyperparameter tuning. The following cohort protocols reuse the same evaluation
 harness:
 
 - **Zaslavsky/Mal-ID** — HIV, Lupus, Influenza, COVID-19, and T1D are scored
-  against Healthy/Background controls using preassigned folds.
+  against Healthy/Background controls using three preassigned folds.
 - **Mitchell and Rawat T1D** — Each cohort supports within-cohort evaluation.
   T1D models can also be trained on one cohort and evaluated on the others to
   measure cross-cohort generalization. Zaslavsky/Mal-ID and Mitchell T1D
@@ -586,19 +594,9 @@ Other preprocessing utilities:
 - **Driver sequence matching** (`preprocessing/process_driver_sequences.py`) — matches VDJdb entries to benchmark repertoires via Levenshtein similarity.
 - **Demographic analysis** (`preprocessing/check_demographics.py`) — summarizes demographic completeness per disease.
 
-<!-- removing for anonymity
 ## Preprint
 
-The BenchRep-T preprint is available [here](https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1.abstract) with accompanying citation:
+Currently anonymized.
 
-```bibtex
-@article{im2026benchrep,
-  title={BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics},
-  author={Im, Chiho and Cohen-Lavi, Liel and Buendia, Alejandro and Kundaje, Anshul and Boyd, Scott D},
-  journal={bioRxiv},
-  pages={2026--06},
-  year={2026},
-  publisher={Cold Spring Harbor Laboratory}
-}
 ```
 -->
