@@ -247,6 +247,7 @@ def build_cache_if_missing(
     ]
     if use_aa_clone_id:
         cmd.append("--clone-id-use-aa")
+        cmd.append("--force-clone-id")
     if force_reprocess:
         cmd.append("--force-reprocess")
 
