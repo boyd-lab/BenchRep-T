@@ -208,18 +208,34 @@ for dataset in ${DATASETS}; do
           [[ "${USE_GPU}" == "1" ]] && command+=(--use_gpu)
           ;;
         malid_lite)
-          # cache_dir is scoped to ${dataset} (not ${target_tag}), so every
-          # target disease sharing this dataset reuses one cache/one set of
-          # ESM-2 embeddings instead of rebuilding per target. A pooled dataset
-          # is a distinct ${dataset}, which also gives it the separate cache it
-          # requires: pooling narrows the cohort to one target and forces
-          # amino-acid clone IDs, so its cache cannot be shared with malid's.
+          # --cache_dir/--dataset_name are scoped to ${internal} (the actual
+          # cohort, e.g. "malid"), not ${dataset} -- a no-op for non-pooled
+          # datasets, where internal already equals dataset, but for a pooled
+          # dataset this makes --cache_dir the *internal* cohort's own cache
+          # (one of the two merge sources: see --pooled_cache_dir below),
+          # exactly the same cache/embeddings a standalone run of that cohort
+          # already builds and reuses across every target disease sharing it.
           command+=(
-            --dataset_name "${dataset}"
-            --cache_dir "${OUTPUT_ROOT}/${dataset}/malid_lite_cache"
+            --dataset_name "${internal}"
+            --cache_dir "${OUTPUT_ROOT}/${internal}/malid_lite_cache"
             --model_save_dir "${method_root}/models"
             --n_jobs "${N_JOBS}"
           )
+          if [[ -n "${POOL_EXTERNAL[$dataset]+x}" ]]; then
+            # Pooling: point at the external cohort's own cache the same way
+            # (built/reused independently, never sharing raw files with the
+            # internal side -- see evals/mal_id_lite_disease_classification.py),
+            # and give the merge of the two its own, distinct output cache
+            # and dataset name -- ${dataset} itself, e.g. "malid+mitchell-t1d",
+            # which is what --cache_dir/--dataset_name used to be set to
+            # before this pooling-aware split.
+            command+=(
+              --ext_cache_dir "${OUTPUT_ROOT}/${POOL_EXTERNAL[$dataset]}/malid_lite_cache"
+              --ext_dataset_name "${POOL_EXTERNAL[$dataset]}"
+              --pooled_cache_dir "${OUTPUT_ROOT}/${dataset}/malid_lite_cache"
+              --pooled_dataset_name "${dataset}"
+            )
+          fi
           [[ "${USE_GPU}" != "1" ]] && command+=(--no_gpu)
           ;;
       esac
