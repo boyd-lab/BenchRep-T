@@ -90,6 +90,18 @@ def prepare_merged_cohort(internal_metadata,
         ``cohort`` column (``'internal'`` or ``'external'``) plus the same
         ``file_path``, ``label``, and ``fold_col`` columns the evaluator
         already expects.
+
+    Raises:
+        ValueError: If either cohort has zero rows for *both* target_disease
+            and healthy_label after filtering (it would contribute nothing to
+            the merge). Usually a label-spelling mismatch against that
+            cohort's actual disease values, the wrong cohort/target
+            combination, or (external side only, when ext_data_dir is given)
+            every matching repertoire file being missing on disk. A cohort
+            with zero rows for exactly *one* of the two classes prints a
+            warning instead of raising, since that's ambiguous: it may be a
+            genuinely single-class cohort by design (e.g. disease-only, with
+            no healthy controls of its own).
     """
     internal = internal_metadata.copy()
     if 'cohort' not in internal.columns:
@@ -147,6 +159,39 @@ def prepare_merged_cohort(internal_metadata,
     n_int_neg = int((internal['label'] == 0).sum())
     n_ext_pos = int((ext['label'] == 1).sum())
     n_ext_neg = int((ext['label'] == 0).sum())
+
+    # A cohort with zero rows for *both* classes contributes nothing to the
+    # merge -- there's no legitimate reason to pool one in, so this is almost
+    # certainly a target_disease/healthy_label mismatch against that cohort's
+    # actual disease values, the wrong cohort/target combination, or (for the
+    # external side, when ext_data_dir is given) every matching repertoire
+    # file being missing on disk (see the "not found" count above). A cohort
+    # with zero rows for exactly *one* class is ambiguous -- it may be a
+    # genuinely single-class cohort by design (e.g. a disease-only cohort
+    # with no healthy controls of its own), or the same kind of mismatch
+    # affecting only one of the two labels -- so that gets a loud warning
+    # instead of a hard failure, since blocking it outright would also block
+    # the legitimate case. There's deliberately no parameter to opt back into
+    # stricter behavior here: this function has no command line of its own
+    # (see its module docstring), and none of its 9 callers currently expose
+    # one either, so a boolean flag would have nothing to set it from.
+    for cohort_label, n_pos, n_neg in (("Internal", n_int_pos, n_int_neg), ("External", n_ext_pos, n_ext_neg)):
+        if n_pos == 0 and n_neg == 0:
+            raise ValueError(
+                f"{cohort_label} cohort has zero rows for both '{target_disease}' and "
+                f"'{healthy_label}' after filtering -- it would contribute nothing to the "
+                f"merge. Check that these labels match this cohort's actual disease column "
+                f"values, or that this is the right cohort/target combination."
+            )
+        if n_pos == 0 or n_neg == 0:
+            missing_label = target_disease if n_pos == 0 else healthy_label
+            print(
+                f"  WARNING: {cohort_label} cohort has zero '{missing_label}' rows after "
+                f"filtering -- proceeding with a single-class contribution from this side. "
+                f"If unintentional, check for a label-spelling mismatch against "
+                f"--target_disease/--healthy_label."
+            )
+
     print(f"\nMerged cohort for '{target_disease}' classification:")
     print(f"  Internal: {n_int_pos} {target_disease} + {n_int_neg} healthy "
           f"= {len(internal)}")

@@ -19,10 +19,25 @@ set -euo pipefail
 # rather than an in-process evaluator class. Instead, evals.mal_id_lite_depth_experiment
 # filters each repertoire file down to the same pre-computed row indices the
 # other methods use for a given (depth, repeat), then runs the normal
-# Mal-ID-Lite pipeline unmodified on the filtered files. It is not included in
-# METHODS by default (like giana_2021 and ostmeyer_2019) since each
-# (depth, repeat) is a full Mal-ID-Lite training run -- opt in explicitly with
-# METHODS=malid_lite.
+# Mal-ID-Lite pipeline through it. It is not included in METHODS by default
+# (like giana_2021 and ostmeyer_2019) since each (depth, repeat) is a full
+# Mal-ID-Lite training run -- opt in explicitly with METHODS=malid_lite.
+#
+# malid_lite is also structurally different from every other method here: it
+# runs ONCE per (depth, repeat), covering every disease in DISEASES together
+# (see evals/mal_id_lite_depth_experiment.py's own module docstring), rather
+# than once per (disease, depth, repeat) the way the other methods do. This
+# matters for correctness, not just speed: Mal-ID-Lite recomputes clone_id
+# from scratch on the actual downsampled sequences for each (depth, repeat)
+# either way, but every disease is trained against the same healthy/reference
+# participants, so sharing that work (and the ESM-2 embeddings built on top of
+# it) across every requested disease means that shared reference population is
+# only computed once per (depth, repeat), not once per disease -- the
+# disease-specific participants themselves are never shared between diseases,
+# only the reference class is. Its own output JSON covers
+# every (depth, repeat, disease) combination in one file, with a "disease"
+# field per result entry, rather than one file per disease the way the other
+# methods produce.
 #
 # Repertoires remain in the downloaded Hugging Face tree; staging creates only
 # normalized metadata and symlinks. Run from any directory.
@@ -191,8 +206,52 @@ PY
 fi
 
 run_count=0
+
+# malid_lite: one call covers every disease in DISEASES together, per
+# (depth, repeat) -- see the header comment above and
+# evals/mal_id_lite_depth_experiment.py's own module docstring for why
+# (shares the expensive cache/embeddings build across diseases instead of
+# rebuilding it once per disease). Handled entirely separately from the
+# per-(disease, model) loop below, which every other method still uses
+# unchanged.
+for model in ${METHODS}; do
+  if [[ "${model}" != "malid_lite" ]]; then
+    continue
+  fi
+  run_root="${OUTPUT_ROOT}/${model}"
+  mapfile -t launcher < <(python_command "${model}")
+  command=(
+    "${launcher[@]}" -u -m evals.mal_id_lite_depth_experiment
+    --target_diseases ${DISEASES}
+    --metadata_path "${metadata}"
+    --repertoire_data_dir "${repertoires}"
+    --depth_indices "${indices}"
+    --dataset_name "${COHORT}"
+    --cache_root "${run_root}/cache"
+    --n_jobs "${N_JOBS}"
+    --output_json "${run_root}/scaling${output_suffix}.json"
+  )
+  [[ "${USE_GPU}" != "1" ]] && command+=(--no_gpu)
+
+  run_count=$((run_count + 1))
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    printf 'RUN %03d:' "${run_count}"
+    printf ' %q' "${command[@]}"
+    printf '\n'
+  else
+    mkdir -p "${run_root}"
+    echo "[$(date --iso-8601=seconds)] ${COHORT} / diseases=${DISEASES} / ${model}" \
+      "(depths=${DEPTHS:-all}, replicates=${REPLICATES:-all})"
+    (cd "${ROOT}" && "${command[@]}") 2>&1 | tee "${run_root}/run${output_suffix}.log"
+  fi
+done
+
+# Every other method: one run per (disease, model) -- unchanged.
 for disease in ${DISEASES}; do
   for model in ${METHODS}; do
+    if [[ "${model}" == "malid_lite" ]]; then
+      continue  # handled above, once, covering every disease together
+    fi
     run_root="${OUTPUT_ROOT}/${disease}/${model}"
     mapfile -t launcher < <(python_command "${model}")
 
@@ -203,54 +262,37 @@ for disease in ${DISEASES}; do
       command+=(env CUDA_VISIBLE_DEVICES=)
     fi
 
-    if [[ "${model}" == "malid_lite" ]]; then
-      # Separate module: filters repertoires to the depth-indices row subset,
-      # then runs the normal Mal-ID-Lite pipeline (see comment above).
-      command+=(
-        "${launcher[@]}" -u -m evals.mal_id_lite_depth_experiment
-        --target_disease "${disease}"
-        --metadata_path "${metadata}"
-        --repertoire_data_dir "${repertoires}"
-        --depth_indices "${indices}"
-        --dataset_name "${COHORT}_${disease}"
-        --cache_root "${run_root}/cache"
-        --n_jobs "${N_JOBS}"
-        --output_json "${run_root}/scaling${output_suffix}.json"
-      )
-      [[ "${USE_GPU}" != "1" ]] && command+=(--no_gpu)
-    else
-      command+=(
-        "${launcher[@]}" -u -m evals.sequencing_depth_experiment
-        --model "${model}"
-        --target_disease "${disease}"
-        --metadata_path "${metadata}"
-        --repertoire_data_dir "${repertoires}"
-        --depth_indices "${indices}"
-        --random_seed "${RANDOM_SEED}"
-        --output_json "${run_root}/scaling${output_suffix}.json"
-      )
+    command+=(
+      "${launcher[@]}" -u -m evals.sequencing_depth_experiment
+      --model "${model}"
+      --target_disease "${disease}"
+      --metadata_path "${metadata}"
+      --repertoire_data_dir "${repertoires}"
+      --depth_indices "${indices}"
+      --random_seed "${RANDOM_SEED}"
+      --output_json "${run_root}/scaling${output_suffix}.json"
+    )
 
-      case "${model}" in
-        ensemble_xgboost*)
-          device="${XGBOOST_DEVICE}"
-          [[ "${USE_GPU}" != "1" ]] && device=cpu
-          command+=(--xgboost_n_jobs "${N_JOBS}" --xgboost_device "${device}")
-          ;;
-        giana_2021)
-          # GIANA re-clusters at every depth and replicate, so each one gets its
-          # own directory under the run; the evaluator appends a depth/replicate
-          # tag beneath this path.
-          command+=(
-            --giana_results_dir "${run_root}/clusters"
-            --giana_n_threads "${N_THREADS}"
-            --giana_threshold_iso 7
-          )
-          if [[ "${GIANA_USE_GPU}" != "1" || "${USE_GPU}" != "1" ]]; then
-            command+=(--giana_cpu)
-          fi
-          ;;
-      esac
-    fi
+    case "${model}" in
+      ensemble_xgboost*)
+        device="${XGBOOST_DEVICE}"
+        [[ "${USE_GPU}" != "1" ]] && device=cpu
+        command+=(--xgboost_n_jobs "${N_JOBS}" --xgboost_device "${device}")
+        ;;
+      giana_2021)
+        # GIANA re-clusters at every depth and replicate, so each one gets its
+        # own directory under the run; the evaluator appends a depth/replicate
+        # tag beneath this path.
+        command+=(
+          --giana_results_dir "${run_root}/clusters"
+          --giana_n_threads "${N_THREADS}"
+          --giana_threshold_iso 7
+        )
+        if [[ "${GIANA_USE_GPU}" != "1" || "${USE_GPU}" != "1" ]]; then
+          command+=(--giana_cpu)
+        fi
+        ;;
+    esac
 
     run_count=$((run_count + 1))
     if [[ "${DRY_RUN}" == "1" ]]; then

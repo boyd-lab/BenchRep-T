@@ -348,6 +348,16 @@ def consolidate_participant_files(
 def build_cache_if_missing(
     data_dir, metadata_path, cache_dir, gene_locus, n_jobs, use_aa_clone_id, force_reprocess
 ):
+    """Note: deliberately never passes --force-clone-id. Mal-ID-Lite auto-computes
+    clone_id whenever the column is absent from the input data -- none of the
+    currently-used AA-clone-id-fallback cohorts (Emerson_CMV, Mitchell_T1D,
+    Musvosvi_TB, Rawat_T1D, Savola_RA -- confirmed by inspecting their actual raw
+    data) ship with a pre-existing clone_id column, so forcing recomputation was
+    always a no-op for them. If a future cohort ever does ship with one, use the
+    same fix as depth-scaling's downsampled data (evals/mal_id_lite_depth_experiment.py's
+    build_depth_filtered_repertoires): drop the stale column explicitly before
+    staging, rather than reintroducing --force-clone-id here.
+    """
     cache_dir = Path(cache_dir)
     if (cache_dir / "metadata.tsv").exists() and not force_reprocess:
         print(f"  Cache already built at {cache_dir}, skipping cache_and_report_all_data.py.")
@@ -364,7 +374,6 @@ def build_cache_if_missing(
     ]
     if use_aa_clone_id:
         cmd.append("--clone-id-use-aa")
-        cmd.append("--force-clone-id")
     if force_reprocess:
         cmd.append("--force-reprocess")
 
@@ -670,19 +679,28 @@ def resolve_cache(
 
 
 def run_training(
-    cache_dir, dataset_name, gene_locus, target_disease, healthy_label,
+    cache_dir, dataset_name, gene_locus, diseases, healthy_label,
     models, model2_abstention_strategy, output_dir, n_jobs, use_gpu, fold_ids=None,
+    classification_mode="binary",
 ):
+    """`diseases` is always a list, even for the common single-disease
+    (`classification_mode="binary"`) case -- callers pass `[target_disease]`.
+    `classification_mode="multi-binary"` trains one independent ensemble per
+    disease in `diseases` (each vs. `healthy_label`) within this one call,
+    sharing the same underlying cache/embeddings across all of them -- see
+    evals/mal_id_lite_depth_experiment.py's own use of this for why that sharing
+    matters (avoids rebuilding the cache once per disease).
+    """
     cmd = [
         sys.executable,
         str(MAL_ID_LITE_ROOT / "malid_lite" / "training" / "train_ensemble.py"),
         "--cache-dir", str(cache_dir),
         "--dataset-name", dataset_name,
         "--gene-locus", gene_locus,
-        "--classification-mode", "binary",
+        "--classification-mode", classification_mode,
         "--training-context", "cv",
         "--reference-class", healthy_label,
-        "--diseases", target_disease,
+        "--diseases", *diseases,
         "--models", *[str(m) for m in models],
         "--model2-abstention-strategy", model2_abstention_strategy,
         "--output-dir", str(output_dir),
@@ -859,7 +877,7 @@ def _run_pooled_pipeline(
     print(f"[5/5] Training Mal-ID-Lite ensemble on the pooled cache for "
           f"target_disease={target_disease} ...")
     run_training(
-        pooled_cache_dir, pooled_dataset_name, gene_locus, target_disease, healthy_label,
+        pooled_cache_dir, pooled_dataset_name, gene_locus, [target_disease], healthy_label,
         models, model2_abstention_strategy, model_save_dir, n_jobs, use_gpu, fold_ids=fold_ids,
     )
 
@@ -958,7 +976,7 @@ def run_pipeline(
 
     print(f"[3/4] Training Mal-ID-Lite ensemble for target_disease={target_disease} ...")
     run_training(
-        cache_dir, dataset_name, gene_locus, target_disease, healthy_label,
+        cache_dir, dataset_name, gene_locus, [target_disease], healthy_label,
         models, model2_abstention_strategy, model_save_dir, n_jobs, use_gpu, fold_ids=fold_ids,
     )
 
