@@ -170,11 +170,11 @@ models/                          Classification methods
 ├── DeepRC/                      Widrich et al. 2020          (deep learning)
 ├── DeepTCR/                     Sidhom et al. 2021           (deep learning)
 └── Mal-ID-Lite/                 Zaslavsky et al. 2025 (reimpl.) (deep learning, git submodule)
-evals/                           Per-method experiment scripts (disease, drivers, depth, demographics)
+evals/                           Per-method experiment scripts (disease, drivers, depth, demographics) and bootstrap statistics
 examples/                        One runner per evaluation task (see below)
 preprocessing/                   Repertoire cleaning and preparation
 external_data_process/           Cohort-specific conversion to AIRR and gene harmonization
-utils/                           Repertoire I/O, metric helpers, cohort/covariate adjustment
+utils/                           Repertoire I/O, metric helpers, cohort/covariate adjustment, bootstrap and paired tests
 ```
 
 ## Implemented Methods
@@ -551,6 +551,50 @@ forces CPU throughout.
 
 Every runner accepts `DRY_RUN=1 DOWNLOAD_DATA=0`, which prints each fully
 expanded command without downloading data or training anything.
+
+### Bootstrap confidence intervals and paired tests
+
+Confidence intervals and method-vs-method significance tests are computed from
+the pooled out-of-fold prediction CSVs, on bootstrap resamples that are drawn
+once per cohort and shared by every method, so each difference between methods
+is a paired comparison. Resampling is by participant, so repeat specimens from
+one donor move together, and is stratified by class (B = 10,000). The core
+routines live in `utils/bootstrap.py` and `utils/paired_tests.py` (paired
+bootstrap, DeLong, Benjamini–Hochberg).
+
+Generate the index sets once, then compute the statistics against them.
+Generation is deterministic, so rerunning it reproduces the published index
+sets exactly:
+
+```bash
+python -m evals.bootstrap_indices_disease_classification \
+    --probabilities_dir <predictions> --output_dir <indices>
+python -m evals.bootstrap_stats_disease_classification \
+    --probabilities_dir <predictions> --index_dir <indices>
+```
+
+This writes AUROC/AUPRC with 95% CIs for every method and cohort, and every
+pairwise AUROC test with its paired-bootstrap and DeLong p-values, each
+BH-adjusted across the tests written. DeLong assumes independent specimens and
+so understates uncertainty when a donor contributes several; it is a
+cross-check, and the paired bootstrap is the test to report. `--scheme
+specimen` resamples specimens instead, as a sensitivity check. `--set_a` and
+`--set_b` restrict the family of tests, for example to the 28 feature-ensemble
+vs deep-learning comparisons:
+
+```bash
+python -m evals.bootstrap_stats_disease_classification \
+    --probabilities_dir <predictions> --index_dir <indices> \
+    --cohorts Covid19 HIV Influenza Lupus T1D RA_malid90 Tb \
+    --set_a Ensemble_XGBoost Mal-ID --set_b DeepRC DeepTCR
+```
+
+The demographic-confounding analysis has its own index sets over the
+complete-demographics cohorts: run
+`evals.bootstrap_indices_demographic_confounding`, then
+`evals.bootstrap_stats_demographic_confounding`. The ABMIL encoder sweep
+(`evals.bootstrap_stats_abmil_encoder_sweep`) reuses the disease-classification
+Covid19 index set and compares each pretrained encoder against plain ABMIL.
 
 ## Preprocessing
 
