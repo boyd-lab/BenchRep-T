@@ -20,7 +20,6 @@ written, so the family on the command line must match what is reported. The 28
 reported tests (feature ensembles vs deep learning) are:
 
     python -m evals.bootstrap_stats_disease_classification \\
-        --probabilities_dir <dir> --index_dir <dir> \\
         --cohorts Covid19 HIV Influenza Lupus T1D RA_malid90 Tb \\
         --set_a Ensemble_XGBoost Mal-ID --set_b DeepRC DeepTCR
 
@@ -151,10 +150,13 @@ def write_csv(path, rows):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
-    ap.add_argument("--probabilities_dir", required=True,
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0],
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap.add_argument("--probabilities_dir",
+                    default="data/bootstrap/disease_classification/probabilities",
                     help="Directory of per-method, per-disease prediction CSVs.")
-    ap.add_argument("--index_dir", required=True,
+    ap.add_argument("--index_dir",
+                    default="data/bootstrap/disease_classification/bootstrap_indices",
                     help="Output directory of bootstrap_indices_disease_classification.")
     ap.add_argument("--scheme", choices=["participant", "specimen"], default="participant",
                     help="Resampling unit. Report participant; specimen is a sensitivity check.")

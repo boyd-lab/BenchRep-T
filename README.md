@@ -562,20 +562,34 @@ one donor move together, and is stratified by class (B = 10,000). The core
 routines live in `utils/bootstrap.py` and `utils/paired_tests.py` (paired
 bootstrap, DeLong, Benjamini–Hochberg).
 
-Generate the index sets once, then compute the statistics against them.
-Generation is deterministic, so rerunning it reproduces the published index
-sets exactly:
+The scripts read their inputs from `data/bootstrap/` by default, laid out as
+below. Each directory can be pointed elsewhere with the matching `--*_dir`
+flag. These prediction files are not yet distributed with the dataset.
 
-```bash
-python -m evals.bootstrap_indices_disease_classification \
-    --probabilities_dir <predictions> --output_dir <indices>
-python -m evals.bootstrap_stats_disease_classification \
-    --probabilities_dir <predictions> --index_dir <indices>
+```text
+data/bootstrap/
+├── disease_classification/
+│   ├── probabilities/          one pooled out-of-fold CSV per method and disease
+│   └── bootstrap_indices/      cohorts/ and indices/, written by the index script
+├── demographics_confound/
+│   ├── <disease>/              Lupus, HIV, Covid19, CMV: one CSV per method/setting
+│   └── bootstrap_indices/
+└── encoder_sweep/Covid19/      one CSV per pretrained encoder
 ```
 
-This writes AUROC/AUPRC with 95% CIs for every method and cohort, and every
-pairwise AUROC test with its paired-bootstrap and DeLong p-values, each
-BH-adjusted across the tests written. DeLong assumes independent specimens and
+Generate the index sets once, then compute the statistics against them.
+Generation is deterministic, so rerunning it on the same predictions
+reproduces the published index sets exactly. It will not replace existing
+index sets unless given `--overwrite`.
+
+```bash
+python -m evals.bootstrap_indices_disease_classification
+python -m evals.bootstrap_stats_disease_classification
+```
+
+This writes, to `results/` by default, AUROC/AUPRC with 95% CIs for every
+method and cohort, and every pairwise AUROC test with its paired-bootstrap and
+DeLong p-values, each BH-adjusted across the tests written. DeLong assumes independent specimens and
 so understates uncertainty when a donor contributes several; it is a
 cross-check, and the paired bootstrap is the test to report. `--scheme
 specimen` resamples specimens instead, as a sensitivity check. `--set_a` and
@@ -584,7 +598,6 @@ vs deep-learning comparisons:
 
 ```bash
 python -m evals.bootstrap_stats_disease_classification \
-    --probabilities_dir <predictions> --index_dir <indices> \
     --cohorts Covid19 HIV Influenza Lupus T1D RA_malid90 Tb \
     --set_a Ensemble_XGBoost Mal-ID --set_b DeepRC DeepTCR
 ```

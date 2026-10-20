@@ -75,12 +75,15 @@ def load_sweep_scores(sweep_dir, stem, id_to_row, n_rows, cohort_rows, y):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
-    ap.add_argument("--sweep_dir", required=True,
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0],
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap.add_argument("--sweep_dir", default="data/bootstrap/encoder_sweep/Covid19",
                     help="Directory of per-encoder Covid19 prediction CSVs.")
-    ap.add_argument("--probabilities_dir", required=True,
+    ap.add_argument("--probabilities_dir",
+                    default="data/bootstrap/disease_classification/probabilities",
                     help="Main disease-classification prediction CSVs (for the ABMIL baseline).")
-    ap.add_argument("--index_dir", required=True,
+    ap.add_argument("--index_dir",
+                    default="data/bootstrap/disease_classification/bootstrap_indices",
                     help="Output directory of bootstrap_indices_disease_classification.")
     ap.add_argument("--scheme", choices=["participant", "specimen"], default="participant",
                     help="Resampling unit. Report participant; specimen is a sensitivity check.")

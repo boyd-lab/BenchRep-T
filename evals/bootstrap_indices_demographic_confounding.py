@@ -105,12 +105,20 @@ def build_cohort(disease, cells):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
-    ap.add_argument("--probabilities_dir", required=True,
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0],
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap.add_argument("--probabilities_dir", default="data/bootstrap/demographics_confound",
                     help="Directory with one <disease>/ subdirectory of cell CSVs.")
-    ap.add_argument("--output_dir", required=True,
+    ap.add_argument("--output_dir",
+                    default="data/bootstrap/demographics_confound/bootstrap_indices",
                     help="Where to write cohorts/ and indices/.")
+    ap.add_argument("--overwrite", action="store_true",
+                    help="Replace index sets already present in --output_dir.")
     args = ap.parse_args()
+    existing = os.path.join(args.output_dir, "indices")
+    if os.path.isdir(existing) and os.listdir(existing) and not args.overwrite:
+        ap.error(f"{existing} already holds index sets, and reported results depend on "
+                 "reusing them; pass --overwrite to regenerate")
 
     os.makedirs(os.path.join(args.output_dir, "cohorts"), exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, "indices"), exist_ok=True)

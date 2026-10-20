@@ -77,10 +77,12 @@ def write_csv(path, rows):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
-    ap.add_argument("--probabilities_dir", required=True,
+    ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0],
+                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap.add_argument("--probabilities_dir", default="data/bootstrap/demographics_confound",
                     help="Directory with one <disease>/ subdirectory of cell CSVs.")
-    ap.add_argument("--index_dir", required=True,
+    ap.add_argument("--index_dir",
+                    default="data/bootstrap/demographics_confound/bootstrap_indices",
                     help="Output directory of bootstrap_indices_demographic_confounding.")
     ap.add_argument("--scheme", choices=["participant", "specimen"], default="participant",
                     help="Resampling unit. Report participant; specimen is a sensitivity check.")
