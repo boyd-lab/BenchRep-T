@@ -46,8 +46,7 @@ Like evals.mal_id_lite_disease_classification (several of whose lower-level
 helper functions this module reuses directly -- consolidate_participant_files,
 build_cache_if_missing, run_training, and others -- rather than its own
 run_pipeline()), this requires Mal-ID-Lite to be present at
-models/Mal-ID-Lite -- it is downloaded separately, not vendored as a git
-submodule; see the README's Setup section.
+models/Mal-ID-Lite (a git submodule; see the README's Setup section).
 
 Every (depth, repeat)'s filtered repertoires, cache, and embeddings persist on
 disk indefinitely under --cache_root/depth{D}_rep{R}/ -- nothing here is ever

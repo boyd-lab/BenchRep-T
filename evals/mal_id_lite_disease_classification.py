@@ -1,7 +1,7 @@
 """
 Evaluation script for Mal-ID-Lite disease classification.
 
-Wraps Mal-ID-Lite (models/Mal-ID-Lite, downloaded separately -- see the
+Wraps Mal-ID-Lite (models/Mal-ID-Lite, a git submodule -- see the
 README's Setup section), a streamlined
 reimplementation of Mal-ID (Zaslavsky et al., Science 2025): a three-model
 ensemble (V-J gene usage, convergent CDR3 clusters, ESM-2 sequence
@@ -924,9 +924,8 @@ def run_pipeline(
     """
     if not (MAL_ID_LITE_ROOT / "malid_lite").is_dir():
         raise FileNotFoundError(
-            f"Mal-ID-Lite not found at {MAL_ID_LITE_ROOT}. Download it and "
-            f"place its contents there -- see the README's Setup section "
-            f"(models/Mal-ID-Lite)."
+            f"Mal-ID-Lite not found at {MAL_ID_LITE_ROOT}. Fetch the submodule with "
+            f"`git submodule update --init models/Mal-ID-Lite` (README, Setup)."
         )
 
     pooling = ext_metadata_path is not None or ext_data_dir is not None or ext_cache_dir is not None
