@@ -18,6 +18,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.preprocessing import StandardScaler
+from utils.demographic_features import complete_cases, encode_demographics
+from utils.outer_fold import outer_test_folds
 from tqdm import tqdm
 
 from models.ensemble_abmil import ABMIL
@@ -60,6 +62,7 @@ class ABMILDemographicsEvaluator:
         indices_map=None,
         debug=False,
         debug_repertoires=10,
+        demographic_features=None,
     ):
         self.sequence_col = sequence_col
         self.v_gene_col = v_gene_col
@@ -88,6 +91,7 @@ class ABMILDemographicsEvaluator:
         self.debug = debug
         self.debug_repertoires = debug_repertoires
         self.canonicalize_genes = False
+        self.demographic_features = list(demographic_features) if demographic_features is not None else ['age', 'sex', 'ancestry']
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -103,8 +107,7 @@ class ABMILDemographicsEvaluator:
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
 
         before = len(filtered)
-        filtered = filtered.dropna(subset=['age', 'sex', 'ancestry'])
-        filtered = filtered[filtered['ancestry'].str.strip() != '']
+        filtered = complete_cases(filtered, self.demographic_features)
         after = len(filtered)
 
         n_disease = (filtered['label'] == 1).sum()
@@ -147,21 +150,8 @@ class ABMILDemographicsEvaluator:
     # ------------------------------------------------------------------
 
     def featurize_demographics(self, data, ancestry_categories=None):
-        """Convert demographics into a numeric feature matrix."""
-        age = data['age'].values.astype(float)
-        sex = (data['sex'] == 'M').astype(int).values
-
-        if ancestry_categories is None:
-            ancestry_categories = sorted(data['ancestry'].unique().tolist())
-
-        ancestry_dummies = np.zeros((len(data), len(ancestry_categories)), dtype=float)
-        for i, cat in enumerate(ancestry_categories):
-            ancestry_dummies[:, i] = (data['ancestry'].values == cat).astype(float)
-
-        features = np.column_stack([age, sex, ancestry_dummies])
-        feature_names = (['age', 'sex']
-                         + [f'ancestry_{cat}' for cat in ancestry_categories])
-        return features, ancestry_categories, feature_names
+        """Encode the selected covariates using training ancestry categories."""
+        return encode_demographics(data, self.demographic_features, ancestry_categories)
 
     def _tune_c_cv(self, X, y, c_candidates, n_folds=5):
         """Tune C via stratified CV. Falls back to C=1.0 if too few samples."""
@@ -237,7 +227,7 @@ class ABMILDemographicsEvaluator:
         all_test_rows = []
         fold_results = []
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds):
             print(f"\n{'='*60}")
             print(f"ABMIL + DEMO FOLD {test_fold}")
             print(f"{'='*60}")
@@ -301,7 +291,8 @@ class ABMILDemographicsEvaluator:
             # ------------------------------------------------------------------
             # Demographic features (ancestry categories from training data)
             # ------------------------------------------------------------------
-            ancestry_cats = sorted(train_data['ancestry'].unique().tolist())
+            ancestry_cats = (sorted(train_data['ancestry'].unique().tolist())
+                             if 'ancestry' in self.demographic_features else [])
             X_train_demo, _, demo_feature_names = self.featurize_demographics(
                 train_data, ancestry_categories=ancestry_cats)
             X_test_demo, _, _ = self.featurize_demographics(
@@ -465,6 +456,10 @@ if __name__ == '__main__':
     parser.add_argument('--ext_data_dir', type=str, default=None)
     parser.add_argument('--ext_file_template', type=str,
                         default='{participant_label}_TCRB.tsv')
+    parser.add_argument('--demographic_features', nargs='+', choices=['age', 'sex', 'ancestry'],
+                        default=['age', 'sex', 'ancestry'],
+                        help='Covariates to concatenate; Rawat has age and sex only.')
+    parser.add_argument('--file_suffix', default='.tsv.gz')
     args = parser.parse_args()
 
     evaluator = ABMILDemographicsEvaluator(
@@ -484,6 +479,7 @@ if __name__ == '__main__':
         kernel=args.kernel,
         features=args.features,
         n_cv_folds=args.n_cv_folds,
+        demographic_features=args.demographic_features,
         debug=args.debug,
         debug_repertoires=args.debug_repertoires,
     )
@@ -492,6 +488,7 @@ if __name__ == '__main__':
         metadata_path=args.metadata_path,
         target_disease=args.target_disease,
         data_dir=args.repertoire_data_dir,
+        file_suffix=args.file_suffix,
         ext_metadata_path=args.ext_metadata_path,
         ext_data_dir=args.ext_data_dir,
         ext_file_template=args.ext_file_template,

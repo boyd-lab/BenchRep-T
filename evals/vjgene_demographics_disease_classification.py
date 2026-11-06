@@ -20,6 +20,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from utils.demographic_features import complete_cases, encode_demographics
+from utils.outer_fold import outer_test_folds
 from tqdm import tqdm
 
 from models.ensemble_regression import Gapped_4mer_VJgene
@@ -36,7 +38,8 @@ class VJDemographicsEvaluator:
 
     def __init__(self, n_cv_folds=5, sequence_col='cdr3_aa',
                  v_gene_col='v_call', j_gene_col='j_call',
-                 subsample_fraction=1.0, subsample_seed=7, indices_map=None):
+                 subsample_fraction=1.0, subsample_seed=7, indices_map=None,
+                 demographic_features=None):
         """
         Args:
             n_cv_folds: CV folds used for C tuning.
@@ -51,6 +54,7 @@ class VJDemographicsEvaluator:
         self.subsample_seed = subsample_seed
         self.indices_map = indices_map
         self.canonicalize_genes = False
+        self.demographic_features = list(demographic_features) if demographic_features is not None else ['age', 'sex', 'ancestry']
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -66,8 +70,7 @@ class VJDemographicsEvaluator:
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
 
         before = len(filtered)
-        filtered = filtered.dropna(subset=['age', 'sex', 'ancestry'])
-        filtered = filtered[filtered['ancestry'].str.strip() != '']
+        filtered = complete_cases(filtered, self.demographic_features)
         after = len(filtered)
 
         n_disease = (filtered['label'] == 1).sum()
@@ -127,22 +130,8 @@ class VJDemographicsEvaluator:
     # ------------------------------------------------------------------
 
     def featurize_demographics(self, data, ancestry_categories=None):
-        """Convert demographics into a numeric feature matrix."""
-        age = data['age'].values.astype(float)
-        sex = (data['sex'] == 'M').astype(int).values
-
-        if ancestry_categories is None:
-            ancestry_categories = sorted(data['ancestry'].unique().tolist())
-
-        ancestry_dummies = np.zeros((len(data), len(ancestry_categories)),
-                                    dtype=float)
-        for i, cat in enumerate(ancestry_categories):
-            ancestry_dummies[:, i] = (data['ancestry'].values == cat).astype(float)
-
-        features = np.column_stack([age, sex, ancestry_dummies])
-        feature_names = (['age', 'sex']
-                         + [f'ancestry_{cat}' for cat in ancestry_categories])
-        return features, ancestry_categories, feature_names
+        """Encode the selected covariates using training ancestry categories."""
+        return encode_demographics(data, self.demographic_features, ancestry_categories)
 
     def _build_vj_feature_extractor(self):
         """Reuse Gapped_4mer_VJgene only for its V/J feature dict extraction."""
@@ -226,7 +215,7 @@ class VJDemographicsEvaluator:
         all_test_rows = []
         fold_results = []
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds):
             print(f"\n{'='*60}")
             print(f"V/J + DEMO FOLD {test_fold}")
             print(f"{'='*60}")
@@ -260,7 +249,8 @@ class VJDemographicsEvaluator:
             n_vj = len(vj_feature_names)
 
             # --- Demographic features (ancestry cats from training data) ---
-            ancestry_cats = sorted(train_data['ancestry'].unique().tolist())
+            ancestry_cats = (sorted(train_data['ancestry'].unique().tolist())
+                             if 'ancestry' in self.demographic_features else [])
             X_train_demo, _, demo_feature_names = self.featurize_demographics(
                 train_data, ancestry_categories=ancestry_cats)
             X_test_demo, _, _ = self.featurize_demographics(
@@ -410,9 +400,12 @@ if __name__ == "__main__":
     parser.add_argument('--ext_file_template', type=str,
                         default='{participant_label}_TCRB.tsv',
                         help='Filename template for external repertoires.')
+    parser.add_argument('--demographic_features', nargs='+', choices=['age', 'sex', 'ancestry'],
+                        default=['age', 'sex', 'ancestry'],
+                        help='Covariates to concatenate; Rawat has age and sex only.')
     args = parser.parse_args()
 
-    evaluator = VJDemographicsEvaluator()
+    evaluator = VJDemographicsEvaluator(demographic_features=args.demographic_features)
 
     scores_df = evaluator.run_cross_validation(
         metadata_path=args.metadata_path,

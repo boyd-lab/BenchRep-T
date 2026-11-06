@@ -13,6 +13,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
+from utils.outer_fold import outer_test_folds
 
 
 class DemographicFeaturesEvaluator:
@@ -226,7 +227,7 @@ class DemographicFeaturesEvaluator:
         all_labels = []
         fold_results = []
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds):
             print(f"\n{'='*60}")
             print(f"FOLD {test_fold}: Test fold = {test_fold}")
             print(f"{'='*60}")

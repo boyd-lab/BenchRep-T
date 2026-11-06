@@ -20,6 +20,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.metrics import roc_auc_score, average_precision_score, balanced_accuracy_score, f1_score
 from sklearn.preprocessing import StandardScaler
+from utils.demographic_features import complete_cases, encode_demographics
+from utils.outer_fold import outer_test_folds
 
 from utils.cohort_adjustments import apply_cohort_adjustment
 
@@ -90,7 +92,7 @@ class DeepTCRDemographicsEvaluator:
                  indices_map=None,
                  n_cv_folds=5,
                  debug=False,
-                 debug_repertoires=10):
+                 debug_repertoires=10, demographic_features=None):
         self.sequence_col = sequence_col
         self.count_col = count_col
         self.v_beta_col = v_beta_col
@@ -116,6 +118,7 @@ class DeepTCRDemographicsEvaluator:
         self.debug = debug
         self.debug_repertoires = debug_repertoires
         self.canonicalize_genes = False
+        self.demographic_features = list(demographic_features) if demographic_features is not None else ['age', 'sex', 'ancestry']
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -133,8 +136,7 @@ class DeepTCRDemographicsEvaluator:
         filtered['label'] = (filtered[disease_col] == target_disease).astype(int)
 
         before = len(filtered)
-        filtered = filtered.dropna(subset=['age', 'sex', 'ancestry'])
-        filtered = filtered[filtered['ancestry'].str.strip() != '']
+        filtered = complete_cases(filtered, self.demographic_features)
         after = len(filtered)
 
         if adjust_distribution_by_demographics:
@@ -185,21 +187,8 @@ class DeepTCRDemographicsEvaluator:
     # ------------------------------------------------------------------
 
     def featurize_demographics(self, data, ancestry_categories=None):
-        """Convert demographics into a numeric feature matrix."""
-        age = data['age'].values.astype(float)
-        sex = (data['sex'] == 'M').astype(int).values
-
-        if ancestry_categories is None:
-            ancestry_categories = sorted(data['ancestry'].unique().tolist())
-
-        ancestry_dummies = np.zeros((len(data), len(ancestry_categories)), dtype=float)
-        for i, cat in enumerate(ancestry_categories):
-            ancestry_dummies[:, i] = (data['ancestry'].values == cat).astype(float)
-
-        features = np.column_stack([age, sex, ancestry_dummies])
-        feature_names = (['age', 'sex']
-                         + [f'ancestry_{cat}' for cat in ancestry_categories])
-        return features, ancestry_categories, feature_names
+        """Encode the selected covariates using training ancestry categories."""
+        return encode_demographics(data, self.demographic_features, ancestry_categories)
 
     def _tune_c_cv(self, X, y, c_candidates, n_folds=5):
         """Tune C via stratified CV. Falls back to C=1.0 if too few samples."""
@@ -355,7 +344,7 @@ class DeepTCRDemographicsEvaluator:
         distributing the three independent outer-fold fits across machines.
         """
         if test_fold is None:
-            test_folds = range(n_folds)
+            test_folds = outer_test_folds(n_folds)
         else:
             if test_fold < 0 or test_fold >= n_folds:
                 raise ValueError(
@@ -534,7 +523,8 @@ class DeepTCRDemographicsEvaluator:
             tv_meta = meta_idx.loc[tv_specimen_names]
             test_meta = meta_idx.loc[test_specimen_names]
 
-            ancestry_cats = sorted(tv_meta['ancestry'].unique().tolist())
+            ancestry_cats = (sorted(tv_meta['ancestry'].unique().tolist())
+                             if 'ancestry' in self.demographic_features else [])
             X_tv_demo, _, demo_feature_names = self.featurize_demographics(
                 tv_meta, ancestry_categories=ancestry_cats)
             X_test_demo, _, _ = self.featurize_demographics(
@@ -717,6 +707,10 @@ if __name__ == '__main__':
     parser.add_argument('--ext_data_dir', type=str, default=None)
     parser.add_argument('--ext_file_template', type=str,
                         default='{participant_label}_TCRB.tsv')
+    parser.add_argument('--demographic_features', nargs='+', choices=['age', 'sex', 'ancestry'],
+                        default=['age', 'sex', 'ancestry'],
+                        help='Covariates to concatenate; Rawat has age and sex only.')
+    parser.add_argument('--file_suffix', default='.tsv.gz')
     args = parser.parse_args()
 
     evaluator = DeepTCRDemographicsEvaluator(
@@ -733,6 +727,7 @@ if __name__ == '__main__':
         device=args.device,
         results_dir=args.results_dir,
         n_cv_folds=args.n_cv_folds,
+        demographic_features=args.demographic_features,
         debug=args.debug,
         debug_repertoires=args.debug_repertoires,
     )
@@ -747,6 +742,7 @@ if __name__ == '__main__':
                 metadata_path=args.metadata_path,
                 target_disease=args.target_disease,
                 data_dir=args.repertoire_data_dir,
+                file_suffix=args.file_suffix,
                 adjust_distribution_by_demographics=True,
                 random_baseline=True,
                 random_baseline_seed=seed,
@@ -782,6 +778,7 @@ if __name__ == '__main__':
             metadata_path=args.metadata_path,
             target_disease=args.target_disease,
             data_dir=args.repertoire_data_dir,
+            file_suffix=args.file_suffix,
             adjust_distribution_by_demographics=args.adjust_distribution_by_demographics,
             ext_metadata_path=args.ext_metadata_path,
             ext_data_dir=args.ext_data_dir,
