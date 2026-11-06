@@ -34,7 +34,7 @@ as a git submodule at `models/Mal-ID-Lite`. Clone with submodules, or fetch it i
 existing clone:
 
 ```bash
-git clone --recurse-submodules <this repository>
+git clone --recurse-submodules https://github.com/boyd-lab/BenchRep-T.git
 # or, in an existing clone:
 git submodule update --init models/Mal-ID-Lite
 ```
@@ -313,7 +313,7 @@ The harmonized metadata tables use the following common columns:
 
 Preprocessed BenchRep-T repertoires and metadata are hosted on Hugging Face at:
 
-**[https://huggingface.co/datasets/neurips-2026-dataset/BenchRep-T](https://huggingface.co/datasets/neurips-2026-dataset/BenchRep-T)**
+**[https://huggingface.co/datasets/lordim/BenchRep-T](https://huggingface.co/datasets/lordim/BenchRep-T)**
 
 The downloaded dataset has this model-ready structure:
 
@@ -631,9 +631,22 @@ Other preprocessing utilities:
 - **Driver sequence matching** (`preprocessing/process_driver_sequences.py`) — matches VDJdb entries to benchmark repertoires via Levenshtein similarity.
 - **Demographic analysis** (`preprocessing/check_demographics.py`) — summarizes demographic completeness per disease.
 
-## Preprint
+## Citation
 
-Currently anonymized.
+BenchRep-T is described in our NeurIPS 2026 Evaluations and Datasets Track paper,
+also available as a [bioRxiv preprint](https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1):
 
+> Alejandro Buendia\*, Chiho Im\*, Anshul Kundaje, Scott D. Boyd, and Liel Cohen-Lavi.
+> BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics.
+> *NeurIPS 2026 Evaluations and Datasets Track.* (\*co-first authors)
+
+```bibtex
+@inproceedings{buendia2026benchrept,
+  title     = {{BenchRep-T}: A Systematic Evaluation of {T}-Cell Repertoire-Based Disease Diagnostics},
+  author    = {Buendia, Alejandro and Im, Chiho and Kundaje, Anshul and Boyd, Scott D. and Cohen-Lavi, Liel},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS), Evaluations and Datasets Track},
+  year      = {2026},
+  note      = {Alejandro Buendia and Chiho Im contributed equally. bioRxiv preprint},
+  url       = {https://www.biorxiv.org/content/10.64898/2026.06.09.727013v1}
+}
 ```
--->

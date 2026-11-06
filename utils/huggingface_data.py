@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-DEFAULT_REPO_ID = "neurips-2026-dataset/BenchRep-T"
+DEFAULT_REPO_ID = "lordim/BenchRep-T"
 
 
 @dataclass(frozen=True)
