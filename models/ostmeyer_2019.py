@@ -13,13 +13,39 @@ This module contains the core model for:
 - Predicting disease status for new patients
 """
 
+import multiprocessing
 import os
 import pickle
 import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
+from threadpoolctl import threadpool_limits
 from tqdm import tqdm
 from utils.repertoire_io import load_raw_repertoire
+
+
+# (model, training_data, labels) for restart workers. Set just before the pool
+# forks, so workers inherit the extracted features instead of unpickling them.
+_RESTART_CONTEXT = None
+_WORKER_THREAD_LIMIT = None
+
+
+def _limit_worker_threads():
+    # One BLAS thread per worker so n_workers processes use n_workers cores.
+    global _WORKER_THREAD_LIMIT
+    _WORKER_THREAD_LIMIT = threadpool_limits(1)
+
+
+def _fit_restart(x0):
+    model, training_data, labels = _RESTART_CONTEXT
+    result = minimize(
+        fun=lambda p: model._compute_loss_and_gradient(p, training_data, labels),
+        x0=x0,
+        method='L-BFGS-B',
+        jac=True,
+        options={'maxiter': model.lbfgsb_maxiter},
+    )
+    return result.fun, result.x
 
 
 # ATCHLEY FACTORS (Reference: Atchley et al., 2005)
@@ -78,7 +104,7 @@ class MIL_TCR_Classifier:
                  abundance_method='A',
                  sequence_col='cdr3_aa', min_cdr3_length=10,
                  subsample_fraction=1.0, subsample_seed=7, subsample_n=None,
-                 indices_map=None):
+                 indices_map=None, restart_seed=7, n_workers=1):
         """
         Initialize the model.
 
@@ -104,6 +130,10 @@ class MIL_TCR_Classifier:
                          subsample_fraction if set)
             indices_map: Dict mapping rep_id to pre-computed row indices (default: None).
                          When set, overrides subsample_n/fraction/seed.
+            restart_seed: Seed for the restart initializations (default: 7), so
+                          results do not depend on n_workers. None draws
+                          fresh entropy.
+            n_workers: Processes that fit restarts in parallel (default: 1).
         """
         self.n_restarts = n_restarts
         self.lbfgsb_maxiter = lbfgsb_maxiter
@@ -114,6 +144,8 @@ class MIL_TCR_Classifier:
         self.subsample_seed = subsample_seed
         self.subsample_n = subsample_n
         self.indices_map = indices_map
+        self.restart_seed = restart_seed
+        self.n_workers = n_workers
 
         self.atchley = ATCHLEY_FACTORS
 
@@ -432,27 +464,34 @@ class MIL_TCR_Classifier:
 
         print(f"Training on {len(training_data)} samples with {self.n_restarts} L-BFGS-B restarts...")
 
+        # Initialize per paper: W1-W20 and b0 ~ N(0, 1/n_features), W21 = 0.
+        # Drawing every restart up front makes the result independent of n_workers.
+        rng = np.random.default_rng(self.restart_seed)
+        initial_params = np.zeros((self.n_restarts, 22))
+        initial_params[:, :20] = rng.standard_normal((self.n_restarts, 20)) * (1.0 / n_features)
+        initial_params[:, 21] = rng.standard_normal(self.n_restarts) * (1.0 / n_features)
+
+        global _RESTART_CONTEXT
+        _RESTART_CONTEXT = (self, training_data, valid_labels)
+        try:
+            if self.n_workers > 1:
+                pool = multiprocessing.get_context('fork').Pool(
+                    self.n_workers, initializer=_limit_worker_threads)
+                with pool:
+                    fits = list(tqdm(pool.imap(_fit_restart, initial_params),
+                                     total=self.n_restarts, desc="Optimization restarts"))
+            else:
+                fits = [_fit_restart(x0) for x0 in tqdm(initial_params, desc="Optimization restarts")]
+        finally:
+            _RESTART_CONTEXT = None
+
+        # Restart order breaks ties, as in a serial loop.
         best_loss = np.inf
         best_params = None
-
-        for _ in tqdm(range(self.n_restarts), desc="Optimization restarts"):
-            # Initialize per paper: W1-W20 and b0 ~ N(0, 1/n_features), W21=0
-            params = np.zeros(22)
-            params[:20] = np.random.randn(20) * (1.0 / n_features)
-            params[20] = 0.0  # W21 (log-abundance weight) = 0
-            params[21] = np.random.randn() * (1.0 / n_features)  # b0
-
-            result = minimize(
-                fun=lambda p: self._compute_loss_and_gradient(p, training_data, valid_labels),
-                x0=params,
-                method='L-BFGS-B',
-                jac=True,
-                options={'maxiter': self.lbfgsb_maxiter},
-            )
-
-            if result.fun < best_loss:
-                best_loss = result.fun
-                best_params = result.x.copy()
+        for loss, params in fits:
+            if loss < best_loss:
+                best_loss = loss
+                best_params = params.copy()
 
         self.weights = best_params[:21]
         self.bias = best_params[21]
