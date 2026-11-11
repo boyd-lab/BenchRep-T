@@ -23,19 +23,24 @@ BenchRep-T defines four evaluation tasks:
 
 ![BenchRep-T evaluation tasks](assets/eval_tasks.png)
 
-1. **Disease classification** — binary disease vs control within each cohort,
-   cross-cohort transfer for T1D, and a pooled Mal-ID + Mitchell T1D split.
-   Metrics: AUROC, AUPR.
-2. **Sequencing-depth scaling** — reruns classification after downsampling every
-   Mal-ID repertoire to D ∈ {1k, 5k, 10k, 25k, 50k, 75k} sequences, with five
+1. **Disease classification** — Can a method tell patients from controls using
+   only their TCR repertoires? Each method is scored on binary disease vs
+   control within each cohort, on cross-cohort transfer for T1D, and on a
+   pooled Mal-ID + Mitchell T1D split. Metrics: AUROC, AUPR.
+2. **Sequencing-depth scaling** — How many sequences does a method need per
+   repertoire? Classification is rerun after downsampling every Mal-ID
+   repertoire to D ∈ {1k, 5k, 10k, 25k, 50k, 75k} sequences, with five
    replicates per depth.
-3. **Driver-sequence identification** — whether per-sequence scores recover
-   known antigen-specific TCRs (VDJdb, plus Minervina et al. for SARS-CoV-2),
-   matched at ≥90% Levenshtein similarity. Metric: recall@k for k ∈ {100, 1000,
-   10000}. Mal-ID HIV, Influenza, and COVID-19 only.
-4. **Demographic confounding** — compares demographic-matched controls against
-   random controls, and concatenates age, sex, and ancestry with each method's
-   repertoire features.
+3. **Driver-sequence identification** — Do the sequences a method ranks as most
+   disease-associated include TCRs known to recognize that disease's antigens?
+   Per-sequence scores are checked against known antigen-specific TCRs (VDJdb,
+   plus Minervina et al. for SARS-CoV-2), matched at ≥90% Levenshtein
+   similarity. Metric: recall@k for k ∈ {100, 1000, 10000}. Mal-ID HIV,
+   Influenza, and COVID-19 only.
+4. **Demographic confounding** — Is a method detecting disease, or differences in
+   age, sex, or ancestry between patients and controls? Performance against
+   demographic-matched controls is compared with random controls, and age, sex,
+   and ancestry are concatenated with each method's repertoire features.
 
 ## Setup
 
@@ -147,7 +152,16 @@ utils/                   Repertoire I/O, metrics, cohort merging, gene harmoniza
 
 Each task has one runner in `examples/`. Runners download the data they need,
 stage symlinked inputs under `results/` (downloaded files are never modified),
-and run every method in its own Conda environment.
+and run every method in its own Conda environment. To run the full benchmark,
+run all four in sequence. Disease classification goes first, because driver
+identification reuses its saved models:
+
+```bash
+OUTPUT_ROOT=results/disease bash examples/run_all_disease_classification.sh
+DISEASE_RUN_ROOT=results/disease bash examples/run_all_driver_identification.sh
+bash examples/run_all_depth_scaling.sh
+bash examples/run_all_demographic_analysis.sh
+```
 
 | Runner | Default scope |
 |--------|---------------|
@@ -178,14 +192,9 @@ Notes on specific runners:
   transfer, which trains on one cohort and tests on another, is a separate
   protocol in `evals/zeroshot_disease_classification.py`.
 - **Driver identification.** Ensemble XGBoost only scores sequences with models
-  saved by disease classification, so point it at that run:
-
-  ```bash
-  OUTPUT_ROOT=results/disease bash examples/run_all_disease_classification.sh
-  DISEASE_RUN_ROOT=results/disease bash examples/run_all_driver_identification.sh
-  ```
-
-  The other methods reuse those checkpoints when present and train their own otherwise.
+  saved by disease classification, so it needs `DISEASE_RUN_ROOT`, as in the
+  full-benchmark commands above; without it, XGBoost is skipped. The other
+  methods reuse those checkpoints when present and train their own otherwise.
 - **Depth scaling.** Subsampling uses the published indices file, so every user
   draws the same rows. Draws are nested (each depth's sequences are a subset of
   the next depth's), and specimens with fewer than 75k unique sequences are
@@ -209,6 +218,13 @@ immunoSEQ adapters (`external_data_process/`) convert Adaptive column and gene
 names to AIRR/IMGT form, strip alleles, trim the conserved flanking C and F from
 each CDR3, and drop specimens with fewer than 1,000 unique sequences where the
 cohort protocol requires it.
+
+The Mal-ID cleaning pipeline is documented step by step in
+[`CLEAN_TCR_DATA.md`](preprocessing/CLEAN_TCR_DATA.md) (cleanup and filtering),
+[`CLEAN_TCR_DATA_TO_AIRR.md`](preprocessing/CLEAN_TCR_DATA_TO_AIRR.md)
+(conversion to AIRR columns), and
+[`CLEAN_AIRR_SPLIT_BY_SPECIMEN.md`](preprocessing/CLEAN_AIRR_SPLIT_BY_SPECIMEN.md)
+(splitting into per-specimen files).
 
 ## Citation
 
