@@ -6,8 +6,8 @@ support diagnosing many diseases from a single blood sample. Many methods have b
 **BenchRep-T** is a unified benchmark for TCRβ repertoire-based disease
 classification. It harmonizes cohorts from Zaslavsky et al. (Mal-ID), Mitchell
 et al., Rawat et al., Musvosvi et al., Savola et al., and Emerson et al. into a
-single AIRR-compliant schema, and evaluates statistical, feature-engineered,
-clustering, and deep-learning methods on identical inputs and fixed 3-fold
+single AIRR-compliant schema, and evaluates statistical, ensemble, clustering,
+and deep-learning methods on identical inputs and fixed 3-fold
 cross-validation splits.
 
 | Cohort | Prediction task | Repertoires | Class composition |
@@ -131,8 +131,8 @@ Repertoires are gzip-compressed AIRR TSVs with `cdr3_aa`, `v_call` (IMGT, e.g.
 |--------|--------|----------|
 | Emerson et al. 2017 | Statistical | Fisher's exact test for disease-associated CDR3s, scored with a Beta-Binomial model |
 | Ostmeyer et al. 2019 | Statistical | Multiple-instance learning over Atchley-encoded CDR3 4-mers |
-| Ensemble Regression | Engineered features | L1 logistic regressions on V/J usage and gapped 4-mers, linearly combined |
-| Ensemble XGBoost | Engineered features | The same features with gradient-boosted trees |
+| Ensemble Regression | Ensemble | L1 logistic regressions on V/J usage and gapped 4-mers, linearly combined |
+| Ensemble XGBoost | Ensemble | The same features with gradient-boosted trees |
 | GIANA (Zhang et al. 2021) | Clustering | Isometric CDR3 encoding and clustering; scores by cluster disease fraction |
 | ABMIL | Deep learning | CNN sequence encoder with gated-attention pooling |
 | DeepRC (Widrich et al. 2020) | Deep learning | CNN embeddings with Hopfield attention over up to ~10⁵ sequences |
