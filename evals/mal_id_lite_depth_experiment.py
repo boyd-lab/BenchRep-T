@@ -84,7 +84,7 @@ from evals.sequencing_depth_experiment import (
 from evals.mal_id_lite_disease_classification import (
     load_metadata, consolidate_participant_files, build_cache_if_missing,
     run_training, convert_to_standard_scores,
-    HEALTHY_LABEL, _rename_for_staging,
+    HEALTHY_LABEL, MAL_ID_LITE_ROOT, _rename_for_staging,
 )
 from utils.repertoire_io import load_raw_repertoire
 
@@ -328,6 +328,11 @@ def run_depth_experiment(
     per-disease time, since that work is no longer done separately per
     disease.
     """
+    if not (MAL_ID_LITE_ROOT / "malid_lite").is_dir():
+        raise FileNotFoundError(
+            f"Mal-ID-Lite not found at {MAL_ID_LITE_ROOT}. Fetch the submodule with "
+            f"`git submodule update --init models/Mal-ID-Lite` (README, Setup)."
+        )
     print(f"Loading depth indices from: {depth_indices_path}")
     index_data = load_depth_indices(depth_indices_path)
     depths = index_data["depths"]
