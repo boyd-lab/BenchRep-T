@@ -1,9 +1,11 @@
 """
 Driver sequence identification for the Ensemble XGBoost model.
 
-Loads per-fold models saved by ensemble_xgboost_disease_classification.py
-(--model_save_dir) and scores each CDR3 in the test repertoires using the
-trained XGBoost models directly on per-sequence feature vectors.
+For each outer fold, loads the model saved by
+ensemble_xgboost_disease_classification.py (--model_save_dir) when one exists,
+and otherwise trains one on that fold's training split with the same settings
+as the disease-classification evaluator. Each CDR3 in the test repertoires is
+then scored by the trained XGBoost models on per-sequence feature vectors.
 
 Mirrors ensemble_regression_driver_identification.py but uses XGBoost
 probabilities instead of logistic-regression decision-function scores.
@@ -16,19 +18,28 @@ import pandas as pd
 from tqdm import tqdm
 
 from models.ensemble_xgboost import XGBoostKmer
-from utils.repertoire_io import load_raw_repertoire
+from evals.ensemble_xgboost_disease_classification import EnsembleXGBoostEvaluator
+from utils.outer_fold import outer_test_folds, split_metadata
 
 
 class EnsembleXGBoostDriverEvaluator:
 
     HEALTHY_LABEL = "Healthy/Background"
 
-    def __init__(self, model_save_dir, sequence_col='cdr3_aa',
-                 v_gene_col='v_call', j_gene_col='j_call'):
+    def __init__(self, model_save_dir=None, sequence_col='cdr3_aa',
+                 v_gene_col='v_call', j_gene_col='j_call',
+                 val_split=0.2, n_cv_folds=3, n_jobs=None, xgb_device='cpu'):
         self.model_save_dir = model_save_dir
         self.sequence_col = sequence_col
         self.v_gene_col = v_gene_col
         self.j_gene_col = j_gene_col
+        # Builds models exactly as disease classification does when no saved
+        # model is available for a fold.
+        self._trainer = EnsembleXGBoostEvaluator(
+            val_split=val_split, n_cv_folds=n_cv_folds,
+            sequence_col=sequence_col, v_gene_col=v_gene_col,
+            j_gene_col=j_gene_col, n_jobs=n_jobs, xgb_device=xgb_device,
+        )
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -118,6 +129,7 @@ class EnsembleXGBoostDriverEvaluator:
                 healthy_label=self.HEALTHY_LABEL,
                 fold_col=fold_col, disease_col=disease_col,
             )
+            self._trainer.canonicalize_genes = True
 
         if allowed_participants is not None:
             before = len(metadata)
@@ -134,27 +146,28 @@ class EnsembleXGBoostDriverEvaluator:
         all_results = []
         fold_summaries = []
 
-        for test_fold in range(n_folds):
+        for test_fold in outer_test_folds(n_folds):
             print(f"\n{'=' * 60}")
             print(f"FOLD {test_fold}")
             print(f"{'=' * 60}")
 
-            fold_dir = os.path.join(self.model_save_dir, target_disease,
-                                    f'fold{test_fold}')
-            if not os.path.isdir(fold_dir):
-                print(f"  WARNING: no saved model at {fold_dir}; skipping fold.")
-                fold_summaries.append({
-                    'fold': test_fold, 'n_repertoires': 0,
-                    **{f'mean_precision_at_{k}': float('nan') for k in ks},
-                    **{f'mean_recall_at_{k}': float('nan') for k in ks},
-                })
-                continue
+            train_data, test_data = split_metadata(metadata, fold_col, test_fold)
+            print(f"  Train: {len(train_data)}, Test: {len(test_data)}")
 
-            print(f"  Loading model from {fold_dir} ...")
-            model = XGBoostKmer.load(fold_dir)
-
-            test_data = metadata[metadata[fold_col] == test_fold]
-            print(f"  Test specimens: {len(test_data)}")
+            fold_dir = (os.path.join(self.model_save_dir, target_disease,
+                                     f'fold{test_fold}')
+                        if self.model_save_dir else None)
+            if fold_dir and os.path.isdir(fold_dir):
+                print(f"  Loading model from {fold_dir} ...")
+                model = XGBoostKmer.load(fold_dir)
+            else:
+                if fold_dir:
+                    print(f"  No saved model at {fold_dir}; training one.")
+                model = self._trainer._make_model()
+                train_result = model.train(train_data['file_path'].tolist(),
+                                           train_data['label'].tolist())
+                print(f"  alpha={train_result['best_alpha']:.1f}, "
+                      f"val AUROC={train_result['val_auroc']:.4f}")
 
             fold_precisions = {k: [] for k in ks}
             fold_recalls = {k: [] for k in ks}
@@ -269,9 +282,14 @@ if __name__ == '__main__':
                              '(columns: disease, filename, sample_cdr3)')
     parser.add_argument('--k', type=str, required=True,
                         help='Comma-separated k values, e.g. 100,1000,10000')
-    parser.add_argument('--model_save_dir', type=str, required=True,
-                        help='Directory written by --model_save_dir in '
-                             'ensemble_xgboost_disease_classification.py')
+    parser.add_argument('--model_save_dir', type=str, default=None,
+                        help='Optional directory written by --model_save_dir in '
+                             'ensemble_xgboost_disease_classification.py. Folds '
+                             'with a saved model load it; the rest are trained here.')
+    parser.add_argument('--val_split', type=float, default=0.2)
+    parser.add_argument('--n_jobs', type=int, default=None)
+    parser.add_argument('--xgb_device', type=str, default='cpu',
+                        choices=['cpu', 'cuda'])
     parser.add_argument('--output_csv', type=str, default=None)
     parser.add_argument('--n_cv_folds', type=int, default=3)
     parser.add_argument('--max_repertoires', type=int, default=None,
@@ -288,6 +306,10 @@ if __name__ == '__main__':
 
     evaluator = EnsembleXGBoostDriverEvaluator(
         model_save_dir=args.model_save_dir,
+        val_split=args.val_split,
+        n_cv_folds=args.n_cv_folds,
+        n_jobs=args.n_jobs,
+        xgb_device=args.xgb_device,
     )
 
     evaluator.run_cross_validation(

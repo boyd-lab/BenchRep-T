@@ -8,17 +8,16 @@ set -euo pipefail
 # downloaded Hugging Face tree; staging creates only normalized metadata and
 # symlinks. Run from any directory.
 #
-# Ensemble XGBoost only scores CDR3s with the models written by disease
-# classification and never fits here, so it needs DISEASE_RUN_ROOT: the
-# OUTPUT_ROOT of an earlier run_all_disease_classification.sh run.
+# Every method runs self-contained. Optionally, set DISEASE_RUN_ROOT to the
+# OUTPUT_ROOT of an earlier run_all_disease_classification.sh run to reuse its
+# saved models instead of refitting:
 #
 #   OUTPUT_ROOT=results/disease bash examples/run_all_disease_classification.sh
 #   DISEASE_RUN_ROOT=results/disease bash examples/run_all_driver_identification.sh
 #
-# ABMIL, DeepRC, and GIANA reuse that run's checkpoints and cluster files when
-# they are present, and otherwise fit their own. Emerson and Ensemble Regression
-# always refit. Without DISEASE_RUN_ROOT every method except Ensemble XGBoost
-# runs self-contained, and Ensemble XGBoost is reported as skipped.
+# Ensemble XGBoost, ABMIL, DeepRC, and GIANA reuse those models and cluster
+# files when present and otherwise fit their own. Emerson and Ensemble
+# Regression always refit.
 
 ROOT="${BENCHREP_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 DATA_ROOT="${DATA_ROOT:-${ROOT}/data}"
@@ -33,6 +32,7 @@ DOWNLOAD_DATA="${DOWNLOAD_DATA:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 USE_GPU="${USE_GPU:-1}"
 N_THREADS="${N_THREADS:-8}"
+N_JOBS="${N_JOBS:-8}"
 K="${K:-100,1000,10000}"
 MAX_REPERTOIRES="${MAX_REPERTOIRES:-}"
 DISEASE_RUN_ROOT="${DISEASE_RUN_ROOT:-}"
@@ -170,21 +170,11 @@ if [[ "${RANDOM_BASELINE}" == "1" ]]; then
 fi
 
 run_count=0
-skip_count=0
 for disease in "${DISEASE_LIST[@]}"; do
   disease_tag=${disease// /_}
   for method in ${METHODS}; do
     method_root="${OUTPUT_ROOT}/${COHORT}/${disease_tag}/${method}"
     checkpoint=$(reuse_dir "${method}" "${disease_tag}")
-
-    if [[ "${method}" == "ensemble_xgboost" && -z "${checkpoint}" ]]; then
-      echo "SKIP ${disease} / ${method}: this method only scores with the models" \
-        "saved by examples/run_all_disease_classification.sh. Run it first, then" \
-        "set DISEASE_RUN_ROOT to its OUTPUT_ROOT with REUSE_CHECKPOINTS=1" \
-        "(expected ${DISEASE_RUN_ROOT:-<DISEASE_RUN_ROOT>}/${COHORT}/${disease_tag}/${method}/models)." >&2
-      skip_count=$((skip_count + 1))
-      continue
-    fi
 
     mapfile -t launcher < <(python_command "${method}")
     command=()
@@ -205,7 +195,11 @@ for disease in "${DISEASE_LIST[@]}"; do
       emerson|ensemble_regression)
         command+=(--k "${K_LIST[@]}")
         ;;
-      ensemble_xgboost|abmil)
+      ensemble_xgboost)
+        command+=(--k "${K}" --n_jobs "${N_JOBS}")
+        [[ "${USE_GPU}" == "1" ]] && command+=(--xgb_device cuda)
+        ;;
+      abmil)
         command+=(--k "${K}")
         ;;
       deeprc)
@@ -244,6 +238,3 @@ for disease in "${DISEASE_LIST[@]}"; do
 done
 
 echo "Prepared ${run_count} driver-identification runs under ${OUTPUT_ROOT}"
-if [[ "${skip_count}" -gt 0 ]]; then
-  echo "Skipped ${skip_count} runs that require saved disease-classification models"
-fi

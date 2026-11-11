@@ -153,8 +153,8 @@ utils/                   Repertoire I/O, metrics, cohort merging, gene harmoniza
 Each task has one runner in `examples/`. Runners download the data they need,
 stage symlinked inputs under `results/` (downloaded files are never modified),
 and run every method in its own Conda environment. To run the full benchmark,
-run all four in sequence. Disease classification goes first, because driver
-identification reuses its saved models:
+run all four in sequence. Passing the disease-classification output to driver
+identification lets it reuse those models instead of retraining:
 
 ```bash
 OUTPUT_ROOT=results/disease bash examples/run_all_disease_classification.sh
@@ -191,10 +191,10 @@ Notes on specific runners:
   `--ext_metadata_path`, `--ext_data_dir`, and `--ext_file_template`. Cross-cohort
   transfer, which trains on one cohort and tests on another, is a separate
   protocol in `evals/zeroshot_disease_classification.py`.
-- **Driver identification.** Ensemble XGBoost only scores sequences with models
-  saved by disease classification, so it needs `DISEASE_RUN_ROOT`, as in the
-  full-benchmark commands above; without it, XGBoost is skipped. The other
-  methods reuse those checkpoints when present and train their own otherwise.
+- **Driver identification.** Every method runs on its own. With
+  `DISEASE_RUN_ROOT` set, Ensemble XGBoost, ABMIL, DeepRC, and GIANA reuse the
+  saved disease-classification models when present and train their own
+  otherwise; Emerson and Ensemble Regression always retrain.
 - **Depth scaling.** Subsampling uses the published indices file, so every user
   draws the same rows. Draws are nested (each depth's sequences are a subset of
   the next depth's), and specimens with fewer than 75k unique sequences are
