@@ -1,11 +1,14 @@
 # BenchRep-T: A Systematic Evaluation of T-Cell Repertoire-Based Disease Diagnostics
 
-A unified benchmark for TCRβ repertoire-based disease classification. BenchRep-T
-harmonizes cohorts from Zaslavsky et al. (Mal-ID), Mitchell et al., Rawat et al.,
-Musvosvi et al., Savola et al., and Emerson et al. into a single AIRR-compliant
-schema, and evaluates statistical, feature-engineered, clustering, and
-deep-learning methods on identical inputs and fixed 3-fold cross-validation
-splits.
+A person's T-cell receptor (TCR) repertoire records their immune history and can 
+support diagnosing many diseases from a single blood sample. Many methods have been proposed for TCR repertoire-based diagnosis, but each was evaluated on different cohorts, preprocessing, and splits, which makes them hard to compare.
+
+**BenchRep-T** is a unified benchmark for TCRβ repertoire-based disease
+classification. It harmonizes cohorts from Zaslavsky et al. (Mal-ID), Mitchell
+et al., Rawat et al., Musvosvi et al., Savola et al., and Emerson et al. into a
+single AIRR-compliant schema, and evaluates statistical, feature-engineered,
+clustering, and deep-learning methods on identical inputs and fixed 3-fold
+cross-validation splits.
 
 | Cohort | Prediction task | Repertoires | Class composition |
 |--------|-----------------|------------:|-------------------|
@@ -18,16 +21,18 @@ splits.
 
 BenchRep-T defines four evaluation tasks:
 
+![BenchRep-T evaluation tasks](assets/eval_tasks.png)
+
 1. **Disease classification** — binary disease vs control within each cohort,
    cross-cohort transfer for T1D, and a pooled Mal-ID + Mitchell T1D split.
    Metrics: AUROC, AUPR.
-2. **Driver-sequence identification** — whether per-sequence scores recover
+2. **Sequencing-depth scaling** — reruns classification after downsampling every
+   Mal-ID repertoire to D ∈ {1k, 5k, 10k, 25k, 50k, 75k} sequences, with five
+   replicates per depth.
+3. **Driver-sequence identification** — whether per-sequence scores recover
    known antigen-specific TCRs (VDJdb, plus Minervina et al. for SARS-CoV-2),
    matched at ≥90% Levenshtein similarity. Metric: recall@k for k ∈ {100, 1000,
    10000}. Mal-ID HIV, Influenza, and COVID-19 only.
-3. **Sequencing-depth scaling** — reruns classification after downsampling every
-   Mal-ID repertoire to D ∈ {1k, 5k, 10k, 25k, 50k, 75k} sequences, with five
-   replicates per depth.
 4. **Demographic confounding** — compares demographic-matched controls against
    random controls, and concatenates age, sex, and ancestry with each method's
    repertoire features.
